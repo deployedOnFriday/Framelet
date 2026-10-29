@@ -39,9 +39,11 @@ class _PlayerPageState extends State<PlayerPage> {
     super.initState();
     _positionSub = _player.stream.position.listen((position) {
       _positionSec = position.inMilliseconds / 1000;
+      if (mounted) setState(() {});
     });
     _durationSub = _player.stream.duration.listen((duration) {
       _durationSec = duration.inMilliseconds / 1000;
+      if (mounted) setState(() {});
       final start = widget.startPosition ?? 0;
       if (!_seekedToStart && _durationSec > 0 && start > 1) {
         _seekedToStart = true;
@@ -74,6 +76,18 @@ class _PlayerPageState extends State<PlayerPage> {
     final url = WebDavService.playUrl(source, widget.video.path);
     debugPrint('[Player] 播放地址: $url');
     _probe(url, WebDavService.authHeader(source.username, password));
+
+    // 关键：libmpv 会读取系统环境变量 http_proxy/https_proxy 走代理，
+    // 而本机 1501 代理不放行媒体服务器——必须显式禁用。
+    final platform = _player.platform;
+    if (platform is NativePlayer) {
+      try {
+        await platform.setProperty('http-proxy', '');
+      } catch (error) {
+        debugPrint('[Player] 禁用 mpv 代理失败: $error');
+      }
+    }
+
     try {
       await _player.open(
         Media(
@@ -114,8 +128,12 @@ class _PlayerPageState extends State<PlayerPage> {
       if (mounted) {
         setState(() => _probeResult = detail);
       }
-      await response.drain<void>();
-      client.close();
+      // 只关心响应头，绝不把整个视频流读进内存。
+      try {
+        final socket = await response.detachSocket();
+        socket.destroy();
+      } catch (_) {}
+      client.close(force: true);
     } catch (error) {
       debugPrint('[Player] 自检失败: $error');
       if (mounted) {
@@ -160,9 +178,37 @@ class _PlayerPageState extends State<PlayerPage> {
           Positioned.fill(
             child: Video(
               controller: _controller,
-              controls: MaterialDesktopVideoControls,
+              // 视频尚未就绪时不渲染控制条，避免其布局在零尺寸下溢出报错。
+              controls: (state) => _durationSec > 0
+                  ? MaterialDesktopVideoControls(state)
+                  : const SizedBox.shrink(),
             ),
           ),
+          if (_durationSec <= 0)
+            const Positioned.fill(
+              child: IgnorePointer(
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 34,
+                        height: 34,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.6,
+                          color: Colors.white54,
+                        ),
+                      ),
+                      SizedBox(height: 16),
+                      Text(
+                        '正在打开视频…',
+                        style: TextStyle(color: Colors.white54, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           if (_errorMessage != null)
             Positioned.fill(
               child: Center(
@@ -260,6 +306,17 @@ class _PlayerPageState extends State<PlayerPage> {
               ),
             ),
           ),
+          // 调试信息（排障用，定位后移除）
+          Positioned(
+            right: 12,
+            bottom: 12,
+            child: _DebugPanel(
+              probe: _probeResult,
+              position: _positionSec,
+              duration: _durationSec,
+              error: _errorMessage,
+            ),
+          ),
         ],
       ),
     );
@@ -283,6 +340,58 @@ class _BackButton extends StatelessWidget {
           padding: EdgeInsets.all(8),
           child: Icon(Icons.arrow_back_rounded, color: Colors.white, size: 22),
         ),
+      ),
+    );
+  }
+}
+
+/// 排障用的实时状态面板：显示地址自检、播放进度与错误。
+class _DebugPanel extends StatelessWidget {
+  const _DebugPanel({
+    required this.probe,
+    required this.position,
+    required this.duration,
+    required this.error,
+  });
+
+  final String? probe;
+  final double position;
+  final double duration;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 420),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white24),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '自检: ${probe ?? '探测中…'}',
+            style: const TextStyle(color: Colors.amberAccent, fontSize: 11),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '播放: ${position.toStringAsFixed(1)}s / ${duration.toStringAsFixed(1)}s',
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+          if (error != null) ...[
+            const SizedBox(height: 4),
+            Text(
+              '错误: $error',
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.redAccent, fontSize: 11),
+            ),
+          ],
+        ],
       ),
     );
   }
