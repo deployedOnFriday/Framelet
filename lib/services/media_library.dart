@@ -137,6 +137,20 @@ class MediaLibrary extends ChangeNotifier {
       for (final source in _sources) {
         final password = await _store.readPassword(source.id);
         if (password != null) _passwords[source.id] = password;
+        final videosRaw = await _store.read('framelet.videos.${source.id}');
+        if (videosRaw != null && videosRaw.isNotEmpty) {
+          try {
+            _videosBySource[source.id] =
+                (jsonDecode(videosRaw) as List<Object?>)
+                    .map(
+                      (item) =>
+                          ScannedVideo.fromJson(item! as Map<String, Object?>),
+                    )
+                    .toList();
+          } catch (_) {
+            // 扫描缓存损坏时留空，用户手动同步即可。
+          }
+        }
       }
       notifyListeners();
     } catch (_) {
@@ -147,6 +161,18 @@ class MediaLibrary extends ChangeNotifier {
   Future<void> _persistSources() async {
     final json = jsonEncode(_sources.map((source) => source.toJson()).toList());
     await _store.writeSources(json);
+  }
+
+  Future<void> _persistVideos(String sourceId) async {
+    final videos = _videosBySource[sourceId];
+    if (videos == null || videos.isEmpty) {
+      await _store.delete('framelet.videos.$sourceId');
+      return;
+    }
+    await _store.write(
+      'framelet.videos.$sourceId',
+      jsonEncode(videos.map((video) => video.toJson()).toList()),
+    );
   }
 
   /// 新增或更新媒体源。password 为空表示沿用已保存的密码。
@@ -171,6 +197,7 @@ class MediaLibrary extends ChangeNotifier {
     _sourceErrors.remove(id);
     _passwords.remove(id);
     await _store.deletePassword(id);
+    await _store.delete('framelet.videos.$id');
     await _persistSources();
     notifyListeners();
   }
@@ -225,6 +252,7 @@ class MediaLibrary extends ChangeNotifier {
       scanStatus = ScanStatus.done;
       scanProgress = '扫描完成，共发现 ${videos.length} 个视频';
       await _persistSources();
+      await _persistVideos(sourceId);
     } catch (error) {
       _sourceErrors[sourceId] = describeError(error);
       final index = _sources.indexWhere((item) => item.id == sourceId);

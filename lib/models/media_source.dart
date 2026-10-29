@@ -89,6 +89,28 @@ class ScannedVideo {
   final int sizeBytes;
   final DateTime? modified;
 
+  Map<String, Object?> toJson() => {
+    'sourceId': sourceId,
+    'path': path,
+    'title': title,
+    'kind': kind.index,
+    'episodeCount': episodeCount,
+    'sizeBytes': sizeBytes,
+    'modified': modified?.millisecondsSinceEpoch,
+  };
+
+  factory ScannedVideo.fromJson(Map<String, Object?> json) => ScannedVideo(
+    sourceId: json['sourceId']! as String,
+    path: json['path']! as String,
+    title: json['title']! as String,
+    kind: MediaKind.values[json['kind']! as int],
+    episodeCount: json['episodeCount'] as int? ?? 1,
+    sizeBytes: json['sizeBytes'] as int? ?? 0,
+    modified: json['modified'] == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(json['modified']! as int),
+  );
+
   ScannedVideo copyWith({String? title, int? episodeCount}) => ScannedVideo(
     sourceId: sourceId,
     path: path,

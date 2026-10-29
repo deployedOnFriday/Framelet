@@ -25,10 +25,12 @@ class _PlayerPageState extends State<PlayerPage> {
   late final VideoController _controller = VideoController(_player);
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<Duration>? _durationSub;
+  StreamSubscription<String>? _errorSub;
   bool _seekedToStart = false;
   bool _saved = false;
   double _positionSec = 0;
   double _durationSec = 0;
+  String? _errorMessage;
 
   @override
   void initState() {
@@ -44,6 +46,11 @@ class _PlayerPageState extends State<PlayerPage> {
         // 从上次进度继续，稍微回退 3 秒帮助衔接剧情
         final target = (start - 3).clamp(0.0, _durationSec - 5);
         _player.seek(Duration(milliseconds: (target * 1000).round()));
+      }
+    });
+    _errorSub = _player.stream.error.listen((error) {
+      if (mounted && _errorMessage == null) {
+        setState(() => _errorMessage = error);
       }
     });
     _open();
@@ -63,14 +70,24 @@ class _PlayerPageState extends State<PlayerPage> {
       return;
     }
     final url = WebDavService.playUrl(source, widget.video.path);
-    await _player.open(
-      Media(
-        url.toString(),
-        httpHeaders: {
-          'Authorization': WebDavService.authHeader(source.username, password),
-        },
-      ),
-    );
+    debugPrint('[Player] 播放地址: $url');
+    try {
+      await _player.open(
+        Media(
+          url.toString(),
+          httpHeaders: {
+            'Authorization': WebDavService.authHeader(
+              source.username,
+              password,
+            ),
+          },
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() => _errorMessage = MediaLibrary.describeError(error));
+      }
+    }
   }
 
   @override
@@ -78,6 +95,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _saveProgress();
     _positionSub?.cancel();
     _durationSub?.cancel();
+    _errorSub?.cancel();
     _player.dispose();
     super.dispose();
   }
@@ -111,6 +129,55 @@ class _PlayerPageState extends State<PlayerPage> {
               controls: MaterialDesktopVideoControls,
             ),
           ),
+          if (_errorMessage != null)
+            Positioned.fill(
+              child: Center(
+                child: Container(
+                  constraints: const BoxConstraints(maxWidth: 560),
+                  margin: const EdgeInsets.symmetric(horizontal: 40),
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.black87,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.error_outline_rounded,
+                        color: Colors.redAccent,
+                        size: 40,
+                      ),
+                      const SizedBox(height: 14),
+                      const Text(
+                        '播放失败',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        _errorMessage!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          height: 1.6,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        '请检查媒体源密码是否变更，或稍后重试',
+                        style: TextStyle(color: Colors.white38, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(12),
