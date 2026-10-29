@@ -54,12 +54,12 @@ class WebDavService {
     String password,
   ) async {
     final client = _client(source, password);
-    try {
-      await client.ping();
-      await client.readDir(source.directory.isEmpty ? '/' : source.directory);
-    } finally {
-      // webdav_client 无需显式关闭连接，这里留空便于后续清理扩展。
-    }
+    final directory = source.directory.trim().isEmpty
+        ? '/'
+        : source.directory.trim();
+    // 直接对媒体目录做 PROPFIND：同时验证连通性与认证，
+    // 兼容「地址填主机、媒体目录填 /dav」的网盘填法。
+    await client.readDir(directory);
   }
 
   /// 递归扫描视频文件，返回扁平列表。
@@ -72,7 +72,9 @@ class WebDavService {
   }) async {
     final client = _client(source, password);
     final videos = <ScannedVideo>[];
-    final root = source.directory.isEmpty ? '/' : source.directory;
+    final root = source.directory.trim().isEmpty
+        ? '/'
+        : source.directory.trim();
     final visited = <String>{};
 
     // 队列元素：目录路径、已确定分类（null=待定）、当前深度

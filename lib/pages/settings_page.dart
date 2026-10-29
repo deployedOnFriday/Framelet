@@ -464,12 +464,16 @@ class _WebDavSourceDialogState extends State<WebDavSourceDialog> {
                 _field(
                   _addressController,
                   '服务器地址',
-                  'http://example.com:5244/dav',
+                  'http://192.168.1.10:5244',
                   key: const ValueKey('source-address'),
                   validator: _validateAddress,
                 ),
                 const SizedBox(height: 14),
-                _field(_directoryController, '媒体目录', '/'),
+                _field(
+                  _directoryController,
+                  '媒体目录',
+                  'openlist / alist 网盘填 /dav',
+                ),
                 const SizedBox(height: 14),
                 _field(_usernameController, '用户名', 'WebDAV 用户名'),
                 const SizedBox(height: 14),
