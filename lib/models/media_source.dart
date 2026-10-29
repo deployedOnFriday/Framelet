@@ -131,6 +131,7 @@ class ScannedVideo {
 
   ScannedVideo copyWith({
     String? title,
+    MediaKind? kind,
     int? episodeCount,
     String? posterPath,
     String? summary,
@@ -139,7 +140,7 @@ class ScannedVideo {
     sourceId: sourceId,
     path: path,
     title: title ?? this.title,
-    kind: kind,
+    kind: kind ?? this.kind,
     episodeCount: episodeCount ?? this.episodeCount,
     sizeBytes: sizeBytes,
     modified: modified,

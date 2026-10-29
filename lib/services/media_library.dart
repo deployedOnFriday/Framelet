@@ -168,9 +168,32 @@ class MediaLibrary extends ChangeNotifier {
         }
       }
       notifyListeners();
+      await _migrateKinds();
     } catch (_) {
       // 配置损坏时宁可重新添加，也不让应用崩溃。
     }
+  }
+
+  /// 旧版本扫描把带集数标记的剧集误判为电影，这里按文件名自动修正并回写。
+  Future<void> _migrateKinds() async {
+    var anyChanged = false;
+    for (final entry in _videosBySource.entries) {
+      final videos = entry.value;
+      var changed = false;
+      for (var i = 0; i < videos.length; i++) {
+        final video = videos[i];
+        if (video.kind == MediaKind.movie &&
+            WebDavService.looksLikeEpisode(video.title)) {
+          videos[i] = video.copyWith(kind: MediaKind.series);
+          changed = true;
+        }
+      }
+      if (changed) {
+        anyChanged = true;
+        await _persistVideos(entry.key);
+      }
+    }
+    if (anyChanged) notifyListeners();
   }
 
   /// 读取刮削设置并注入到刮削服务。
@@ -332,11 +355,13 @@ class MediaLibrary extends ChangeNotifier {
           <({ScannedVideo representative, List<ScannedVideo> group})>[];
       for (final entry in _videosBySource.entries) {
         final videos = entry.value;
-        for (final video in videos.where((v) => v.kind == MediaKind.movie)) {
-          jobs.add((representative: video, group: [video]));
-        }
         final grouped = <String, List<ScannedVideo>>{};
-        for (final video in videos.where((v) => v.kind != MediaKind.movie)) {
+        for (final video in videos) {
+          // 与展示聚合保持一致：带集数标记的按文件夹成组，其余单条
+          if (!WebDavService.looksLikeEpisode(video.title)) {
+            jobs.add((representative: video, group: [video]));
+            continue;
+          }
           grouped.putIfAbsent(parentPathOf(video.path), () => []).add(video);
         }
         for (final group in grouped.values) {
@@ -446,39 +471,106 @@ class MediaLibrary extends ChangeNotifier {
     return '连接失败：$text';
   }
 
-  /// 把扫描出的文件聚合成展示条目：
-  /// 剧集/动漫/综艺按父目录合并成一条并统计集数，电影按文件单列。
+  /// 把扫描出的文件聚合成展示条目。
+  ///
+  /// 规则：**按文件夹聚合**——同一目录下带集数标记的文件（S01E13/E13/第13集）
+  /// 合并为一条剧集条目并统计集数；无集数标记的按单文件展示（电影）。
   static List<ScannedVideo> aggregate(List<ScannedVideo> videos) {
-    final movies = <ScannedVideo>[];
-    final grouped = <String, List<ScannedVideo>>{};
-
+    final byFolder = <String, List<ScannedVideo>>{};
     for (final video in videos) {
-      if (video.kind == MediaKind.movie) {
-        movies.add(video);
+      byFolder.putIfAbsent(parentPathOf(video.path), () => []).add(video);
+    }
+
+    final result = <ScannedVideo>[];
+    for (final entry in byFolder.entries) {
+      final group = entry.value
+        ..sort((a, b) => _naturalCompare(a.path, b.path));
+      if (group.length < 2 || !_isSeriesGroup(group)) {
+        result.addAll(group);
         continue;
       }
-      final parent = parentPathOf(video.path);
-      grouped.putIfAbsent(parent, () => []).add(video);
-    }
-
-    final result = movies;
-    for (final entry in grouped.entries) {
-      final group = entry.value..sort((a, b) => a.path.compareTo(b.path));
       final folderName = _lastSegment(entry.key);
-      final isSeriesFolder =
-          group.length > 1 || _looksLikeEpisode(group.first.title);
-      if (isSeriesFolder && folderName.isNotEmpty) {
-        result.add(
-          group.first.copyWith(
-            title: WebDavService.cleanTitle(folderName),
-            episodeCount: group.length,
-          ),
-        );
-      } else {
-        result.addAll(group);
-      }
+      final folderTitle = WebDavService.cleanTitle(folderName);
+      final title = _isGenericFolder(folderTitle)
+          ? _commonPrefixTitle(group)
+          : folderTitle;
+      // 电影目录下的剧集修正为电视剧；动漫/综艺保持原分类
+      final kind = group.first.kind == MediaKind.movie
+          ? MediaKind.series
+          : group.first.kind;
+      final posterSource = group.firstWhere(
+        (video) => video.posterPath != null,
+        orElse: () => group.first,
+      );
+      result.add(
+        group.first.copyWith(
+          title: title,
+          kind: kind,
+          episodeCount: group.length,
+          posterPath: posterSource.posterPath,
+          summary: posterSource.summary,
+          rating: posterSource.rating,
+        ),
+      );
     }
     return result;
+  }
+
+  /// 一组同目录文件是否属于同一部剧集。
+  static bool _isSeriesGroup(List<ScannedVideo> group) {
+    if (group.any((video) => WebDavService.looksLikeEpisode(video.title))) {
+      return true;
+    }
+    // 没有标准集数标记时，按「标题去掉末尾数字后是否一致」判断；
+    // 至少 3 个文件才认定，避免把《流浪地球2》之类的续集误合并。
+    if (group.length < 3) return false;
+    final bases = group
+        .map((video) => _stripTrailingNumber(video.title))
+        .where((base) => base.isNotEmpty)
+        .toSet();
+    return bases.length == 1;
+  }
+
+  static String _stripTrailingNumber(String title) {
+    // 先去掉末尾画质标记（三体_01_4K → 三体_01），再去掉集数数字
+    var cleaned = title.replaceAll(
+      RegExp(
+        r'[\s._-]*(4k|8k|1080p|720p|2160p|hdr10?|10bit|8bit)$',
+        caseSensitive: false,
+      ),
+      '',
+    );
+    cleaned = cleaned.replaceAll(RegExp(r'[\s._-]*\d{1,4}$'), '').trim();
+    return cleaned;
+  }
+
+  /// 文件夹名是否只是"电影/电视剧/动漫/综艺"这类通用名。
+  static bool _isGenericFolder(String name) {
+    final lower = name.toLowerCase().trim();
+    const generic = {
+      '电影',
+      '电视剧',
+      '剧集',
+      '动漫',
+      '动画',
+      '综艺',
+      '影片',
+      'movies',
+      'movie',
+      'tv',
+      'tv shows',
+      'series',
+      'anime',
+      'film',
+    };
+    return generic.contains(lower) || lower.length <= 1;
+  }
+
+  /// 从组内文件名推导公共前缀作为剧名（如 "Signal.S01E01" → "Signal"）。
+  static String _commonPrefixTitle(List<ScannedVideo> group) {
+    if (group.isEmpty) return '';
+    final first = group.first.title;
+    return WebDavService.cleanTitle(first);
   }
 
   static String parentPathOf(String path) {
@@ -499,11 +591,4 @@ class MediaLibrary extends ChangeNotifier {
     }
     return segment;
   }
-
-  static final _episodePattern = RegExp(
-    r'[Ss]\d{1,2}[Ee]\d{1,2}|\bEP?\d{1,3}\b|第\s*\d+\s*[集期]',
-  );
-
-  static bool _looksLikeEpisode(String title) =>
-      _episodePattern.hasMatch(title);
 }

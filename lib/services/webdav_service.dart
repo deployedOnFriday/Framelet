@@ -121,7 +121,7 @@ class WebDavService {
             sourceId: source.id,
             path: path,
             title: cleanTitle(name),
-            kind: kind ?? matchKind(name) ?? MediaKind.movie,
+            kind: resolveKind(name, kind),
             sizeBytes: entry.size ?? 0,
             modified: entry.mTime,
           ),
@@ -135,6 +135,35 @@ class WebDavService {
     final dot = name.lastIndexOf('.');
     if (dot < 0) return false;
     return videoExtensions.contains(name.substring(dot).toLowerCase());
+  }
+
+  /// 文件名/标题是否含集数标记（S01E13、E13、EP13、第13集、1x13）。
+  ///
+  /// 这是判断「剧集 vs 电影」最可靠的信号，优先于目录名。
+  static bool looksLikeEpisode(String name) {
+    final lower = name.toLowerCase();
+    return RegExp(r'[sS]\d{1,2}[eE]\d{1,3}').hasMatch(lower) ||
+        RegExp(r'\b[eE][pP]?\d{1,3}\b').hasMatch(lower) ||
+        RegExp(r'\b\d{1,2}[xX]\d{1,3}\b').hasMatch(lower) ||
+        RegExp(r'第\s*\d{1,4}\s*[集期话]').hasMatch(name) ||
+        RegExp(r'\bepisode\s*\d{1,3}\b', caseSensitive: false).hasMatch(lower);
+  }
+
+  /// 综合目录名与文件名判定分类。
+  ///
+  /// 规则：
+  /// 1. 目录名已明确为动漫/综艺/电视剧 → 沿用（这些分类不会有歧义）
+  /// 2. 文件名含集数标记 → 电视剧（即使目录叫"电影"）
+  /// 3. 其余按目录名，最后兜底电影
+  static MediaKind resolveKind(String fileName, MediaKind? dirKind) {
+    if (dirKind != null &&
+        dirKind != MediaKind.movie &&
+        dirKind != MediaKind.series) {
+      return dirKind;
+    }
+    // 注意用原始文件名判断：cleanTitle 会把 ".S01E13" 当作扩展名截掉
+    if (looksLikeEpisode(fileName)) return MediaKind.series;
+    return dirKind ?? MediaKind.movie;
   }
 
   /// 目录名 -> 分类；不匹配返回 null。
