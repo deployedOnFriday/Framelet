@@ -7,7 +7,10 @@ import '../core/theme/app_theme.dart';
 import '../data/demo_data.dart';
 import '../models/media_item.dart';
 import '../models/media_source.dart';
+import '../pages/player_page.dart';
+import '../pages/search_results_page.dart';
 import '../services/media_library.dart';
+import '../services/playback_history.dart';
 import '../widgets/banner_carousel.dart';
 import '../widgets/poster_card.dart';
 import '../widgets/recent_playback_card.dart';
@@ -167,8 +170,18 @@ class _HomePageState extends State<HomePage> {
         controller: _searchController,
         focusNode: _searchFocus,
         textInputAction: TextInputAction.search,
-        onSubmitted: (value) =>
-            _showMessage(value.trim().isEmpty ? '请输入搜索内容' : '演示搜索：$value'),
+        onSubmitted: (value) {
+          final query = value.trim();
+          if (query.isEmpty) {
+            _showMessage('请输入搜索内容');
+            return;
+          }
+          Navigator.of(context).push(
+            MaterialPageRoute<void>(
+              builder: (_) => SearchResultsPage(query: query),
+            ),
+          );
+        },
         decoration: InputDecoration(
           hintText: '搜索影片、剧集或演员',
           hintStyle: const TextStyle(color: AppColors.muted, fontSize: 14),
@@ -201,25 +214,87 @@ class _HomePageState extends State<HomePage> {
   }
 
   Widget _buildRecentGrid() {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final count = constraints.maxWidth >= 900
-            ? 3
-            : (constraints.maxWidth >= 560 ? 2 : 1);
-        return GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: DemoData.recent.length,
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: count,
-            crossAxisSpacing: 14,
-            mainAxisSpacing: 14,
-            mainAxisExtent: 112,
-          ),
-          itemBuilder: (context, index) =>
-              RecentPlaybackCard(item: DemoData.recent[index]),
+    return AnimatedBuilder(
+      animation: PlaybackHistory.instance,
+      builder: (context, _) {
+        final history = PlaybackHistory.instance.entries
+            .where((entry) => !entry.finished)
+            .toList();
+        final hasReal = history.isNotEmpty;
+        final count = hasReal ? history.length : DemoData.recent.length;
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final columns = constraints.maxWidth >= 1000
+                ? 3
+                : (constraints.maxWidth >= 560 ? 2 : 1);
+            return GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: count,
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: 14,
+                mainAxisSpacing: 14,
+                mainAxisExtent: 112,
+              ),
+              itemBuilder: (context, index) => hasReal
+                  ? RecentPlaybackCard(
+                      item: _historyItem(history[index]),
+                      onTap: () => _resume(history[index]),
+                    )
+                  : RecentPlaybackCard(item: DemoData.recent[index]),
+            );
+          },
         );
       },
+    );
+  }
+
+  MediaItem _historyItem(HistoryEntry entry) {
+    return MediaItem(
+      title: entry.title,
+      subtitle: entry.finished
+          ? '已看完'
+          : '看到 ${(entry.progress * 100).toStringAsFixed(0)}% · '
+                '剩余 ${((entry.durationSec - entry.positionSec) / 60).ceil()} 分钟',
+      year: '',
+      colors: _paletteFor(entry.title),
+      icon: switch (entry.kind) {
+        MediaKind.movie => Icons.movie_outlined,
+        MediaKind.series => Icons.live_tv_outlined,
+        MediaKind.anime => Icons.animation_outlined,
+        MediaKind.variety => Icons.emoji_events_outlined,
+      },
+      progress: entry.progress,
+      payload: entry,
+    );
+  }
+
+  List<Color> _paletteFor(String title) {
+    const palettes = [
+      [Color(0xFF3D6B5C), Color(0xFF7FB89F)],
+      [Color(0xFF4A5E85), Color(0xFF8FA8D0)],
+      [Color(0xFF7A5C4A), Color(0xFFC89F7F)],
+      [Color(0xFF5C4A7A), Color(0xFFA88FC8)],
+    ];
+    var hash = 0;
+    for (final code in title.codeUnits) {
+      hash = (hash * 31 + code) & 0x7FFFFFFF;
+    }
+    return palettes[hash % palettes.length];
+  }
+
+  void _resume(HistoryEntry entry) {
+    final video = MediaLibrary.instance.findVideo(entry.sourceId, entry.path);
+    if (video == null) {
+      _showMessage('该内容所属媒体源未同步或已删除，去设置里重新同步后再试');
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            PlayerPage(video: video, startPosition: entry.positionSec),
+      ),
     );
   }
 

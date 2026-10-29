@@ -5,9 +5,10 @@ import '../models/media_item.dart';
 import 'media_artwork.dart';
 
 class RecentPlaybackCard extends StatefulWidget {
-  const RecentPlaybackCard({required this.item, super.key});
+  const RecentPlaybackCard({required this.item, this.onTap, super.key});
 
   final MediaItem item;
+  final VoidCallback? onTap;
 
   @override
   State<RecentPlaybackCard> createState() => _RecentPlaybackCardState();
@@ -43,11 +44,15 @@ class _RecentPlaybackCardState extends State<RecentPlaybackCard> {
         child: Material(
           color: Colors.transparent,
           child: InkWell(
-            onTap: () {
-              ScaffoldMessenger.of(context)
-                ..hideCurrentSnackBar()
-                ..showSnackBar(SnackBar(content: Text('继续观看「${item.title}」')));
-            },
+            onTap:
+                widget.onTap ??
+                () {
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(
+                      SnackBar(content: Text('继续观看「${item.title}」')),
+                    );
+                },
             borderRadius: BorderRadius.circular(14),
             child: Padding(
               padding: const EdgeInsets.all(10),

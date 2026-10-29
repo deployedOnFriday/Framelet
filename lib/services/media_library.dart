@@ -43,6 +43,18 @@ class MediaLibrary extends ChangeNotifier {
 
   bool hasPassword(String sourceId) => _passwords.containsKey(sourceId);
 
+  String? passwordOf(String sourceId) => _passwords[sourceId];
+
+  /// 按 sourceId + 路径精确查找原始扫描条目（用于从播放历史续播）。
+  ScannedVideo? findVideo(String sourceId, String path) {
+    for (final videos in _videosBySource.values) {
+      for (final video in videos) {
+        if (video.sourceId == sourceId && video.path == path) return video;
+      }
+    }
+    return null;
+  }
+
   /// 某分类的聚合条目（跨所有媒体源）。
   List<ScannedVideo> byKind(MediaKind kind) {
     final merged = <String, ScannedVideo>{};
@@ -67,6 +79,46 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   int countByKind(MediaKind kind) => byKind(kind).length;
+
+  /// 某聚合条目对应的单集文件列表（电影返回自身）。
+  List<ScannedVideo> episodesOf(ScannedVideo video) {
+    if (video.episodeCount <= 1) return [video];
+    final parent = parentPathOf(video.path);
+    final result = <ScannedVideo>[];
+    for (final videos in _videosBySource.values) {
+      for (final candidate in videos) {
+        if (candidate.sourceId != video.sourceId) continue;
+        if (candidate.kind != video.kind) continue;
+        if (parentPathOf(candidate.path) != parent) continue;
+        result.add(candidate);
+      }
+    }
+    result.sort((a, b) => _naturalCompare(a.path, b.path));
+    return result.isEmpty ? [video] : result;
+  }
+
+  /// 自然排序：让 第2集 排在 第10集 前面。
+  static int _naturalCompare(String a, String b) {
+    final numbers = RegExp(r'\d+');
+    final aParts = a.split(numbers);
+    final bParts = b.split(numbers);
+    final aNums = numbers.allMatches(a).map((m) => int.parse(m.group(0)!));
+    final bNums = numbers.allMatches(b).map((m) => int.parse(m.group(0)!));
+    final aIter = aNums.iterator;
+    final bIter = bNums.iterator;
+    final length = aParts.length.clamp(0, bParts.length);
+    for (var i = 0; i < length; i++) {
+      final compare = aParts[i].compareTo(bParts[i]);
+      if (compare != 0) return compare;
+      final aHas = aIter.moveNext();
+      final bHas = bIter.moveNext();
+      if (aHas && bHas) {
+        final numCompare = aIter.current.compareTo(bIter.current);
+        if (numCompare != 0) return numCompare;
+      }
+    }
+    return a.compareTo(b);
+  }
 
   bool get hasAnyContent =>
       _videosBySource.values.any((videos) => videos.isNotEmpty);

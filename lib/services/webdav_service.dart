@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:webdav_client/webdav_client.dart' as webdav;
 
 import '../models/media_source.dart';
@@ -143,6 +145,28 @@ class WebDavService {
       }
     }
     return null;
+  }
+
+  /// 构造可直接播放的文件 URL（路径逐段编码，避免中文/空格问题）。
+  static Uri playUrl(MediaSource source, String filePath) {
+    final base = Uri.parse(source.address.trim());
+    final segments = filePath
+        .split('/')
+        .where((segment) => segment.isNotEmpty)
+        .map((segment) => Uri.decodeComponent(segment))
+        .toList();
+    return Uri(
+      scheme: base.scheme.isEmpty ? 'http' : base.scheme,
+      host: base.host,
+      port: base.port,
+      pathSegments: segments,
+    );
+  }
+
+  /// Basic 认证头，供播放器以 HTTP 头方式访问 WebDAV 文件。
+  static String authHeader(String username, String password) {
+    final raw = utf8.encode('$username:$password');
+    return 'Basic ${base64Encode(raw)}';
   }
 
   /// 文件名 -> 展示标题：去扩展名、去常见压制标签。

@@ -11,6 +11,7 @@ class MediaItem {
     this.quality,
     this.progress = 0,
     this.description = '',
+    this.payload,
   });
 
   final String title;
@@ -22,4 +23,7 @@ class MediaItem {
   final String? quality;
   final double progress;
   final String description;
+
+  /// 任意关联数据：真实媒体条目时是 ScannedVideo，播放历史时是 HistoryEntry。
+  final Object? payload;
 }

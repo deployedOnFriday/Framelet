@@ -113,6 +113,7 @@ MediaItem? toMediaItem(ScannedVideo video) {
     icon: _iconFor(video.kind),
     quality: video.episodeCount > 1 ? '${video.episodeCount} 集' : null,
     description: video.path,
+    payload: video,
   );
 }
 

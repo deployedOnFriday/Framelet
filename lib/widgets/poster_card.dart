@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../models/media_item.dart';
+import '../models/media_source.dart';
+import '../pages/detail_page.dart';
 import 'media_artwork.dart';
 
 class PosterCard extends StatelessWidget {
@@ -14,7 +16,7 @@ class PosterCard extends StatelessWidget {
     return SizedBox(
       width: width,
       child: InkWell(
-        onTap: () => _showDemoMessage(context, item.title),
+        onTap: () => _openDetail(context),
         borderRadius: BorderRadius.circular(12),
         child: Padding(
           padding: const EdgeInsets.all(3),
@@ -42,10 +44,19 @@ class PosterCard extends StatelessWidget {
       ),
     );
   }
-}
 
-void _showDemoMessage(BuildContext context, String title) {
-  ScaffoldMessenger.of(context)
-    ..hideCurrentSnackBar()
-    ..showSnackBar(SnackBar(content: Text('「$title」详情将在下一阶段开放')));
+  void _openDetail(BuildContext context) {
+    final payload = item.payload;
+    if (payload is ScannedVideo) {
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => DetailPage(video: payload)),
+      );
+      return;
+    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(content: Text('「${item.title}」是演示内容，去设置里添加你的媒体源吧')),
+      );
+  }
 }
