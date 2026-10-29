@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:webdav_client/webdav_client.dart' as webdav;
 
@@ -167,6 +168,41 @@ class WebDavService {
   static String authHeader(String username, String password) {
     final raw = utf8.encode('$username:$password');
     return 'Basic ${base64Encode(raw)}';
+  }
+
+  static final _ipv4Pattern = RegExp(r'^\d{1,3}(\.\d{1,3}){3}$');
+
+  /// 把域名解析成 IPv4 再播放。
+  ///
+  /// 很多家庭宽带/域名会同时解析出 IPv6，但 IPv6 实际不通；
+  /// Dart 与 libmpv 都会优先尝试 IPv6 并长时间等待超时，表现为黑屏卡住。
+  /// 这里只取 IPv4 地址，同时返回原 Host，以便服务器正常识别虚拟主机。
+  static Future<({Uri url, String? hostHeader})> resolvePlayUrl(
+    MediaSource source,
+    String filePath,
+  ) async {
+    final base = playUrl(source, filePath);
+    if (_ipv4Pattern.hasMatch(base.host)) {
+      return (url: base, hostHeader: null);
+    }
+    try {
+      final addresses = await InternetAddress.lookup(
+        base.host,
+        type: InternetAddressType.IPv4,
+      ).timeout(const Duration(seconds: 5));
+      if (addresses.isNotEmpty) {
+        final hostHeader = base.port == 80
+            ? base.host
+            : '${base.host}:${base.port}';
+        return (
+          url: base.replace(host: addresses.first.address),
+          hostHeader: hostHeader,
+        );
+      }
+    } catch (_) {
+      // 解析失败时退回域名直连。
+    }
+    return (url: base, hostHeader: null);
   }
 
   /// 文件名 -> 展示标题：去扩展名、去常见压制标签。

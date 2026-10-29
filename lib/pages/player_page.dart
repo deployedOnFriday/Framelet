@@ -73,9 +73,14 @@ class _PlayerPageState extends State<PlayerPage> {
       }
       return;
     }
-    final url = WebDavService.playUrl(source, widget.video.path);
+    final playTarget = await WebDavService.resolvePlayUrl(
+      source,
+      widget.video.path,
+    );
+    final url = playTarget.url;
     debugPrint('[Player] 播放地址: $url');
-    _probe(url, WebDavService.authHeader(source.username, password));
+    final auth = WebDavService.authHeader(source.username, password);
+    _probe(url, auth);
 
     // 关键：libmpv 会读取系统环境变量 http_proxy/https_proxy 走代理，
     // 而本机 1501 代理不放行媒体服务器——必须显式禁用。
@@ -88,18 +93,14 @@ class _PlayerPageState extends State<PlayerPage> {
       }
     }
 
+    final headers = <String, String>{'Authorization': auth};
+    if (playTarget.hostHeader != null) {
+      // 用 IP 连接时保留原始域名，避免服务器按 Host 拒绝。
+      headers['Host'] = playTarget.hostHeader!;
+    }
+
     try {
-      await _player.open(
-        Media(
-          url.toString(),
-          httpHeaders: {
-            'Authorization': WebDavService.authHeader(
-              source.username,
-              password,
-            ),
-          },
-        ),
-      );
+      await _player.open(Media(url.toString(), httpHeaders: headers));
     } catch (error) {
       if (mounted) {
         setState(() => _errorMessage = MediaLibrary.describeError(error));
@@ -111,13 +112,13 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _probe(Uri url, String auth) async {
     try {
       final client = HttpClient()
-        ..connectionTimeout = const Duration(seconds: 12);
+        ..connectionTimeout = const Duration(seconds: 6);
       final request = await client.getUrl(url);
       request.headers.set(HttpHeaders.authorizationHeader, auth);
       request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
       request.followRedirects = true;
       final response = await request.close().timeout(
-        const Duration(seconds: 15),
+        const Duration(seconds: 8),
       );
       final length = response.headers.contentLength;
       final detail =
@@ -134,10 +135,15 @@ class _PlayerPageState extends State<PlayerPage> {
         socket.destroy();
       } catch (_) {}
       client.close(force: true);
+    } on TimeoutException {
+      debugPrint('[Player] 自检超时: $url');
+      if (mounted) {
+        setState(() => _probeResult = '超时（服务器无响应）· $url');
+      }
     } catch (error) {
       debugPrint('[Player] 自检失败: $error');
       if (mounted) {
-        setState(() => _probeResult = '自检请求失败：$error');
+        setState(() => _probeResult = '${error.runtimeType}: $error');
       }
     }
   }
@@ -309,12 +315,16 @@ class _PlayerPageState extends State<PlayerPage> {
           // 调试信息（排障用，定位后移除）
           Positioned(
             right: 12,
-            bottom: 12,
-            child: _DebugPanel(
-              probe: _probeResult,
-              position: _positionSec,
-              duration: _durationSec,
-              error: _errorMessage,
+            top: 56,
+            left: 12,
+            child: Align(
+              alignment: Alignment.topRight,
+              child: _DebugPanel(
+                probe: _probeResult,
+                position: _positionSec,
+                duration: _durationSec,
+                error: _errorMessage,
+              ),
             ),
           ),
         ],
