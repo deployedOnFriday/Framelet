@@ -10,6 +10,7 @@ abstract final class AppColors {
   static const text = Color(0xFF253A34);
   static const muted = Color(0xFF7D837D);
   static const border = Color(0xFFE3E3DA);
+  static const danger = Color(0xFFB4543E);
 }
 
 abstract final class AppTheme {

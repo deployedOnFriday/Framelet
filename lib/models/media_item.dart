@@ -1,7 +1,5 @@
 import 'package:flutter/material.dart';
 
-enum MediaKind { movie, series, anime, variety }
-
 class MediaItem {
   const MediaItem({
     required this.title,

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import '../models/media_item.dart';
-import '../models/media_source.dart';
 
 abstract final class DemoData {
   static const featured = <MediaItem>[
@@ -235,16 +234,6 @@ abstract final class DemoData {
       colors: [Color(0xFF5E4C70), Color(0xFFB1838D)],
       icon: Icons.music_note_rounded,
       rating: '8.2',
-    ),
-  ];
-
-  static const sources = <MediaSource>[
-    MediaSource(
-      name: '我的影音库',
-      address: 'https://dav.example.com/video',
-      username: 'demo@framelet.local',
-      directory: '/Movies',
-      lastSync: '今天 10:30',
     ),
   ];
 }

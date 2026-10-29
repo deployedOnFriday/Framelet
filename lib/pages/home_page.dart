@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 import '../core/theme/app_theme.dart';
 import '../data/demo_data.dart';
 import '../models/media_item.dart';
+import '../models/media_source.dart';
+import '../services/media_library.dart';
 import '../widgets/banner_carousel.dart';
 import '../widgets/poster_card.dart';
 import '../widgets/recent_playback_card.dart';
@@ -81,15 +83,77 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(height: 12),
                 _buildRecentGrid(),
                 const SizedBox(height: 24),
-                _buildPosterSection('电影', DemoData.movies, 1),
+                ?_buildSyncNotice(),
+                _buildPosterSection(
+                  '电影',
+                  _sectionItems(MediaKind.movie, DemoData.movies),
+                  1,
+                ),
                 const SizedBox(height: 22),
-                _buildPosterSection('电视剧', DemoData.series, 2),
+                _buildPosterSection(
+                  '电视剧',
+                  _sectionItems(MediaKind.series, DemoData.series),
+                  2,
+                ),
                 const SizedBox(height: 22),
-                _buildPosterSection('动漫', DemoData.anime, 3),
+                _buildPosterSection(
+                  '动漫',
+                  _sectionItems(MediaKind.anime, DemoData.anime),
+                  3,
+                ),
                 const SizedBox(height: 22),
-                _buildPosterSection('综艺', DemoData.variety, 4),
+                _buildPosterSection(
+                  '综艺',
+                  _sectionItems(MediaKind.variety, DemoData.variety),
+                  4,
+                ),
               ]),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 真实扫描数据优先；为空时回退演示内容。
+  List<MediaItem> _sectionItems(MediaKind kind, List<MediaItem> fallback) {
+    final library = MediaLibrary.instance;
+    final scanned = MediaLibrary.aggregate(library.byKind(kind));
+    if (scanned.isEmpty) return fallback;
+    return [for (final video in scanned) ?toMediaItem(video)];
+  }
+
+  /// 媒体库有同步内容时，显示一条同步状态提示。
+  Widget? _buildSyncNotice() {
+    final library = MediaLibrary.instance;
+    if (!library.hasAnyContent) return null;
+    var total = 0;
+    for (final videos in library.byKind(MediaKind.values.first)) {
+      total += videos.episodeCount;
+    }
+    for (final kind in [MediaKind.series, MediaKind.anime, MediaKind.variety]) {
+      for (final video in library.byKind(kind)) {
+        total += video.episodeCount;
+      }
+    }
+    return Container(
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.primarySoft,
+        borderRadius: BorderRadius.circular(11),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.cloud_done_outlined,
+            size: 18,
+            color: AppColors.primary,
+          ),
+          const SizedBox(width: 10),
+          Text(
+            '媒体库已同步 · 共 ${library.sources.length} 个媒体源、$total 个视频文件',
+            style: const TextStyle(color: AppColors.primary, fontSize: 13),
           ),
         ],
       ),

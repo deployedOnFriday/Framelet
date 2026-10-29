@@ -4,6 +4,31 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:framelet/app.dart';
+import 'package:framelet/services/credential_store.dart';
+import 'package:framelet/services/media_library.dart';
+
+/// 测试专用的内存凭据存储，避免触达 Windows 安全存储。
+class InMemoryCredentialStore extends CredentialStore {
+  final Map<String, String> _values = {};
+
+  @override
+  Future<String?> readSources() async => _values['sources'];
+
+  @override
+  Future<void> writeSources(String json) async => _values['sources'] = json;
+
+  @override
+  Future<String?> readPassword(String sourceId) async =>
+      _values['pwd.$sourceId'];
+
+  @override
+  Future<void> writePassword(String sourceId, String password) async =>
+      _values['pwd.$sourceId'] = password;
+
+  @override
+  Future<void> deletePassword(String sourceId) async =>
+      _values.remove('pwd.$sourceId');
+}
 
 Future<ByteData> _readFont(File file) async {
   final bytes = await file.readAsBytes();
@@ -17,6 +42,9 @@ Future<void> _pumpApp(WidgetTester tester) async {
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
   });
+  MediaLibrary.instanceForTesting = MediaLibrary(
+    store: InMemoryCredentialStore(),
+  );
   await tester.pumpWidget(const FrameletApp());
   await tester.pump(const Duration(milliseconds: 300));
 }
@@ -61,15 +89,15 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('nav-movie')));
     await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('共 6 部演示内容'), findsOneWidget);
+    expect(find.text('共 6 个条目'), findsOneWidget);
 
     await tester.tap(find.byKey(const ValueKey('nav-settings')));
     await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('添加媒体源'), findsOneWidget);
-    expect(find.text('WebDAV'), findsOneWidget);
+    expect(find.text('还没有媒体源，点击右上角添加'), findsOneWidget);
   });
 
-  testWidgets('可添加演示 WebDAV 媒体源', (tester) async {
+  testWidgets('可添加真实 WebDAV 媒体源配置', (tester) async {
     await _pumpApp(tester);
     await tester.tap(find.byKey(const ValueKey('nav-settings')));
     await tester.pump(const Duration(milliseconds: 300));
@@ -82,11 +110,13 @@ void main() {
       'https://dav.example.org/media',
     );
     await tester.enterText(find.byType(TextFormField).at(3), 'tester');
+    await tester.enterText(find.byType(TextFormField).at(4), 'secret');
     await tester.tap(find.byKey(const ValueKey('save-source')));
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('测试媒体库'), findsOneWidget);
-    expect(find.text('https://dav.example.org/media/Movies'), findsOneWidget);
+    expect(find.text('https://dav.example.org/media/'), findsOneWidget);
+    expect(find.text('未同步 · 最近同步 尚未同步'), findsOneWidget);
   });
 
   testWidgets('首页黄金截图', (tester) async {

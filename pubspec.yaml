@@ -36,6 +36,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   media_kit: ^1.2.6
   media_kit_libs_windows_video: ^1.0.11
+  webdav_client: ^1.2.2
+  flutter_secure_storage: ^11.2.0
 
 dev_dependencies:
   flutter_test:

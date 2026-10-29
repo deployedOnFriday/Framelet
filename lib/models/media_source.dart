@@ -1,13 +1,19 @@
+import 'package:flutter/material.dart';
+
+import 'media_item.dart';
+
 class MediaSource {
-  const MediaSource({
+  MediaSource({
+    required this.id,
     required this.name,
     required this.address,
     required this.username,
     this.directory = '/',
-    this.connected = true,
+    this.connected = false,
     this.lastSync = '尚未同步',
   });
 
+  final String id;
   final String name;
   final String address;
   final String username;
@@ -15,14 +21,129 @@ class MediaSource {
   final bool connected;
   final String lastSync;
 
-  MediaSource copyWith({bool? connected, String? lastSync}) {
+  MediaSource copyWith({
+    String? id,
+    String? name,
+    String? address,
+    String? username,
+    String? directory,
+    bool? connected,
+    String? lastSync,
+  }) {
     return MediaSource(
-      name: name,
-      address: address,
-      username: username,
-      directory: directory,
+      id: id ?? this.id,
+      name: name ?? this.name,
+      address: address ?? this.address,
+      username: username ?? this.username,
+      directory: directory ?? this.directory,
       connected: connected ?? this.connected,
       lastSync: lastSync ?? this.lastSync,
     );
   }
+
+  Map<String, Object?> toJson() => {
+    'id': id,
+    'name': name,
+    'address': address,
+    'username': username,
+    'directory': directory,
+    'connected': connected,
+    'lastSync': lastSync,
+  };
+
+  factory MediaSource.fromJson(Map<String, Object?> json) {
+    return MediaSource(
+      id: json['id']! as String,
+      name: json['name']! as String,
+      address: json['address']! as String,
+      username: json['username'] as String? ?? '',
+      directory: json['directory'] as String? ?? '/',
+      connected: json['connected'] as bool? ?? false,
+      lastSync: json['lastSync'] as String? ?? '尚未同步',
+    );
+  }
+
+  static String newId() =>
+      DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+}
+
+/// 视频文件分类，与左侧导航一一对应。
+enum MediaKind { movie, series, anime, variety }
+
+class ScannedVideo {
+  const ScannedVideo({
+    required this.sourceId,
+    required this.path,
+    required this.title,
+    required this.kind,
+    this.episodeCount = 1,
+    this.sizeBytes = 0,
+    this.modified,
+  });
+
+  final String sourceId;
+  final String path;
+  final String title;
+  final MediaKind kind;
+  final int episodeCount;
+  final int sizeBytes;
+  final DateTime? modified;
+
+  ScannedVideo copyWith({String? title, int? episodeCount}) => ScannedVideo(
+    sourceId: sourceId,
+    path: path,
+    title: title ?? this.title,
+    kind: kind,
+    episodeCount: episodeCount ?? this.episodeCount,
+    sizeBytes: sizeBytes,
+    modified: modified,
+  );
+}
+
+/// 把扫描到的视频转成 UI 使用的 MediaItem，避免分类页关心文件细节。
+MediaItem? toMediaItem(ScannedVideo video) {
+  final subtitle = video.episodeCount > 1
+      ? '共 ${video.episodeCount} 集'
+      : _formatSize(video.sizeBytes);
+  return MediaItem(
+    title: video.title,
+    subtitle: subtitle,
+    year: video.modified == null ? '' : video.modified!.year.toString(),
+    colors: _paletteFor(video.title),
+    icon: _iconFor(video.kind),
+    quality: video.episodeCount > 1 ? '${video.episodeCount} 集' : null,
+    description: video.path,
+  );
+}
+
+String _formatSize(int bytes) {
+  if (bytes <= 0) return '未知大小';
+  final gb = bytes / (1024 * 1024 * 1024);
+  if (gb >= 1) return '${gb.toStringAsFixed(1)} GB';
+  final mb = bytes / (1024 * 1024);
+  return '${mb.toStringAsFixed(0)} MB';
+}
+
+IconData _iconFor(MediaKind kind) => switch (kind) {
+  MediaKind.movie => Icons.movie_outlined,
+  MediaKind.series => Icons.live_tv_outlined,
+  MediaKind.anime => Icons.animation_outlined,
+  MediaKind.variety => Icons.emoji_events_outlined,
+};
+
+const _palettes = <List<Color>>[
+  [Color(0xFF3D6B5C), Color(0xFF7FB89F)],
+  [Color(0xFF4A5E85), Color(0xFF8FA8D0)],
+  [Color(0xFF7A5C4A), Color(0xFFC89F7F)],
+  [Color(0xFF5C4A7A), Color(0xFFA88FC8)],
+  [Color(0xFF4A7A6E), Color(0xFF8FC8B4)],
+  [Color(0xFF7A6E4A), Color(0xFFC8B48F)],
+];
+
+List<Color> _paletteFor(String title) {
+  var hash = 0;
+  for (final code in title.codeUnits) {
+    hash = (hash * 31 + code) & 0x7FFFFFFF;
+  }
+  return _palettes[hash % _palettes.length];
 }

@@ -33,7 +33,7 @@ class _LibraryPageState extends State<LibraryPage> {
           Text(widget.title, style: Theme.of(context).textTheme.headlineLarge),
           const SizedBox(height: 6),
           Text(
-            '共 ${items.length} 部演示内容',
+            '共 ${items.length} 个条目',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 20),
@@ -61,7 +61,14 @@ class _LibraryPageState extends State<LibraryPage> {
           const SizedBox(height: 22),
           Expanded(
             child: items.isEmpty
-                ? const Center(child: Text('没有找到匹配的内容'))
+                ? Center(
+                    child: Text(
+                      widget.items.isEmpty
+                          ? '这里还没有内容，去「设置 → 媒体源」添加并同步你的媒体库'
+                          : '没有找到匹配的内容',
+                      textAlign: TextAlign.center,
+                    ),
+                  )
                 : LayoutBuilder(
                     builder: (context, constraints) {
                       final count = (constraints.maxWidth / 170).floor().clamp(
