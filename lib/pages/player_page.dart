@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -31,6 +32,7 @@ class _PlayerPageState extends State<PlayerPage> {
   double _positionSec = 0;
   double _durationSec = 0;
   String? _errorMessage;
+  String? _probeResult;
 
   @override
   void initState() {
@@ -71,6 +73,7 @@ class _PlayerPageState extends State<PlayerPage> {
     }
     final url = WebDavService.playUrl(source, widget.video.path);
     debugPrint('[Player] 播放地址: $url');
+    _probe(url, WebDavService.authHeader(source.username, password));
     try {
       await _player.open(
         Media(
@@ -86,6 +89,37 @@ class _PlayerPageState extends State<PlayerPage> {
     } catch (error) {
       if (mounted) {
         setState(() => _errorMessage = MediaLibrary.describeError(error));
+      }
+    }
+  }
+
+  /// 播放前探测文件地址：把 HTTP 状态码显示在错误卡片上，便于排查。
+  Future<void> _probe(Uri url, String auth) async {
+    try {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 12);
+      final request = await client.getUrl(url);
+      request.headers.set(HttpHeaders.authorizationHeader, auth);
+      request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+      request.followRedirects = true;
+      final response = await request.close().timeout(
+        const Duration(seconds: 15),
+      );
+      final length = response.headers.contentLength;
+      final detail =
+          'HTTP ${response.statusCode}'
+          '${length >= 0 ? ' · 大小 ${length ~/ 1024} KB' : ''}'
+          '${response.headers.value('content-type') != null ? ' · ${response.headers.value('content-type')}' : ''}';
+      debugPrint('[Player] 自检: $detail');
+      if (mounted) {
+        setState(() => _probeResult = detail);
+      }
+      await response.drain<void>();
+      client.close();
+    } catch (error) {
+      debugPrint('[Player] 自检失败: $error');
+      if (mounted) {
+        setState(() => _probeResult = '自检请求失败：$error');
       }
     }
   }
@@ -133,7 +167,10 @@ class _PlayerPageState extends State<PlayerPage> {
             Positioned.fill(
               child: Center(
                 child: Container(
-                  constraints: const BoxConstraints(maxWidth: 560),
+                  constraints: BoxConstraints(
+                    maxWidth: 560,
+                    maxHeight: MediaQuery.of(context).size.height * 0.75,
+                  ),
                   margin: const EdgeInsets.symmetric(horizontal: 40),
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
@@ -141,39 +178,60 @@ class _PlayerPageState extends State<PlayerPage> {
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(color: Colors.white24),
                   ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.error_outline_rounded,
-                        color: Colors.redAccent,
-                        size: 40,
-                      ),
-                      const SizedBox(height: 14),
-                      const Text(
-                        '播放失败',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 17,
-                          fontWeight: FontWeight.w600,
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.error_outline_rounded,
+                          color: Colors.redAccent,
+                          size: 40,
                         ),
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        _errorMessage!,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 13,
-                          height: 1.6,
+                        const SizedBox(height: 14),
+                        const Text(
+                          '播放失败',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 17,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 16),
-                      const Text(
-                        '请检查媒体源密码是否变更，或稍后重试',
-                        style: TextStyle(color: Colors.white38, fontSize: 12),
-                      ),
-                    ],
+                        const SizedBox(height: 10),
+                        Text(
+                          _errorMessage!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 13,
+                            height: 1.6,
+                          ),
+                        ),
+                        if (_probeResult != null) ...[
+                          const SizedBox(height: 14),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Colors.white10,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              '地址自检：$_probeResult',
+                              style: const TextStyle(
+                                color: Colors.amberAccent,
+                                fontSize: 12,
+                                height: 1.5,
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 16),
+                        const Text(
+                          '请检查媒体源密码是否变更，或稍后重试',
+                          style: TextStyle(color: Colors.white38, fontSize: 12),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),

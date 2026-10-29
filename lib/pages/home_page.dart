@@ -219,6 +219,7 @@ class _HomePageState extends State<HomePage> {
       builder: (context, _) {
         final history = PlaybackHistory.instance.entries
             .where((entry) => !entry.finished)
+            .take(4)
             .toList();
         final hasReal = history.isNotEmpty;
         final count = hasReal ? history.length : DemoData.recent.length;
