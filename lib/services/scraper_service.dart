@@ -19,6 +19,29 @@ class ScrapeResult {
   final int? year;
 }
 
+/// 手动匹配用的候选条目（搜索结果的一项）。
+class ScrapeCandidate {
+  const ScrapeCandidate({
+    required this.name,
+    required this.mediaType,
+    this.originalName,
+    this.year,
+    this.posterUrl,
+    this.overview,
+    this.rating,
+  });
+
+  final String name;
+  final String mediaType; // 'movie' | 'tv'
+  final String? originalName;
+  final int? year;
+  final String? posterUrl;
+  final String? overview;
+  final String? rating;
+
+  String get typeLabel => mediaType == 'tv' ? '剧集' : '电影';
+}
+
 /// 海报与元数据刮削：
 /// - 主源 TVmaze（免费、无需密钥，覆盖剧集/动漫/部分电影）
 /// - 图片本地缓存，避免重复下载
@@ -233,6 +256,78 @@ class ScraperService {
   /// TMDB 搜索（需 API Key；网络不通时自动回退 TVmaze）。
   ///
   /// 中文片名、电影、剧集全覆盖，海报质量最好。
+  /// 手动匹配：返回多个候选供用户挑选。
+  ///
+  /// 剧集条目默认优先展示 tv，电影优先 movie，但两类都会返回。
+  static Future<List<ScrapeCandidate>> searchCandidates(
+    String query, {
+    int? year,
+    bool preferTv = false,
+  }) async {
+    final key = tmdbApiKey?.trim();
+    if (key == null || key.isEmpty || query.trim().isEmpty) return const [];
+    final pathAndQuery =
+        '/3/search/multi'
+        '?api_key=$key&language=zh-CN&include_adult=false'
+        '&query=${Uri.encodeQueryComponent(query)}';
+    try {
+      await _throttle();
+      final body = await _tmdbGet(pathAndQuery);
+      if (body == null) return const [];
+      final data = jsonDecode(body) as Map<String, Object?>;
+      final results = data['results'] as List<Object?>? ?? const [];
+      final candidates = <ScrapeCandidate>[];
+      for (final item in results) {
+        final map = item as Map<String, Object?>;
+        final mediaType = map['media_type'] as String? ?? '';
+        if (mediaType != 'movie' && mediaType != 'tv') continue;
+        final title =
+            (map['title'] as String?) ?? (map['name'] as String?) ?? '';
+        if (title.isEmpty) continue;
+        final date =
+            (map['release_date'] as String?) ??
+            (map['first_air_date'] as String?) ??
+            '';
+        final posterPath = map['poster_path'] as String?;
+        final vote = (map['vote_average'] as num?)?.toDouble();
+        candidates.add(
+          ScrapeCandidate(
+            name: title,
+            mediaType: mediaType,
+            originalName:
+                (map['original_title'] as String?) ??
+                (map['original_name'] as String?),
+            year: int.tryParse(date.split('-').first),
+            posterUrl: posterPath == null
+                ? null
+                : 'https://image.tmdb.org/t/p/w200$posterPath',
+            overview: (map['overview'] as String?)?.trim(),
+            rating: vote == null || vote <= 0 ? null : vote.toStringAsFixed(1),
+          ),
+        );
+      }
+      // 类型优先排序，同年份优先
+      candidates.sort((a, b) {
+        final aType = preferTv
+            ? (a.mediaType == 'tv' ? 0 : 1)
+            : (a.mediaType == 'movie' ? 0 : 1);
+        final bType = preferTv
+            ? (b.mediaType == 'tv' ? 0 : 1)
+            : (b.mediaType == 'movie' ? 0 : 1);
+        if (aType != bType) return aType - bType;
+        if (year != null) {
+          final aGap = (a.year ?? 0) == year ? 0 : 1;
+          final bGap = (b.year ?? 0) == year ? 0 : 1;
+          if (aGap != bGap) return aGap - bGap;
+        }
+        return 0;
+      });
+      return candidates.take(18).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
   static Future<ScrapeResult?> searchTmdb(
     String query, {
     int? year,

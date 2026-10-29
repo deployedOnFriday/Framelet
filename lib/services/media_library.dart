@@ -451,6 +451,35 @@ class MediaLibrary extends ChangeNotifier {
     }
   }
 
+  /// 手动匹配：把用户选中的候选应用到这一组（剧集整组共享同一张海报）。
+  Future<String?> applyCandidate(
+    ScannedVideo target,
+    List<ScannedVideo> group,
+    ScrapeCandidate candidate,
+  ) async {
+    String? poster;
+    if (candidate.posterUrl != null) {
+      poster = await ScraperService.downloadPoster(
+        candidate.posterUrl!,
+        cacheKey: 'manual_${candidate.name}_${candidate.year ?? ''}',
+      );
+    }
+    for (final member in group) {
+      _updateVideo(
+        member.sourceId,
+        member.path,
+        (video) => video.copyWith(
+          posterPath: poster,
+          summary: candidate.overview,
+          rating: candidate.rating,
+        ),
+      );
+    }
+    await _persistVideos(target.sourceId);
+    notifyListeners();
+    return poster;
+  }
+
   void _updateVideo(
     String sourceId,
     String path,

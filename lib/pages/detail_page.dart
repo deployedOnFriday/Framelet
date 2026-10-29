@@ -5,6 +5,8 @@ import '../models/media_item.dart';
 import '../models/media_source.dart';
 import '../services/media_library.dart';
 import '../services/playback_history.dart';
+import '../services/scraper_service.dart';
+import '../widgets/match_dialog.dart';
 import '../widgets/media_artwork.dart';
 import 'player_page.dart';
 
@@ -189,9 +191,63 @@ class DetailPage extends StatelessWidget {
               label: Text(_playLabel(episodes.first)),
             ),
           ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 42,
+            child: OutlinedButton.icon(
+              key: const ValueKey('manual-match'),
+              onPressed: () => _matchManually(context, episodes),
+              style: OutlinedButton.styleFrom(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                side: const BorderSide(color: AppColors.border),
+                foregroundColor: AppColors.primary,
+                textStyle: const TextStyle(fontSize: 13),
+              ),
+              icon: const Icon(Icons.manage_search_rounded, size: 19),
+              label: const Text('修正匹配'),
+            ),
+          ),
         ],
       ),
     );
+  }
+
+  /// 手动搜索并应用正确的影片信息（海报、简介、评分）。
+  Future<void> _matchManually(
+    BuildContext context,
+    List<ScannedVideo> group,
+  ) async {
+    final parsed = ScraperService.parseTitle(video.title);
+    final initialQuery = parsed.queries.isEmpty
+        ? video.title
+        : parsed.queries.first;
+    final candidate = await showDialog<ScrapeCandidate>(
+      context: context,
+      builder: (_) => MatchSearchDialog(
+        initialQuery: initialQuery,
+        preferTv: video.episodeCount > 1,
+      ),
+    );
+    if (candidate == null || !context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final poster = await MediaLibrary.instance.applyCandidate(
+      video,
+      group,
+      candidate,
+    );
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            poster != null
+                ? '已应用「${candidate.name}」的海报与信息'
+                : '已应用「${candidate.name}」的信息（未取到海报）',
+          ),
+        ),
+      );
   }
 
   MediaItem _posterItem(double progress) {
