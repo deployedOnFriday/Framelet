@@ -255,8 +255,9 @@ class ScraperService {
         final mediaType = map['media_type'] as String? ?? '';
         if (mediaType != 'movie' && mediaType != 'tv') continue;
         final name =
-            (map['title'] as String?) ??
-            (map['name'] as String?) ??
+            (map['title'] as String?) ?? (map['name'] as String?) ?? '';
+        // 原名（英文/日文）也参与比较，避免中文译名差异导致漏配
+        final originalName =
             (map['original_title'] as String?) ??
             (map['original_name'] as String?) ??
             '';
@@ -266,6 +267,8 @@ class ScraperService {
             '';
         final itemYear = int.tryParse(date.split('-').first);
         var score = _similarity(query, name);
+        final originalScore = _similarity(query, originalName);
+        if (originalScore > score) score = originalScore;
         if (itemYear != null && year != null) {
           final gap = (year - itemYear).abs();
           if (gap == 0) score += 0.3;
@@ -426,19 +429,38 @@ class ScraperService {
   }
 
   /// 名称相似度：归一化后比较（连字符/下划线/点都视作空格）。
+  ///
+  /// 英文按词重叠，中文按字符集 Jaccard——
+  /// 这样「末日酒店」与「末日后酒店」也能得到较高分。
   static double _similarity(String query, String name) {
     final a = _normalize(query);
     final b = _normalize(name);
     if (a.isEmpty || b.isEmpty) return 0;
     if (a == b) return 1;
     // 连字符差异："three body" vs "threebody"
-    if (a.replaceAll(' ', '') == b.replaceAll(' ', '')) return 0.95;
-    if (b.contains(a) || a.contains(b)) return 0.8;
+    final aCompact = a.replaceAll(' ', '');
+    final bCompact = b.replaceAll(' ', '');
+    if (aCompact == bCompact) return 0.95;
+    if (b.contains(a) || a.contains(b)) return 0.85;
+
     final aWords = a.split(' ').where((w) => w.length > 1).toSet();
     final bWords = b.split(' ').where((w) => w.length > 1).toSet();
-    if (aWords.isEmpty || bWords.isEmpty) return 0;
-    final overlap = aWords.intersection(bWords).length;
-    return (overlap / aWords.length) * 0.7;
+    var wordScore = 0.0;
+    if (aWords.isNotEmpty && bWords.isNotEmpty) {
+      wordScore = (aWords.intersection(bWords).length / aWords.length) * 0.75;
+    }
+
+    // 字符级相似度（主要惠及中文片名）
+    final aChars = aCompact.split('').toSet();
+    final bChars = bCompact.split('').toSet();
+    var charScore = 0.0;
+    if (aChars.isNotEmpty && bChars.isNotEmpty) {
+      final union = aChars.union(bChars).length;
+      if (union > 0) {
+        charScore = (aChars.intersection(bChars).length / union) * 0.85;
+      }
+    }
+    return wordScore > charScore ? wordScore : charScore;
   }
 
   static String _normalize(String raw) => raw
