@@ -42,7 +42,11 @@ class _PlayerPageState extends State<PlayerPage> {
       if (mounted) setState(() {});
     });
     _durationSub = _player.stream.duration.listen((duration) {
+      final wasZero = _durationSec <= 0;
       _durationSec = duration.inMilliseconds / 1000;
+      if (wasZero && _durationSec > 0) {
+        _debugLog('视频已就绪，时长 ${_durationSec.toStringAsFixed(1)} 秒');
+      }
       if (mounted) setState(() {});
       final start = widget.startPosition ?? 0;
       if (!_seekedToStart && _durationSec > 0 && start > 1) {
@@ -53,6 +57,7 @@ class _PlayerPageState extends State<PlayerPage> {
       }
     });
     _errorSub = _player.stream.error.listen((error) {
+      _debugLog('mpv error: $error');
       if (mounted && _errorMessage == null) {
         setState(() => _errorMessage = error);
       }
@@ -78,7 +83,8 @@ class _PlayerPageState extends State<PlayerPage> {
       widget.video.path,
     );
     final url = playTarget.url;
-    debugPrint('[Player] 播放地址: $url');
+    _debugLog('播放地址: $url');
+    _debugLog('源文件路径: ${widget.video.path}');
     final auth = WebDavService.authHeader(source.username, password);
     _probe(url, auth);
 
@@ -89,7 +95,7 @@ class _PlayerPageState extends State<PlayerPage> {
       try {
         await platform.setProperty('http-proxy', '');
       } catch (error) {
-        debugPrint('[Player] 禁用 mpv 代理失败: $error');
+        _debugLog('禁用 mpv 代理失败: $error');
       }
     }
 
@@ -101,7 +107,9 @@ class _PlayerPageState extends State<PlayerPage> {
 
     try {
       await _player.open(Media(url.toString(), httpHeaders: headers));
+      _debugLog('open() 调用完成');
     } catch (error) {
+      _debugLog('open() 异常: $error');
       if (mounted) {
         setState(() => _errorMessage = MediaLibrary.describeError(error));
       }
@@ -125,7 +133,7 @@ class _PlayerPageState extends State<PlayerPage> {
           'HTTP ${response.statusCode}'
           '${length >= 0 ? ' · 大小 ${length ~/ 1024} KB' : ''}'
           '${response.headers.value('content-type') != null ? ' · ${response.headers.value('content-type')}' : ''}';
-      debugPrint('[Player] 自检: $detail');
+      _debugLog('自检: $detail');
       if (mounted) {
         setState(() => _probeResult = detail);
       }
@@ -136,12 +144,12 @@ class _PlayerPageState extends State<PlayerPage> {
       } catch (_) {}
       client.close(force: true);
     } on TimeoutException {
-      debugPrint('[Player] 自检超时: $url');
+      _debugLog('自检超时: $url');
       if (mounted) {
         setState(() => _probeResult = '超时（服务器无响应）· $url');
       }
     } catch (error) {
-      debugPrint('[Player] 自检失败: $error');
+      _debugLog('自检失败: $error');
       if (mounted) {
         setState(() => _probeResult = '${error.runtimeType}: $error');
       }
@@ -180,6 +188,7 @@ class _PlayerPageState extends State<PlayerPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
+        fit: StackFit.expand,
         children: [
           Positioned.fill(
             child: Video(
@@ -288,42 +297,35 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
               ),
             ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  _BackButton(onTap: () => Navigator.of(context).maybePop()),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      widget.video.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        shadows: [Shadow(blurRadius: 8, color: Colors.black54)],
+          // 顶部标题栏：固定在顶部，避免被 StackFit.expand 拉到全屏居中
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(
+                  children: [
+                    _BackButton(onTap: () => Navigator.of(context).maybePop()),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        widget.video.title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          shadows: [
+                            Shadow(blurRadius: 8, color: Colors.black54),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          // 调试信息（排障用，定位后移除）
-          Positioned(
-            right: 12,
-            top: 56,
-            left: 12,
-            child: Align(
-              alignment: Alignment.topRight,
-              child: _DebugPanel(
-                probe: _probeResult,
-                position: _positionSec,
-                duration: _durationSec,
-                error: _errorMessage,
+                  ],
+                ),
               ),
             ),
           ),
@@ -355,54 +357,17 @@ class _BackButton extends StatelessWidget {
   }
 }
 
-/// 排障用的实时状态面板：显示地址自检、播放进度与错误。
-class _DebugPanel extends StatelessWidget {
-  const _DebugPanel({
-    required this.probe,
-    required this.position,
-    required this.duration,
-    required this.error,
-  });
-
-  final String? probe;
-  final double position;
-  final double duration;
-  final String? error;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      constraints: const BoxConstraints(maxWidth: 420),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.75),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.white24),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '自检: ${probe ?? '探测中…'}',
-            style: const TextStyle(color: Colors.amberAccent, fontSize: 11),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '播放: ${position.toStringAsFixed(1)}s / ${duration.toStringAsFixed(1)}s',
-            style: const TextStyle(color: Colors.white70, fontSize: 11),
-          ),
-          if (error != null) ...[
-            const SizedBox(height: 4),
-            Text(
-              '错误: $error',
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Colors.redAccent, fontSize: 11),
-            ),
-          ],
-        ],
-      ),
+/// 排障日志：写入 exe 同目录 player_debug.log，便于直接读取真实状态。
+void _debugLog(String message) {
+  debugPrint('[Player] $message');
+  try {
+    final file = File('${Directory.systemTemp.path}/framelet_player.log');
+    file.writeAsStringSync(
+      '${DateTime.now().toIso8601String()} $message\n',
+      mode: FileMode.append,
+      flush: true,
     );
+  } catch (_) {
+    // 日志失败不影响播放
   }
 }

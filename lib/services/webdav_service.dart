@@ -148,13 +148,15 @@ class WebDavService {
     return null;
   }
 
-  /// 构造可直接播放的文件 URL（路径逐段编码，避免中文/空格问题）。
+  /// 构造可直接播放的文件 URL。
+  ///
+  /// 注意：webdav_client 返回的 path 已是解码后的明文（中文、空格、方括号原样），
+  /// 只在这里统一编码；再手动 decode 会在文件名含 % 时抛 Illegal percent encoding。
   static Uri playUrl(MediaSource source, String filePath) {
     final base = Uri.parse(source.address.trim());
     final segments = filePath
         .split('/')
         .where((segment) => segment.isNotEmpty)
-        .map((segment) => Uri.decodeComponent(segment))
         .toList();
     return Uri(
       scheme: base.scheme.isEmpty ? 'http' : base.scheme,
