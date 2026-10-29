@@ -98,6 +98,9 @@ class MediaLibrary extends ChangeNotifier {
   int countByKind(MediaKind kind) => byKind(kind).length;
 
   /// 某聚合条目对应的单集文件列表（电影返回自身）。
+  ///
+  /// 只按「同一媒体源 + 同一文件夹」收集，不再比较 kind——
+  /// 旧缓存里组内文件的分类可能与聚合条目不一致，按 kind 过滤会漏掉整部剧。
   List<ScannedVideo> episodesOf(ScannedVideo video) {
     if (video.episodeCount <= 1) return [video];
     final parent = parentPathOf(video.path);
@@ -105,7 +108,7 @@ class MediaLibrary extends ChangeNotifier {
     for (final videos in _videosBySource.values) {
       for (final candidate in videos) {
         if (candidate.sourceId != video.sourceId) continue;
-        if (candidate.kind != video.kind) continue;
+        if (WebDavService.isExtraFile(candidate.title)) continue;
         if (parentPathOf(candidate.path) != parent) continue;
         result.add(candidate);
       }

@@ -224,7 +224,7 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
               ),
             ),
-          if (_errorMessage != null)
+          if (_errorMessage != null && _durationSec <= 0)
             Positioned.fill(
               child: Center(
                 child: Container(
