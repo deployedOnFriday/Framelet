@@ -18,7 +18,7 @@ class SearchResultsPage extends StatelessWidget {
     final keyword = query.toLowerCase();
     final results = <MediaItem>[
       for (final kind in MediaKind.values)
-        for (final video in MediaLibrary.aggregate(library.byKind(kind)))
+        for (final video in library.byKind(kind))
           if (video.title.toLowerCase().contains(keyword)) ?toMediaItem(video),
     ];
 

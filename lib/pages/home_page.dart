@@ -121,7 +121,7 @@ class _HomePageState extends State<HomePage> {
   /// 真实扫描数据优先；为空时回退演示内容。
   List<MediaItem> _sectionItems(MediaKind kind, List<MediaItem> fallback) {
     final library = MediaLibrary.instance;
-    final scanned = MediaLibrary.aggregate(library.byKind(kind));
+    final scanned = library.byKind(kind);
     if (scanned.isEmpty) return fallback;
     return [for (final video in scanned) ?toMediaItem(video)];
   }

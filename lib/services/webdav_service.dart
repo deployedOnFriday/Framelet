@@ -112,6 +112,8 @@ class WebDavService {
           continue;
         }
         if (!isVideoFile(name)) continue;
+        // 片头片尾、预告花絮等不算正片
+        if (isExtraFile(name)) continue;
         if (videos.length >= maxVideoCount) {
           onProgress?.call('已达到扫描上限 $maxVideoCount 个文件，停止深入');
           return videos;
@@ -149,11 +151,45 @@ class WebDavService {
         RegExp(r'\bepisode\s*\d{1,3}\b', caseSensitive: false).hasMatch(lower);
   }
 
+  /// 标题本身就是一个纯集数（如 "14"、"03"），常见于 `14 4K.mp4`、`1.mkv`。
+  static bool looksLikeBareEpisode(String title) =>
+      RegExp(r'^\d{1,3}\s*[~\-_.]*\s*$').hasMatch(title.trim());
+
+  /// 花絮类文件：片头片尾、预告、特辑等，不应作为正片条目。
+  static bool isExtraFile(String name) {
+    final lower = name.toLowerCase();
+    const extras = [
+      '片头',
+      '片尾',
+      '预告',
+      '花絮',
+      '特辑',
+      '彩蛋',
+      '幕后',
+      '制作特辑',
+      'trailer',
+      'teaser',
+      'sample',
+      'nced',
+      'ncop',
+      'featurette',
+      'extra',
+      'preview',
+      'interview',
+      'making',
+    ];
+    final base = cleanTitle(name).toLowerCase();
+    for (final extra in extras) {
+      if (base.contains(extra) || lower.contains(extra)) return true;
+    }
+    return false;
+  }
+
   /// 综合目录名与文件名判定分类。
   ///
   /// 规则：
   /// 1. 目录名已明确为动漫/综艺/电视剧 → 沿用（这些分类不会有歧义）
-  /// 2. 文件名含集数标记 → 电视剧（即使目录叫"电影"）
+  /// 2. 文件名含集数标记（S01E13）或本身就是集数（14）→ 电视剧
   /// 3. 其余按目录名，最后兜底电影
   static MediaKind resolveKind(String fileName, MediaKind? dirKind) {
     if (dirKind != null &&
@@ -163,6 +199,7 @@ class WebDavService {
     }
     // 注意用原始文件名判断：cleanTitle 会把 ".S01E13" 当作扩展名截掉
     if (looksLikeEpisode(fileName)) return MediaKind.series;
+    if (looksLikeBareEpisode(cleanTitle(fileName))) return MediaKind.series;
     return dirKind ?? MediaKind.movie;
   }
 
@@ -241,6 +278,9 @@ class WebDavService {
     final dot = fileName.lastIndexOf('.');
     var title = dot > 0 ? fileName.substring(0, dot) : fileName;
     title = title.replaceAll(RegExp(r'\.[0-9A-Za-z]{2,4}$'), '');
+    title = title
+        .replaceAll(RegExp(r'[-_～~\s]*(全集|完整版|全\d{1,3}集|完结)$'), '')
+        .trim();
     title = title
         .replaceAll(
           RegExp(

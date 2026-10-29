@@ -71,6 +71,39 @@ void main() {
       expect(result, hasLength(2));
     });
 
+    test('纯数字文件名（14 4K.mp4）按文件夹合并', () {
+      final tang = [
+        for (var i = 14; i <= 40; i++) video('/夸克网盘/唐朝诡事录/唐朝诡事录3/$i', '$i'),
+      ];
+      final result = MediaLibrary.aggregate(tang);
+      expect(result, hasLength(1));
+      expect(result.first.title, '唐朝诡事录3');
+      expect(result.first.episodeCount, 27);
+      expect(result.first.kind, MediaKind.series);
+    });
+
+    test('季号目录（剧名/1/1.mkv）向上取剧名', () {
+      final doctor = [
+        for (var i = 1; i <= 9; i++) video('/夸克网盘/机智的医生生活/1/$i', '$i'),
+      ];
+      final result = MediaLibrary.aggregate(doctor);
+      expect(result, hasLength(1));
+      expect(result.first.title, '机智的医生生活');
+      expect(result.first.episodeCount, 9);
+    });
+
+    test('片头片尾等花絮不进入媒体库', () {
+      final result = MediaLibrary.aggregate([
+        video('/夸克网盘/成何体统/[片头片尾]/片头', '片头'),
+        video('/夸克网盘/成何体统/[片头片尾]/片尾', '片尾'),
+        video('/夸克网盘/成何体统/[片头片尾]/片尾2', '片尾2'),
+        video('/夸克网盘/成何体统/成何体统.S01E01', '成何体统.S01E01'),
+        video('/夸克网盘/成何体统/成何体统.S01E02', '成何体统.S01E02'),
+      ]);
+      expect(result, hasLength(1));
+      expect(result.first.episodeCount, 2);
+    });
+
     test('动漫目录下的中文集数标记保留动漫分类', () {
       final anime = [
         for (var i = 1; i <= 12; i++)

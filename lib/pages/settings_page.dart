@@ -98,7 +98,7 @@ class _SettingsPageState extends State<SettingsPage> {
         var total = 0;
         var withPoster = 0;
         for (final kind in MediaKind.values) {
-          final items = MediaLibrary.aggregate(library.byKind(kind));
+          final items = library.byKind(kind);
           total += items.length;
           withPoster += items.where((v) => v.posterPath != null).length;
         }
@@ -180,7 +180,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         key: const ValueKey('start-scrape'),
                         onPressed: library.scraping || total == 0
                             ? null
-                            : () => library.scrapeAll(),
+                            : () => library.scrapeAll(force: missing == 0),
                         icon: library.scraping
                             ? const SizedBox(
                                 width: 16,
@@ -195,17 +195,26 @@ class _SettingsPageState extends State<SettingsPage> {
                           library.scraping
                               ? '刮削中…'
                               : missing == 0 && total > 0
-                              ? '重新刮削'
+                              ? '重新刮削（覆盖已有）'
                               : '开始刮削',
                         ),
                       ),
-                      const SizedBox(width: 14),
+                      const SizedBox(width: 12),
+                      if (!library.scraping)
+                        TextButton(
+                          key: const ValueKey('rescrape-all'),
+                          onPressed: () => library.scrapeAll(force: true),
+                          child: const Text('全部重新刮削'),
+                        ),
+                      const SizedBox(width: 8),
                       if (missing > 0 && !library.scraping)
-                        Text(
-                          '还有 $missing 个条目需要匹配',
-                          style: const TextStyle(
-                            color: AppColors.muted,
-                            fontSize: 12.5,
+                        Expanded(
+                          child: Text(
+                            '还有 $missing 个条目需要匹配',
+                            style: const TextStyle(
+                              color: AppColors.muted,
+                              fontSize: 12.5,
+                            ),
                           ),
                         ),
                     ],

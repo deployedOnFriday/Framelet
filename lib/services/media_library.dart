@@ -71,9 +71,12 @@ class MediaLibrary extends ChangeNotifier {
 
   /// 某分类的聚合条目（跨所有媒体源）。
   List<ScannedVideo> byKind(MediaKind kind) {
+    // 先按文件夹聚合，再按聚合后的分类筛选：
+    // 这样「想见你」这类 14 集的剧集不会留在电影分类里。
     final merged = <String, ScannedVideo>{};
-    for (final videos in _videosBySource.values) {
-      for (final video in videos) {
+    for (final entry in _videosBySource.entries) {
+      final aggregated = aggregate(entry.value);
+      for (final video in aggregated) {
         if (video.kind != kind) continue;
         final key = '${video.sourceId}|${video.title.toLowerCase()}';
         final existing = merged[key];
@@ -341,8 +344,8 @@ class MediaLibrary extends ChangeNotifier {
 
   /// 批量刮削：为所有条目匹配海报、简介与评分。
   ///
-  /// 已刮到海报的条目跳过；剧集同组共享一张海报。
-  Future<void> scrapeAll() async {
+  /// 默认跳过已有海报的条目；force 为 true 时重新匹配并覆盖。
+  Future<void> scrapeAll({bool force = false}) async {
     if (scraping) return;
     scraping = true;
     scrapeDone = 0;
@@ -380,7 +383,7 @@ class MediaLibrary extends ChangeNotifier {
           (v) => v.posterPath != null,
           orElse: () => job.representative,
         );
-        if (target.posterPath != null) {
+        if (!force && target.posterPath != null) {
           scrapeDone++;
           scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal（跳过已有海报）';
           notifyListeners();
@@ -393,8 +396,14 @@ class MediaLibrary extends ChangeNotifier {
         final parsed = ScraperService.parseTitle(job.representative.title);
         ScrapeResult? result;
         // 优先 TMDB（中文片名与电影覆盖最好），失败回退 TVmaze
+        final preferTv =
+            job.group.length > 1 || job.representative.kind != MediaKind.movie;
         for (final query in parsed.queries) {
-          result = await ScraperService.searchTmdb(query, year: parsed.year);
+          result = await ScraperService.searchTmdb(
+            query,
+            year: parsed.year,
+            preferTv: preferTv,
+          );
           if (result != null) break;
         }
         if (result == null) {
@@ -478,6 +487,8 @@ class MediaLibrary extends ChangeNotifier {
   static List<ScannedVideo> aggregate(List<ScannedVideo> videos) {
     final byFolder = <String, List<ScannedVideo>>{};
     for (final video in videos) {
+      // 片头片尾、预告花絮等不是正片，直接不进入媒体库
+      if (WebDavService.isExtraFile(video.title)) continue;
       byFolder.putIfAbsent(parentPathOf(video.path), () => []).add(video);
     }
 
@@ -489,11 +500,7 @@ class MediaLibrary extends ChangeNotifier {
         result.addAll(group);
         continue;
       }
-      final folderName = _lastSegment(entry.key);
-      final folderTitle = WebDavService.cleanTitle(folderName);
-      final title = _isGenericFolder(folderTitle)
-          ? _commonPrefixTitle(group)
-          : folderTitle;
+      final title = _seriesTitle(entry.key, group);
       // 电影目录下的剧集修正为电视剧；动漫/综艺保持原分类
       final kind = group.first.kind == MediaKind.movie
           ? MediaKind.series
@@ -521,6 +528,14 @@ class MediaLibrary extends ChangeNotifier {
     if (group.any((video) => WebDavService.looksLikeEpisode(video.title))) {
       return true;
     }
+    // 纯数字文件名（1.mkv、14~4K.mp4）在 ≥3 个文件时视为剧集
+    if (group.length >= 3 &&
+        group.every(
+          (video) =>
+              RegExp(r'^\d{1,3}\s*[~\-_.]*\s*$').hasMatch(video.title.trim()),
+        )) {
+      return true;
+    }
     // 没有标准集数标记时，按「标题去掉末尾数字后是否一致」判断；
     // 至少 3 个文件才认定，避免把《流浪地球2》之类的续集误合并。
     if (group.length < 3) return false;
@@ -542,6 +557,31 @@ class MediaLibrary extends ChangeNotifier {
     );
     cleaned = cleaned.replaceAll(RegExp(r'[\s._-]*\d{1,4}$'), '').trim();
     return cleaned;
+  }
+
+  /// 由所在目录推导剧名：跳过「电影」「1」（季号）这类无效目录，向上找真正的剧名。
+  static String _seriesTitle(String parentPath, List<ScannedVideo> group) {
+    var path = parentPath;
+    var segment = _lastSegment(path);
+    var guard = 0;
+    while (guard < 4) {
+      final isSeasonFolder =
+          RegExp(r'^\d{1,2}$').hasMatch(segment) ||
+          RegExp(
+            r'^season\s*\d+\s*[（()）]*$',
+            caseSensitive: false,
+          ).hasMatch(segment);
+      if (!_isGenericFolder(segment) && !isSeasonFolder && segment.isNotEmpty) {
+        return WebDavService.cleanTitle(segment);
+      }
+      final nextPath = parentPathOf(path);
+      final nextSegment = _lastSegment(nextPath);
+      if (nextSegment == segment || nextSegment.isEmpty) break;
+      path = nextPath;
+      segment = nextSegment;
+      guard++;
+    }
+    return _commonPrefixTitle(group);
   }
 
   /// 文件夹名是否只是"电影/电视剧/动漫/综艺"这类通用名。

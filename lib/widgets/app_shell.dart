@@ -26,7 +26,7 @@ class _AppShellState extends State<AppShell> {
   /// 真实扫描数据优先；媒体库为空时回退演示数据。
   List<MediaItem> _itemsFor(MediaKind kind, List<MediaItem> fallback) {
     final library = MediaLibrary.instance;
-    final scanned = MediaLibrary.aggregate(library.byKind(kind));
+    final scanned = library.byKind(kind);
     if (scanned.isEmpty) return fallback;
     return [for (final video in scanned) ?toMediaItem(video)];
   }

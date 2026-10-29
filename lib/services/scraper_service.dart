@@ -233,7 +233,11 @@ class ScraperService {
   /// TMDB 搜索（需 API Key；网络不通时自动回退 TVmaze）。
   ///
   /// 中文片名、电影、剧集全覆盖，海报质量最好。
-  static Future<ScrapeResult?> searchTmdb(String query, {int? year}) async {
+  static Future<ScrapeResult?> searchTmdb(
+    String query, {
+    int? year,
+    bool preferTv = false,
+  }) async {
     final key = tmdbApiKey?.trim();
     if (key == null || key.isEmpty || query.trim().isEmpty) return null;
     final pathAndQuery =
@@ -269,6 +273,10 @@ class ScraperService {
         var score = _similarity(query, name);
         final originalScore = _similarity(query, originalName);
         if (originalScore > score) score = originalScore;
+        // 类型匹配加权：剧集优先匹配 tv，电影优先匹配 movie，
+        // 避免《想见你》《信号》这类同名电影/剧集张冠李戴。
+        if (preferTv && mediaType == 'tv') score += 0.35;
+        if (!preferTv && mediaType == 'movie') score += 0.3;
         if (itemYear != null && year != null) {
           final gap = (year - itemYear).abs();
           if (gap == 0) score += 0.3;
