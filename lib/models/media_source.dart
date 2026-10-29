@@ -79,6 +79,9 @@ class ScannedVideo {
     this.episodeCount = 1,
     this.sizeBytes = 0,
     this.modified,
+    this.posterPath,
+    this.summary,
+    this.rating,
   });
 
   final String sourceId;
@@ -89,6 +92,15 @@ class ScannedVideo {
   final int sizeBytes;
   final DateTime? modified;
 
+  /// 刮削得到的本地海报文件路径。
+  final String? posterPath;
+
+  /// 刮削得到的剧情简介。
+  final String? summary;
+
+  /// 评分（0-10 文本，例如 "8.6"）。
+  final String? rating;
+
   Map<String, Object?> toJson() => {
     'sourceId': sourceId,
     'path': path,
@@ -97,6 +109,9 @@ class ScannedVideo {
     'episodeCount': episodeCount,
     'sizeBytes': sizeBytes,
     'modified': modified?.millisecondsSinceEpoch,
+    'posterPath': posterPath,
+    'summary': summary,
+    'rating': rating,
   };
 
   factory ScannedVideo.fromJson(Map<String, Object?> json) => ScannedVideo(
@@ -109,9 +124,18 @@ class ScannedVideo {
     modified: json['modified'] == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(json['modified']! as int),
+    posterPath: json['posterPath'] as String?,
+    summary: json['summary'] as String?,
+    rating: json['rating'] as String?,
   );
 
-  ScannedVideo copyWith({String? title, int? episodeCount}) => ScannedVideo(
+  ScannedVideo copyWith({
+    String? title,
+    int? episodeCount,
+    String? posterPath,
+    String? summary,
+    String? rating,
+  }) => ScannedVideo(
     sourceId: sourceId,
     path: path,
     title: title ?? this.title,
@@ -119,6 +143,9 @@ class ScannedVideo {
     episodeCount: episodeCount ?? this.episodeCount,
     sizeBytes: sizeBytes,
     modified: modified,
+    posterPath: posterPath ?? this.posterPath,
+    summary: summary ?? this.summary,
+    rating: rating ?? this.rating,
   );
 }
 
@@ -133,9 +160,11 @@ MediaItem? toMediaItem(ScannedVideo video) {
     year: video.modified == null ? '' : video.modified!.year.toString(),
     colors: _paletteFor(video.title),
     icon: _iconFor(video.kind),
+    rating: video.rating,
     quality: video.episodeCount > 1 ? '${video.episodeCount} 集' : null,
     description: video.path,
     payload: video,
+    posterPath: video.posterPath,
   );
 }
 

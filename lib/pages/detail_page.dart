@@ -206,8 +206,10 @@ class DetailPage extends StatelessWidget {
         MediaKind.anime => Icons.animation_outlined,
         MediaKind.variety => Icons.emoji_events_outlined,
       },
+      rating: video.rating,
       quality: video.episodeCount > 1 ? '${video.episodeCount} 集' : null,
       progress: progress,
+      posterPath: video.posterPath,
     );
   }
 
@@ -248,6 +250,20 @@ class DetailPage extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: Theme.of(context).textTheme.bodySmall,
         ),
+        if (video.summary != null && video.summary!.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          Text('剧情简介', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          Text(
+            video.summary!,
+            maxLines: 6,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              height: 1.75,
+              color: AppColors.text.withValues(alpha: 0.82),
+            ),
+          ),
+        ],
         const SizedBox(height: 24),
         if (isSeries) ...[
           Row(

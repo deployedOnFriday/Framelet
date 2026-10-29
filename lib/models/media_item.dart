@@ -12,6 +12,7 @@ class MediaItem {
     this.progress = 0,
     this.description = '',
     this.payload,
+    this.posterPath,
   });
 
   final String title;
@@ -23,6 +24,9 @@ class MediaItem {
   final String? quality;
   final double progress;
   final String description;
+
+  /// 刮削得到的本地海报文件路径；为空时使用渐变封面。
+  final String? posterPath;
 
   /// 任意关联数据：真实媒体条目时是 ScannedVideo，播放历史时是 HistoryEntry。
   final Object? payload;

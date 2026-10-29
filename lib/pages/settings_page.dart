@@ -65,17 +65,198 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _buildContent() {
     if (_selectedTab == 1) return _buildMediaSources();
+    if (_selectedTab == 3) return _buildScraper();
     if (_selectedTab == 4) return _buildAbout();
     final placeholders = [
       ('常规设置', Icons.tune_rounded, '启动行为、界面语言和缓存策略'),
       ('播放设置', Icons.play_circle_outline_rounded, '默认音量、倍速、字幕和硬件解码'),
-      ('刮削设置', Icons.auto_fix_high_rounded, '影片信息来源、匹配规则和语言偏好'),
     ];
     final item = placeholders[_selectedTab == 0 ? 0 : _selectedTab - 1];
     return _PreferencePlaceholder(
       title: item.$1,
       icon: item.$2,
       description: item.$3,
+    );
+  }
+
+  Widget _buildScraper() {
+    return AnimatedBuilder(
+      animation: MediaLibrary.instance,
+      builder: (context, _) {
+        final library = MediaLibrary.instance;
+        var total = 0;
+        var withPoster = 0;
+        for (final kind in MediaKind.values) {
+          final items = MediaLibrary.aggregate(library.byKind(kind));
+          total += items.length;
+          withPoster += items.where((v) => v.posterPath != null).length;
+        }
+        final missing = total - withPoster;
+
+        return ListView(
+          children: [
+            Text('海报刮削', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            const Text(
+              '根据片名自动匹配海报、简介与评分。数据源为 TVmaze（免费、无需配置）。',
+              style: TextStyle(color: AppColors.muted, fontSize: 13),
+            ),
+            const SizedBox(height: 20),
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      _scrapeStat(
+                        '${library.byKind(MediaKind.movie).length + library.byKind(MediaKind.series).length + library.byKind(MediaKind.anime).length + library.byKind(MediaKind.variety).length}',
+                        '媒体库条目',
+                      ),
+                      const SizedBox(width: 26),
+                      _scrapeStat('$withPoster', '已匹配海报'),
+                      const SizedBox(width: 26),
+                      _scrapeStat('$missing', '待匹配'),
+                    ],
+                  ),
+                  if (library.scraping) ...[
+                    const SizedBox(height: 18),
+                    LinearProgressIndicator(
+                      value: library.scrapeTotal == 0
+                          ? null
+                          : library.scrapeDone / library.scrapeTotal,
+                      minHeight: 6,
+                      color: AppColors.primary,
+                      backgroundColor: AppColors.border,
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      library.scrapeProgress,
+                      style: const TextStyle(
+                        color: AppColors.primary,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ] else if (library.scrapeProgress.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.check_circle_outline_rounded,
+                          size: 17,
+                          color: AppColors.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          library.scrapeProgress,
+                          style: const TextStyle(
+                            color: AppColors.primary,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        key: const ValueKey('start-scrape'),
+                        onPressed: library.scraping || total == 0
+                            ? null
+                            : () => library.scrapeAll(),
+                        icon: library.scraping
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : const Icon(Icons.auto_awesome_rounded),
+                        label: Text(
+                          library.scraping
+                              ? '刮削中…'
+                              : missing == 0 && total > 0
+                              ? '重新刮削'
+                              : '开始刮削',
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      if (missing > 0 && !library.scraping)
+                        Text(
+                          '还有 $missing 个条目需要匹配',
+                          style: const TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: AppColors.primarySoft,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.lightbulb_outline_rounded,
+                    size: 19,
+                    color: AppColors.primary,
+                  ),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      '匹配依据文件名中的片名与年份，如「Apocalypse.Hotel.2025.S01E01」可正确识别。'
+                      '若文件名过于随意（如「新建文件夹」）可能匹配不到，会保留渐变封面。'
+                      '海报下载后缓存到本地，重复刮削不会重复下载。',
+                      style: TextStyle(
+                        color: AppColors.primary,
+                        fontSize: 12.5,
+                        height: 1.6,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _scrapeStat(String value, String label) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            color: AppColors.primary,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 11.5, color: AppColors.muted),
+        ),
+      ],
     );
   }
 

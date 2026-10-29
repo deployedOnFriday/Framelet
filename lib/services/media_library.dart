@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/media_source.dart';
 import 'credential_store.dart';
+import 'scraper_service.dart';
 import 'webdav_service.dart';
 
 enum ScanStatus { idle, scanning, done, failed }
@@ -29,6 +30,11 @@ class MediaLibrary extends ChangeNotifier {
 
   ScanStatus scanStatus = ScanStatus.idle;
   String scanProgress = '';
+
+  bool scraping = false;
+  String scrapeProgress = '';
+  int scrapeDone = 0;
+  int scrapeTotal = 0;
 
   List<MediaSource> get sources => List.unmodifiable(_sources);
 
@@ -264,6 +270,111 @@ class MediaLibrary extends ChangeNotifier {
       await _persistSources();
     }
     notifyListeners();
+  }
+
+  /// 批量刮削：为所有条目匹配海报、简介与评分。
+  ///
+  /// 已刮到海报的条目跳过；剧集同组共享一张海报。
+  Future<void> scrapeAll() async {
+    if (scraping) return;
+    scraping = true;
+    scrapeDone = 0;
+    scrapeTotal = 0;
+    scrapeProgress = '准备刮削…';
+    notifyListeners();
+
+    try {
+      final jobs =
+          <({ScannedVideo representative, List<ScannedVideo> group})>[];
+      for (final entry in _videosBySource.entries) {
+        final videos = entry.value;
+        for (final video in videos.where((v) => v.kind == MediaKind.movie)) {
+          jobs.add((representative: video, group: [video]));
+        }
+        final grouped = <String, List<ScannedVideo>>{};
+        for (final video in videos.where((v) => v.kind != MediaKind.movie)) {
+          grouped.putIfAbsent(parentPathOf(video.path), () => []).add(video);
+        }
+        for (final group in grouped.values) {
+          jobs.add((representative: group.first, group: group));
+        }
+      }
+
+      scrapeTotal = jobs.length;
+      if (scrapeTotal == 0) {
+        scrapeProgress = '媒体库还是空的，先同步媒体源';
+        return;
+      }
+
+      for (final job in jobs) {
+        final target = job.group.firstWhere(
+          (v) => v.posterPath != null,
+          orElse: () => job.representative,
+        );
+        if (target.posterPath != null) {
+          scrapeDone++;
+          scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal（跳过已有海报）';
+          notifyListeners();
+          continue;
+        }
+
+        scrapeProgress = '正在匹配「${job.representative.title}」…';
+        notifyListeners();
+
+        final parsed = ScraperService.parseTitle(job.representative.title);
+        ScrapeResult? result;
+        for (final query in parsed.queries) {
+          result = await ScraperService.search(query, year: parsed.year);
+          if (result != null) break;
+        }
+
+        if (result != null) {
+          String? posterPath;
+          if (result.posterUrl != null) {
+            posterPath = await ScraperService.downloadPoster(
+              result.posterUrl!,
+              cacheKey: '${job.representative.kind.name}_${result.name}',
+            );
+          }
+          if (posterPath != null ||
+              result.summary != null ||
+              result.rating != null) {
+            for (final member in job.group) {
+              _updateVideo(
+                member.sourceId,
+                member.path,
+                (video) => video.copyWith(
+                  posterPath: posterPath,
+                  summary: result!.summary,
+                  rating: result.rating,
+                ),
+              );
+            }
+            await _persistVideos(job.representative.sourceId);
+          }
+        }
+
+        scrapeDone++;
+        scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal';
+        notifyListeners();
+      }
+
+      scrapeProgress = '刮削完成，共处理 $scrapeTotal 个条目';
+    } finally {
+      scraping = false;
+      notifyListeners();
+    }
+  }
+
+  void _updateVideo(
+    String sourceId,
+    String path,
+    ScannedVideo Function(ScannedVideo video) update,
+  ) {
+    final list = _videosBySource[sourceId];
+    if (list == null) return;
+    final index = list.indexWhere((video) => video.path == path);
+    if (index >= 0) list[index] = update(list[index]);
   }
 
   /// 把底层错误翻译成人话。

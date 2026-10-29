@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../models/media_item.dart';
@@ -16,6 +18,9 @@ class MediaArtwork extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final posterPath = item.posterPath;
+    final hasPoster =
+        posterPath != null && File(posterPath).existsSync() == true;
     return ClipRRect(
       borderRadius: BorderRadius.circular(borderRadius),
       child: DecoratedBox(
@@ -29,23 +34,15 @@ class MediaArtwork extends StatelessWidget {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Positioned(
-              right: -24,
-              top: -34,
-              child: _ArtworkCircle(size: 120, opacity: 0.12),
-            ),
-            Positioned(
-              left: -30,
-              bottom: -46,
-              child: _ArtworkCircle(size: 140, opacity: 0.1),
-            ),
-            Center(
-              child: Icon(
-                item.icon,
-                size: 48,
-                color: Colors.white.withValues(alpha: 0.76),
-              ),
-            ),
+            if (hasPoster)
+              Image.file(
+                File(posterPath),
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) =>
+                    _buildPlaceholder(),
+              )
+            else
+              _buildPlaceholder(),
             if (item.rating != null)
               Positioned(
                 left: 9,
@@ -64,6 +61,32 @@ class MediaArtwork extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  /// 没有海报时的渐变占位（图标 + 氛围圆环）。
+  Widget _buildPlaceholder() {
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned(
+          right: -24,
+          top: -34,
+          child: _ArtworkCircle(size: 120, opacity: 0.12),
+        ),
+        Positioned(
+          left: -30,
+          bottom: -46,
+          child: _ArtworkCircle(size: 140, opacity: 0.1),
+        ),
+        Center(
+          child: Icon(
+            item.icon,
+            size: 48,
+            color: Colors.white.withValues(alpha: 0.76),
+          ),
+        ),
+      ],
     );
   }
 }
