@@ -51,3 +51,6 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Test failure diff artifacts
+test/failures/
