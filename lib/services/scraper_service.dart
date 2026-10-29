@@ -30,11 +30,25 @@ class ScraperService {
   static const _requestGap = Duration(milliseconds: 260);
   static DateTime _lastRequest = DateTime.fromMillisecondsSinceEpoch(0);
 
-  /// 可选 HTTP 代理（如 127.0.0.1:7890）：TMDB API 在部分网络下需要它。
+  /// 可选 HTTP 代理（如 127.0.0.1:7890）。
   static String? proxyAddress;
 
-  /// 可选 TMDB API Key（v3）：配置后优先用 TMDB，中文与电影覆盖更好。
+  /// 可选 TMDB API Key（v3）：配置后优先用 TMDB，中文与电影覆盖最好。
   static String? tmdbApiKey;
+
+  /// TMDB API 域名在国内被 DNS 污染，直连超时；
+  /// 改用可访问的 CloudFront 节点 IP 直连（TLS 仍按域名校验，安全不受影响）。
+  /// IP 来源：CheckTMDB 项目每日更新的国内可用地址。
+  static const tmdbIpv4 = <String>[
+    '3.167.212.53',
+    '3.167.192.35',
+    '3.167.194.87',
+    '3.164.180.201',
+    '3.167.212.89',
+    '18.154.132.115',
+    '18.154.130.110',
+    '3.167.192.127',
+  ];
 
   static HttpClient _httpClient() {
     final client = HttpClient()
@@ -45,6 +59,109 @@ class ScraperService {
       client.findProxy = (_) => 'PROXY $proxy';
     }
     return client;
+  }
+
+  /// 通过「国内可用 IP + 域名 SNI」直连 TMDB API。
+  ///
+  /// TMDB 在国内被 DNS 污染，直接解析域名会超时；
+  /// 这里用 SecureSocket 手工完成 TLS（host 参数保证 SNI 与证书校验仍按域名），
+  /// 再由 IP 建立 TCP 连接，从而绕过污染。
+  static Future<String?> _tmdbGet(String pathAndQuery) async {
+    const domain = 'api.themoviedb.org';
+    final proxy = (proxyAddress ?? '').trim();
+    if (proxy.isNotEmpty) {
+      // 配了代理时走标准通道
+      final client = _httpClient();
+      try {
+        final request = await client.getUrl(
+          Uri.parse('https://$domain$pathAndQuery'),
+        );
+        final response = await request.close().timeout(
+          const Duration(seconds: 15),
+        );
+        if (response.statusCode != 200) return null;
+        return await response.transform(utf8.decoder).join();
+      } catch (_) {
+        return null;
+      } finally {
+        client.close(force: true);
+      }
+    }
+
+    for (final ip in tmdbIpv4) {
+      Socket? raw;
+      try {
+        raw = await Socket.connect(ip, 443).timeout(const Duration(seconds: 6));
+        final secure = await SecureSocket.secure(
+          raw,
+          host: domain,
+        ).timeout(const Duration(seconds: 8));
+        secure.write(
+          'GET $pathAndQuery HTTP/1.1\r\n'
+          'Host: $domain\r\n'
+          'User-Agent: $_userAgent\r\n'
+          'Accept: application/json\r\n'
+          'Connection: close\r\n\r\n',
+        );
+        final bytes = <int>[];
+        await for (final chunk in secure.timeout(const Duration(seconds: 15))) {
+          bytes.addAll(chunk);
+          if (bytes.length > 2 * 1024 * 1024) break;
+        }
+        await secure.close();
+        final parsed = _parseHttpBody(bytes);
+        if (parsed == null) continue; // 这个 IP 响应不完整，换下一个
+        // 服务器已正常响应：200 取内容，401/403 等直接返回 null（停止轮询）
+        return parsed.status == 200 ? parsed.body : null;
+      } catch (_) {
+        // 换下一个 IP
+      } finally {
+        try {
+          await raw?.close();
+        } catch (_) {}
+      }
+    }
+    return null;
+  }
+
+  /// 解析手写的 HTTP 响应：返回状态码与（chunked 解码后的）正文。
+  static ({int status, String body})? _parseHttpBody(List<int> bytes) {
+    final headerText = latin1.decode(bytes);
+    final headerEnd = headerText.indexOf('\r\n\r\n');
+    if (headerEnd < 0) return null;
+    final headers = headerText.substring(0, headerEnd).toLowerCase();
+    final statusLine = headers.split('\r\n').first;
+    final match = RegExp(r'http/1\.[01]\s+(\d{3})').firstMatch(statusLine);
+    if (match == null) return null;
+    final status = int.tryParse(match.group(1)!) ?? 0;
+    final bodyBytes = bytes.sublist(headerEnd + 4);
+    final body = headers.contains('transfer-encoding: chunked')
+        ? _decodeChunked(bodyBytes)
+        : utf8.decode(bodyBytes, allowMalformed: true);
+    return (status: status, body: body);
+  }
+
+  static String _decodeChunked(List<int> bytes) {
+    final buffer = <int>[];
+    var offset = 0;
+    while (offset < bytes.length) {
+      var lineEnd = -1;
+      for (var i = offset; i + 1 < bytes.length; i++) {
+        if (bytes[i] == 13 && bytes[i + 1] == 10) {
+          lineEnd = i;
+          break;
+        }
+      }
+      if (lineEnd < 0) break;
+      final sizeText = latin1.decode(bytes.sublist(offset, lineEnd)).trim();
+      final size = int.tryParse(sizeText.split(';').first, radix: 16);
+      if (size == null || size <= 0) break;
+      final start = lineEnd + 2;
+      final end = (start + size).clamp(0, bytes.length);
+      buffer.addAll(bytes.sublist(start, end));
+      offset = end + 2;
+    }
+    return utf8.decode(buffer, allowMalformed: true);
   }
 
   /// 海报缓存目录：%APPDATA%/com.framelet/framelet/posters
@@ -119,20 +236,14 @@ class ScraperService {
   static Future<ScrapeResult?> searchTmdb(String query, {int? year}) async {
     final key = tmdbApiKey?.trim();
     if (key == null || key.isEmpty || query.trim().isEmpty) return null;
-    final url = Uri.parse(
-      'https://api.themoviedb.org/3/search/multi'
-      '?api_key=$key&language=zh-CN&include_adult=false'
-      '&query=${Uri.encodeQueryComponent(query)}',
-    );
-    final client = _httpClient();
+    final pathAndQuery =
+        '/3/search/multi'
+        '?api_key=$key&language=zh-CN&include_adult=false'
+        '&query=${Uri.encodeQueryComponent(query)}';
     try {
       await _throttle();
-      final request = await client.getUrl(url);
-      final response = await request.close().timeout(
-        const Duration(seconds: 12),
-      );
-      if (response.statusCode != 200) return null;
-      final body = await response.transform(utf8.decoder).join();
+      final body = await _tmdbGet(pathAndQuery);
+      if (body == null) return null;
       final data = jsonDecode(body) as Map<String, Object?>;
       final results = data['results'] as List<Object?>?;
       if (results == null || results.isEmpty) return null;
@@ -188,8 +299,6 @@ class ScraperService {
       );
     } catch (_) {
       return null;
-    } finally {
-      client.close(force: true);
     }
   }
 

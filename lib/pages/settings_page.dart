@@ -299,7 +299,8 @@ class _SettingsPageState extends State<SettingsPage> {
           const SizedBox(height: 6),
           const Text(
             'TVmaze 免费开箱即用，但只能按英文片名检索，且几乎不收录电影。'
-            '想要中文片名和电影海报，可填写 TMDB 密钥（免费注册）。',
+            '想要中文片名和电影海报，填一个免费的 TMDB 密钥即可——'
+            '已内置国内直连线路，无需任何代理。',
             style: TextStyle(
               color: AppColors.muted,
               fontSize: 12.5,
@@ -311,8 +312,8 @@ class _SettingsPageState extends State<SettingsPage> {
             key: const ValueKey('tmdb-key'),
             controller: _tmdbKeyController,
             decoration: const InputDecoration(
-              labelText: 'TMDB API Key（可选）',
-              hintText: '在 themoviedb.org 免费申请 v3 API Key',
+              labelText: 'TMDB API Key（可选，免费申请）',
+              hintText: 'themoviedb.org → 设置 → API → 申请 v3 Key',
               border: OutlineInputBorder(),
               isDense: true,
             ),
@@ -322,8 +323,8 @@ class _SettingsPageState extends State<SettingsPage> {
             key: const ValueKey('scrape-proxy'),
             controller: _proxyController,
             decoration: const InputDecoration(
-              labelText: '刮削代理（可选）',
-              hintText: '例如 127.0.0.1:7890，留空表示直连',
+              labelText: '备用代理（一般不需要）',
+              hintText: '仅当直连线路失效时填写，例如 127.0.0.1:7890',
               border: OutlineInputBorder(),
               isDense: true,
             ),
@@ -357,7 +358,7 @@ class _SettingsPageState extends State<SettingsPage> {
               const SizedBox(width: 12),
               const Expanded(
                 child: Text(
-                  '提示：TMDB 的 API 在部分网络下需要代理，海报图片可直连下载。',
+                  '密钥保存在系统安全存储中。TMDB 走内置直连线路，海报由图片 CDN 直连下载。',
                   style: TextStyle(color: AppColors.muted, fontSize: 11.5),
                 ),
               ),
