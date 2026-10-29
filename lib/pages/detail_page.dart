@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 
@@ -11,7 +10,7 @@ import '../services/scraper_service.dart';
 import '../widgets/match_dialog.dart';
 import 'player_page.dart';
 
-/// 影片详情页：海报模糊大背景 + 信息区 + 剧集网格（爆米花风格）。
+/// 影片详情页：爆米花风格——剧照大图背景 + 信息浮层 + 剧集剧照列表。
 class DetailPage extends StatelessWidget {
   const DetailPage({required this.video, super.key});
 
@@ -30,66 +29,74 @@ class DetailPage extends StatelessWidget {
 
   Widget _build(BuildContext context) {
     final library = MediaLibrary.instance;
-
-    // 关键：每次构建都从媒体库取最新数据，手动匹配后立即反映
     final current = library.findVideo(video.sourceId, video.path) ?? video;
     final source = library.sourceById(current.sourceId);
     final episodes = library.episodesOf(current);
     final isSeries = episodes.length > 1;
+    final heroH = (MediaQuery.of(context).size.height * 0.42).clamp(
+      320.0,
+      500.0,
+    );
 
     return CustomScrollView(
       slivers: [
+        // 顶部剧照背景 + 信息浮层
         SliverToBoxAdapter(
-          child: Stack(
-            children: [
-              _HeroBackdrop(video: current),
-              Column(
-                children: [
-                  const SizedBox(height: 20),
-                  _TopBar(video: current),
-                  const SizedBox(height: 14),
-                  _InfoRow(video: current, source: source, isSeries: isSeries),
-                ],
-              ),
-            ],
+          child: _HeroWithInfo(
+            video: current,
+            source: source,
+            episodes: episodes,
+            isSeries: isSeries,
+            height: heroH,
           ),
         ),
+        // 剧集区
         if (isSeries)
           SliverPadding(
-            padding: const EdgeInsets.fromLTRB(32, 10, 32, 36),
-            sliver: _EpisodeGrid(episodes: episodes),
+            padding: const EdgeInsets.fromLTRB(28, 0, 28, 32),
+            sliver: _EpisodeList(episodes: episodes),
           )
         else
-          const SliverPadding(padding: EdgeInsets.only(bottom: 36)),
+          const SliverToBoxAdapter(child: SizedBox(height: 40)),
       ],
     );
   }
 }
 
-/// 顶部背景：海报放大模糊 + 上下渐变，让内容自然浮在上面。
-class _HeroBackdrop extends StatelessWidget {
-  const _HeroBackdrop({required this.video});
+/// 顶部剧照背景（占满宽度）+ 所有信息浮在其上。
+class _HeroWithInfo extends StatelessWidget {
+  const _HeroWithInfo({
+    required this.video,
+    required this.source,
+    required this.episodes,
+    required this.isSeries,
+    required this.height,
+  });
 
   final ScannedVideo video;
+  final MediaSource? source;
+  final List<ScannedVideo> episodes;
+  final bool isSeries;
+  final double height;
 
   @override
   Widget build(BuildContext context) {
     final hasPoster =
         video.posterPath != null && File(video.posterPath!).existsSync();
-    final colors = _paletteFor(video.title);
+    final currentEpisode = _currentEpisode(episodes);
+
     return SizedBox(
-      width: double.infinity,
-      height: 470,
+      height: height,
       child: Stack(
         fit: StackFit.expand,
         children: [
+          // 剧照背景：清晰大图，占满整个区域
           if (hasPoster)
-            ImageFiltered(
-              imageFilter: ImageFilter.blur(sigmaX: 36, sigmaY: 36),
-              child: Transform.scale(
-                scale: 1.35,
-                child: Image.file(File(video.posterPath!), fit: BoxFit.cover),
-              ),
+            Image.file(
+              File(video.posterPath!),
+              fit: BoxFit.cover,
+              width: double.infinity,
+              height: double.infinity,
             )
           else
             DecoratedBox(
@@ -97,175 +104,71 @@ class _HeroBackdrop extends StatelessWidget {
                 gradient: LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
-                  colors: colors,
+                  colors: _paletteFor(video.title),
                 ),
               ),
             ),
-          // 上下渐隐：顶部压暗保证文字可读，底部融入页面底色
+          // 渐变遮罩：顶部暗 → 中部自然 → 底部融入页面底色
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                stops: const [0, 0.35, 1],
+                stops: const [0.0, 0.4, 0.75, 1.0],
                 colors: [
-                  Colors.black.withValues(alpha: 0.32),
-                  Colors.black.withValues(alpha: 0.16),
-                  AppColors.background.withValues(alpha: 1),
+                  Colors.black.withValues(alpha: 0.35),
+                  Colors.black.withValues(alpha: 0.1),
+                  AppColors.background.withValues(alpha: 0.5),
+                  AppColors.background,
                 ],
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-
-  List<Color> _paletteFor(String title) {
-    const palettes = <List<Color>>[
-      [Color(0xFF2E5548), Color(0xFF6FA68B)],
-      [Color(0xFF3D5175), Color(0xFF7E97C4)],
-      [Color(0xFF6E5544), Color(0xFFBA9373)],
-      [Color(0xFF4E3D6E), Color(0xFF9373BA)],
-    ];
-    var hash = 0;
-    for (final code in title.codeUnits) {
-      hash = (hash * 31 + code) & 0x7FFFFFFF;
-    }
-    return palettes[hash % palettes.length];
-  }
-}
-
-class _TopBar extends StatelessWidget {
-  const _TopBar({required this.video});
-
-  final ScannedVideo video;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 26),
-      child: Row(
-        children: [
-          Material(
-            color: Colors.black38,
-            borderRadius: BorderRadius.circular(22),
-            child: InkWell(
-              onTap: () => Navigator.of(context).maybePop(),
-              borderRadius: BorderRadius.circular(22),
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.arrow_back_rounded,
-                      color: Colors.white,
-                      size: 18,
-                    ),
-                    SizedBox(width: 6),
-                    Text(
-                      '返回',
-                      style: TextStyle(color: Colors.white, fontSize: 13),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const Spacer(),
-          Text(
-            sourceLabel(video.kind),
-            style: TextStyle(
-              color: Colors.white.withValues(alpha: 0.75),
-              fontSize: 13,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static String sourceLabel(MediaKind kind) => switch (kind) {
-    MediaKind.movie => '电影',
-    MediaKind.series => '电视剧',
-    MediaKind.anime => '动漫',
-    MediaKind.variety => '综艺',
-  };
-}
-
-/// 海报 + 标题信息 + 操作按钮。
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({
-    required this.video,
-    required this.source,
-    required this.isSeries,
-  });
-
-  final ScannedVideo video;
-  final MediaSource? source;
-  final bool isSeries;
-
-  @override
-  Widget build(BuildContext context) {
-    final episodes = MediaLibrary.instance.episodesOf(video);
-    final hasPoster =
-        video.posterPath != null && File(video.posterPath!).existsSync();
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 32),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 海报卡片
-          Container(
-            width: 200,
-            height: 300,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.45),
-                  blurRadius: 28,
-                  offset: const Offset(0, 10),
-                ),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: hasPoster
-                  ? Image.file(
-                      File(video.posterPath!),
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => _PosterFallback(video: video),
-                    )
-                  : _PosterFallback(video: video),
-            ),
-          ),
-          const SizedBox(width: 30),
-          // 信息区
-          Expanded(
+          // 信息层
+          Padding(
+            padding: const EdgeInsets.fromLTRB(28, 16, 28, 20),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const SizedBox(height: 26),
+                // 顶部行：返回 + 类型
+                Row(
+                  children: [
+                    _GhostButton(
+                      icon: Icons.arrow_back_rounded,
+                      label: '返回',
+                      onTap: () => Navigator.of(context).maybePop(),
+                    ),
+                    const Spacer(),
+                    Text(
+                      _kindLabel(video.kind),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.55),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+                const Spacer(),
+                // 标题
                 Text(
                   video.title,
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Colors.white,
-                    fontSize: 30,
-                    fontWeight: FontWeight.w700,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w800,
                     height: 1.2,
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 8),
+                // 评分与元信息
                 Row(
                   children: [
                     if (video.rating != null) ...[
                       const Icon(
                         Icons.star_rounded,
-                        size: 19,
+                        size: 18,
                         color: Color(0xFFFFC85C),
                       ),
                       const SizedBox(width: 4),
@@ -273,11 +176,11 @@ class _InfoRow extends StatelessWidget {
                         video.rating!,
                         style: const TextStyle(
                           color: Color(0xFFFFC85C),
-                          fontSize: 17,
+                          fontSize: 16,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
-                      const SizedBox(width: 16),
+                      const SizedBox(width: 12),
                     ],
                     Flexible(
                       child: Text(
@@ -289,72 +192,78 @@ class _InfoRow extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.75),
-                          fontSize: 13.5,
+                          color: Colors.white.withValues(alpha: 0.7),
+                          fontSize: 13,
                         ),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 14),
+                // 播放按钮 + 修正匹配
                 Row(
                   children: [
                     SizedBox(
-                      height: 48,
-                      child: FilledButton.icon(
+                      height: 44,
+                      child: ElevatedButton.icon(
                         key: const ValueKey('detail-play'),
                         onPressed: episodes.isEmpty
                             ? null
-                            : () => _play(context, episodes.first),
-                        style: FilledButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          foregroundColor: Colors.black87,
+                            : () => _play(context, currentEpisode),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.black87,
+                          foregroundColor: Colors.white,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(24),
+                            borderRadius: BorderRadius.circular(8),
                           ),
+                          padding: const EdgeInsets.symmetric(horizontal: 20),
                           textStyle: const TextStyle(
-                            fontSize: 15,
+                            fontSize: 14,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        icon: const Icon(Icons.play_arrow_rounded, size: 26),
+                        icon: const Icon(Icons.play_arrow_rounded, size: 24),
                         label: Text(
-                          _playLabel(episodes.isEmpty ? null : episodes.first),
+                          episodes.isEmpty
+                              ? '播放'
+                              : '播放 第 ${currentEpisode.index + 1} 集${_formatDuration(currentEpisode.durationSec)}',
                         ),
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: 10),
                     SizedBox(
-                      height: 48,
+                      height: 44,
                       child: OutlinedButton.icon(
                         key: const ValueKey('manual-match'),
                         onPressed: () => _matchManually(context, episodes),
                         style: OutlinedButton.styleFrom(
                           foregroundColor: Colors.white,
                           side: BorderSide(
-                            color: Colors.white.withValues(alpha: 0.5),
+                            color: Colors.white.withValues(alpha: 0.45),
                           ),
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(24),
+                            borderRadius: BorderRadius.circular(8),
                           ),
-                          textStyle: const TextStyle(fontSize: 13.5),
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          textStyle: const TextStyle(fontSize: 13),
                         ),
-                        icon: const Icon(Icons.manage_search_rounded, size: 20),
+                        icon: const Icon(Icons.manage_search_rounded, size: 18),
                         label: const Text('修正匹配'),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 20),
+                const SizedBox(height: 14),
+                // 简介
                 if (video.summary != null && video.summary!.isNotEmpty)
                   Text(
                     video.summary!,
-                    maxLines: 4,
+                    maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.82),
-                      fontSize: 13.5,
-                      height: 1.75,
+                      color: Colors.white.withValues(alpha: 0.75),
+                      fontSize: 13,
+                      height: 1.65,
                     ),
                   ),
               ],
@@ -365,28 +274,44 @@ class _InfoRow extends StatelessWidget {
     );
   }
 
-  String _playLabel(ScannedVideo? episode) {
-    if (episode == null) return '播放';
-    final entry = PlaybackHistory.instance.entryOf(
-      episode.sourceId,
-      episode.path,
+  /// 当前应播放的集：优先上次看到的，否则第一集。
+  ({ScannedVideo episode, int index, double durationSec}) _currentEpisode(
+    List<ScannedVideo> episodes,
+  ) {
+    if (episodes.isEmpty) return (episode: video, index: 0, durationSec: 0);
+    final history = PlaybackHistory.instance;
+    for (var i = 0; i < episodes.length; i++) {
+      final entry = history.entryOf(episodes[i].sourceId, episodes[i].path);
+      if (entry != null && !entry.finished && entry.positionSec > 1) {
+        return (episode: episodes[i], index: i, durationSec: entry.durationSec);
+      }
+    }
+    final entry = history.entryOf(episodes.first.sourceId, episodes.first.path);
+    return (
+      episode: episodes.first,
+      index: 0,
+      durationSec: entry?.durationSec ?? 0,
     );
-    if (entry == null || entry.positionSec <= 1) return '立即播放';
-    if (entry.finished) return '重新播放';
-    final left = (entry.durationSec - entry.positionSec) / 60;
-    return '继续 · 剩 ${left.ceil()} 分钟';
   }
 
-  void _play(BuildContext context, ScannedVideo episode) {
+  static String _formatDuration(double sec) {
+    if (sec <= 0) return '';
+    return ' ${(sec / 60).round()} 分钟';
+  }
+
+  static void _play(
+    BuildContext context,
+    ({ScannedVideo episode, int index, double durationSec}) current,
+  ) {
     final entry = PlaybackHistory.instance.entryOf(
-      episode.sourceId,
-      episode.path,
+      current.episode.sourceId,
+      current.episode.path,
     );
     final resume = entry != null && !entry.finished && entry.positionSec > 1;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => PlayerPage(
-          video: episode,
+          video: current.episode,
           startPosition: resume ? entry.positionSec : null,
         ),
       ),
@@ -427,53 +352,96 @@ class _InfoRow extends StatelessWidget {
         ),
       );
   }
+
+  List<Color> _paletteFor(String title) {
+    const palettes = <List<Color>>[
+      [Color(0xFF1B3A2E), Color(0xFF2D5F47)],
+      [Color(0xFF1E2A3F), Color(0xFF3D5A80)],
+      [Color(0xFF3A2A1E), Color(0xFF6B4F35)],
+      [Color(0xFF2B1B3D), Color(0xFF4A2D6B)],
+    ];
+    var hash = 0;
+    for (final code in title.codeUnits) {
+      hash = (hash * 31 + code) & 0x7FFFFFFF;
+    }
+    return palettes[hash % palettes.length];
+  }
+
+  static String _kindLabel(MediaKind kind) => switch (kind) {
+    MediaKind.movie => '电影',
+    MediaKind.series => '电视剧',
+    MediaKind.anime => '动漫',
+    MediaKind.variety => '综艺',
+  };
 }
 
-class _PosterFallback extends StatelessWidget {
-  const _PosterFallback({required this.video});
+class _GhostButton extends StatelessWidget {
+  const _GhostButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
 
-  final ScannedVideo video;
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: const Color(0xFF3A4A44),
-      child: Center(
-        child: Icon(
-          switch (video.kind) {
-            MediaKind.movie => Icons.movie_outlined,
-            MediaKind.series => Icons.live_tv_outlined,
-            MediaKind.anime => Icons.animation_outlined,
-            MediaKind.variety => Icons.emoji_events_outlined,
-          },
-          size: 52,
-          color: Colors.white54,
+    return Material(
+      color: Colors.black.withValues(alpha: 0.35),
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, color: Colors.white, size: 18),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
 
-/// 剧集网格：每集一张卡片。
-class _EpisodeGrid extends StatelessWidget {
-  const _EpisodeGrid({required this.episodes});
+/// 剧集区：标题 + 剧照缩略图横排。
+class _EpisodeList extends StatelessWidget {
+  const _EpisodeList({required this.episodes});
 
   final List<ScannedVideo> episodes;
 
   @override
   Widget build(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    final columns = ((width - 64) / 200).floor().clamp(3, 8);
-    return SliverGrid(
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: columns,
-        crossAxisSpacing: 14,
-        mainAxisSpacing: 14,
-        childAspectRatio: 1.55,
-      ),
-      delegate: SliverChildBuilderDelegate((context, index) {
-        return _EpisodeCard(episode: episodes[index], index: index);
-      }, childCount: episodes.length),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '第 1 季',
+          style: Theme.of(context).textTheme.titleMedium
+              ?.copyWith(fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          height: 130,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: episodes.length,
+            separatorBuilder: (_, _) => const SizedBox(width: 12),
+            itemBuilder: (context, index) {
+              return _EpisodeCard(episode: episodes[index], index: index);
+            },
+          ),
+        ),
+      ],
     );
   }
 }
@@ -500,7 +468,6 @@ class _EpisodeCardState extends State<_EpisodeCard> {
     );
     final finished = entry?.finished ?? false;
     final progress = entry?.progress ?? 0.0;
-    final colors = [const Color(0xFF3D6B5C), const Color(0xFF7FB89F)];
 
     return MouseRegion(
       onEnter: (_) => setState(() => _hovered = true),
@@ -508,98 +475,123 @@ class _EpisodeCardState extends State<_EpisodeCard> {
       child: GestureDetector(
         onTap: () => _play(context, episode),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 140),
+          duration: const Duration(milliseconds: 150),
+          width: 210,
           decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: colors,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: _hovered
+                  ? AppColors.primary.withValues(alpha: 0.5)
+                  : AppColors.border,
+              width: _hovered ? 1.5 : 1,
             ),
-            borderRadius: BorderRadius.circular(14),
             boxShadow: _hovered
                 ? [
                     BoxShadow(
-                      color: colors.first.withValues(alpha: 0.4),
-                      blurRadius: 16,
-                      offset: const Offset(0, 6),
+                      color: AppColors.primary.withValues(alpha: 0.15),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
                     ),
                   ]
                 : null,
           ),
-          child: Stack(
-            fit: StackFit.expand,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // 剧照区域
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [Color(0xFF2D5F47), Color(0xFF1B3A2E)],
+                    ),
+                    borderRadius: BorderRadius.vertical(
+                      top: Radius.circular(10),
+                    ),
+                  ),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Center(
+                        child: Text(
+                          '${widget.index + 1}',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.9),
+                            fontSize: 32,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      if (_hovered)
+                        Center(
+                          child: CircleAvatar(
+                            radius: 20,
+                            backgroundColor: Colors.black.withValues(
+                              alpha: 0.5,
+                            ),
+                            child: const Icon(
+                              Icons.play_arrow_rounded,
+                              color: Colors.white,
+                              size: 22,
+                            ),
+                          ),
+                        ),
+                      if (progress > 0)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          child: LinearProgressIndicator(
+                            value: finished ? 1 : progress,
+                            minHeight: 3,
+                            color: finished ? Colors.white70 : AppColors.accent,
+                            backgroundColor: Colors.white24,
+                          ),
+                        ),
+                      if (finished)
+                        const Positioned(
+                          right: 8,
+                          top: 8,
+                          child: Icon(
+                            Icons.check_circle_rounded,
+                            color: Colors.white70,
+                            size: 16,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              // 集数信息
               Padding(
-                padding: const EdgeInsets.all(14),
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       '第 ${widget.index + 1} 集',
                       style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.text,
                       ),
                     ),
-                    const SizedBox(height: 5),
+                    const SizedBox(height: 2),
                     Text(
                       episode.title,
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.82),
-                        fontSize: 11.5,
-                        height: 1.4,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppColors.muted,
                       ),
                     ),
                   ],
                 ),
               ),
-              if (_hovered)
-                Center(
-                  child: CircleAvatar(
-                    radius: 26,
-                    backgroundColor: Colors.black.withValues(alpha: 0.35),
-                    child: const Icon(
-                      Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 30,
-                    ),
-                  ),
-                ),
-              if (progress > 0)
-                Positioned(
-                  left: 14,
-                  right: 14,
-                  bottom: 12,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: finished ? 1 : progress,
-                      minHeight: 3.5,
-                      color: finished ? Colors.white70 : AppColors.accent,
-                      backgroundColor: Colors.white24,
-                    ),
-                  ),
-                ),
-              if (finished)
-                Positioned(
-                  right: 10,
-                  top: 10,
-                  child: Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      color: Colors.black38,
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    child: const Icon(
-                      Icons.check_rounded,
-                      color: Colors.white,
-                      size: 14,
-                    ),
-                  ),
-                ),
             ],
           ),
         ),
