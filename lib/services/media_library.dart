@@ -36,6 +36,14 @@ class MediaLibrary extends ChangeNotifier {
   int scrapeDone = 0;
   int scrapeTotal = 0;
 
+  /// 刮削设置（TMDB 密钥与可选代理），保存于安全存储。
+  String? scrapeProxy;
+  String? tmdbKey;
+
+  bool get hasTmdb => (tmdbKey ?? '').trim().isNotEmpty;
+
+  String get scraperSourceLabel => hasTmdb ? 'TMDB + TVmaze' : 'TVmaze（免费）';
+
   List<MediaSource> get sources => List.unmodifiable(_sources);
 
   MediaSource? sourceById(String id) {
@@ -131,6 +139,7 @@ class MediaLibrary extends ChangeNotifier {
 
   /// 启动时恢复配置与凭据。
   Future<void> load() async {
+    await _loadScrapeSettings();
     final raw = await _store.readSources();
     if (raw == null || raw.isEmpty) return;
     try {
@@ -162,6 +171,41 @@ class MediaLibrary extends ChangeNotifier {
     } catch (_) {
       // 配置损坏时宁可重新添加，也不让应用崩溃。
     }
+  }
+
+  /// 读取刮削设置并注入到刮削服务。
+  Future<void> _loadScrapeSettings() async {
+    try {
+      scrapeProxy = await _store.read('framelet.scrape.proxy');
+      tmdbKey = await _store.read('framelet.scrape.tmdbkey');
+      ScraperService.proxyAddress = (scrapeProxy ?? '').trim().isEmpty
+          ? null
+          : scrapeProxy!.trim();
+      ScraperService.tmdbApiKey = (tmdbKey ?? '').trim().isEmpty
+          ? null
+          : tmdbKey!.trim();
+    } catch (_) {
+      // 读取失败不影响使用默认源
+    }
+  }
+
+  /// 保存刮削设置。留空表示清除该项。
+  Future<void> saveScrapeSettings({String? proxy, String? tmdbKey}) async {
+    if (proxy != null) {
+      scrapeProxy = proxy.trim();
+      await _store.write('framelet.scrape.proxy', scrapeProxy!);
+    }
+    if (tmdbKey != null) {
+      this.tmdbKey = tmdbKey.trim();
+      await _store.write('framelet.scrape.tmdbkey', this.tmdbKey!);
+    }
+    ScraperService.proxyAddress = (scrapeProxy ?? '').trim().isEmpty
+        ? null
+        : scrapeProxy!.trim();
+    ScraperService.tmdbApiKey = (this.tmdbKey ?? '').trim().isEmpty
+        ? null
+        : this.tmdbKey!.trim();
+    notifyListeners();
   }
 
   Future<void> _persistSources() async {
@@ -323,9 +367,16 @@ class MediaLibrary extends ChangeNotifier {
 
         final parsed = ScraperService.parseTitle(job.representative.title);
         ScrapeResult? result;
+        // 优先 TMDB（中文片名与电影覆盖最好），失败回退 TVmaze
         for (final query in parsed.queries) {
-          result = await ScraperService.search(query, year: parsed.year);
+          result = await ScraperService.searchTmdb(query, year: parsed.year);
           if (result != null) break;
+        }
+        if (result == null) {
+          for (final query in parsed.queries) {
+            result = await ScraperService.search(query, year: parsed.year);
+            if (result != null) break;
+          }
         }
 
         if (result != null) {

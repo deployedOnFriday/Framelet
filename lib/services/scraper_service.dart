@@ -30,9 +30,22 @@ class ScraperService {
   static const _requestGap = Duration(milliseconds: 260);
   static DateTime _lastRequest = DateTime.fromMillisecondsSinceEpoch(0);
 
-  static HttpClient _httpClient() => HttpClient()
-    ..connectionTimeout = const Duration(seconds: 10)
-    ..userAgent = _userAgent;
+  /// 可选 HTTP 代理（如 127.0.0.1:7890）：TMDB API 在部分网络下需要它。
+  static String? proxyAddress;
+
+  /// 可选 TMDB API Key（v3）：配置后优先用 TMDB，中文与电影覆盖更好。
+  static String? tmdbApiKey;
+
+  static HttpClient _httpClient() {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 10)
+      ..userAgent = _userAgent;
+    final proxy = proxyAddress?.trim();
+    if (proxy != null && proxy.isNotEmpty) {
+      client.findProxy = (_) => 'PROXY $proxy';
+    }
+    return client;
+  }
 
   /// 海报缓存目录：%APPDATA%/com.framelet/framelet/posters
   static Directory posterDir() {
@@ -98,6 +111,86 @@ class ScraperService {
 
     final queries = <String>[if (name.isNotEmpty) name, ...bracketNames];
     return (queries: queries, year: year);
+  }
+
+  /// TMDB 搜索（需 API Key；网络不通时自动回退 TVmaze）。
+  ///
+  /// 中文片名、电影、剧集全覆盖，海报质量最好。
+  static Future<ScrapeResult?> searchTmdb(String query, {int? year}) async {
+    final key = tmdbApiKey?.trim();
+    if (key == null || key.isEmpty || query.trim().isEmpty) return null;
+    final url = Uri.parse(
+      'https://api.themoviedb.org/3/search/multi'
+      '?api_key=$key&language=zh-CN&include_adult=false'
+      '&query=${Uri.encodeQueryComponent(query)}',
+    );
+    final client = _httpClient();
+    try {
+      await _throttle();
+      final request = await client.getUrl(url);
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      if (response.statusCode != 200) return null;
+      final body = await response.transform(utf8.decoder).join();
+      final data = jsonDecode(body) as Map<String, Object?>;
+      final results = data['results'] as List<Object?>?;
+      if (results == null || results.isEmpty) return null;
+
+      Map<String, Object?>? best;
+      var bestScore = 0.0;
+      for (final item in results) {
+        final map = item as Map<String, Object?>;
+        final mediaType = map['media_type'] as String? ?? '';
+        if (mediaType != 'movie' && mediaType != 'tv') continue;
+        final name =
+            (map['title'] as String?) ??
+            (map['name'] as String?) ??
+            (map['original_title'] as String?) ??
+            (map['original_name'] as String?) ??
+            '';
+        final date =
+            (map['release_date'] as String?) ??
+            (map['first_air_date'] as String?) ??
+            '';
+        final itemYear = int.tryParse(date.split('-').first);
+        var score = _similarity(query, name);
+        if (itemYear != null && year != null) {
+          final gap = (year - itemYear).abs();
+          if (gap == 0) score += 0.3;
+          if (gap > 2) score -= 0.35;
+        }
+        if (map['poster_path'] == null) score -= 0.1;
+        if (score > bestScore) {
+          bestScore = score;
+          best = map;
+        }
+      }
+      if (best == null || bestScore < 0.45) return null;
+
+      final posterPath = best['poster_path'] as String?;
+      final overview = (best['overview'] as String? ?? '').trim();
+      final vote = (best['vote_average'] as num?)?.toDouble();
+      final title =
+          (best['title'] as String?) ?? (best['name'] as String?) ?? query;
+      final date =
+          (best['release_date'] as String?) ??
+          (best['first_air_date'] as String?) ??
+          '';
+      return ScrapeResult(
+        name: title,
+        posterUrl: posterPath == null
+            ? null
+            : 'https://image.tmdb.org/t/p/w500$posterPath',
+        summary: overview.isEmpty ? null : overview,
+        rating: vote == null || vote <= 0 ? null : vote.toStringAsFixed(1),
+        year: int.tryParse(date.split('-').first),
+      );
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
   }
 
   /// 在 TVmaze 搜索并挑选最匹配的剧集/影片。

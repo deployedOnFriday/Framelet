@@ -15,6 +15,10 @@ class _SettingsPageState extends State<SettingsPage> {
   static const tabs = ['常规', '媒体源', '播放', '刮削', '关于'];
   int _selectedTab = 1;
 
+  final _tmdbKeyController = TextEditingController();
+  final _proxyController = TextEditingController();
+  bool _scrapeFieldsFilled = false;
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -61,6 +65,13 @@ class _SettingsPageState extends State<SettingsPage> {
         ],
       ),
     );
+  }
+
+  @override
+  void dispose() {
+    _tmdbKeyController.dispose();
+    _proxyController.dispose();
+    super.dispose();
   }
 
   Widget _buildContent() {
@@ -203,6 +214,8 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             const SizedBox(height: 18),
+            _buildScrapeSourceSettings(context, library),
+            const SizedBox(height: 18),
             Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
@@ -236,6 +249,122 @@ class _SettingsPageState extends State<SettingsPage> {
           ],
         );
       },
+    );
+  }
+
+  /// 刮削数据源配置：TMDB 密钥（可选）与 HTTP 代理（可选）。
+  Widget _buildScrapeSourceSettings(
+    BuildContext context,
+    MediaLibrary library,
+  ) {
+    if (!_scrapeFieldsFilled) {
+      _tmdbKeyController.text = library.tmdbKey ?? '';
+      _proxyController.text = library.scrapeProxy ?? '';
+      _scrapeFieldsFilled = true;
+    }
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text('数据源', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(width: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: library.hasTmdb
+                      ? AppColors.primarySoft
+                      : AppColors.background,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  '当前：${library.scraperSourceLabel}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: library.hasTmdb
+                        ? AppColors.primary
+                        : AppColors.muted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text(
+            'TVmaze 免费开箱即用，但只能按英文片名检索，且几乎不收录电影。'
+            '想要中文片名和电影海报，可填写 TMDB 密钥（免费注册）。',
+            style: TextStyle(
+              color: AppColors.muted,
+              fontSize: 12.5,
+              height: 1.6,
+            ),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            key: const ValueKey('tmdb-key'),
+            controller: _tmdbKeyController,
+            decoration: const InputDecoration(
+              labelText: 'TMDB API Key（可选）',
+              hintText: '在 themoviedb.org 免费申请 v3 API Key',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            key: const ValueKey('scrape-proxy'),
+            controller: _proxyController,
+            decoration: const InputDecoration(
+              labelText: '刮削代理（可选）',
+              hintText: '例如 127.0.0.1:7890，留空表示直连',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              FilledButton.tonal(
+                key: const ValueKey('save-scrape-settings'),
+                onPressed: () async {
+                  await library.saveScrapeSettings(
+                    proxy: _proxyController.text,
+                    tmdbKey: _tmdbKeyController.text,
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context)
+                      ..hideCurrentSnackBar()
+                      ..showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            library.hasTmdb
+                                ? '已启用 TMDB，下次刮削生效'
+                                : '已保存，当前使用 TVmaze',
+                          ),
+                        ),
+                      );
+                  }
+                },
+                child: const Text('保存数据源设置'),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Text(
+                  '提示：TMDB 的 API 在部分网络下需要代理，海报图片可直连下载。',
+                  style: TextStyle(color: AppColors.muted, fontSize: 11.5),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
