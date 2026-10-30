@@ -411,9 +411,15 @@ class MediaLibrary extends ChangeNotifier {
           (v) => v.posterPath != null,
           orElse: () => job.representative,
         );
+        final isSeriesJob = job.group.length > 1;
+        final stillComplete =
+            !isSeriesJob ||
+            job.group.where((v) => v.stillPath != null).length >=
+                ((job.group.length + 1) ~/ 2);
         if (!force &&
             target.posterPath != null &&
-            target.backdropPath != null) {
+            target.backdropPath != null &&
+            stillComplete) {
           scrapeDone++;
           scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal（跳过已有海报）';
           notifyListeners();

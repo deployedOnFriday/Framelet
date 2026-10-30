@@ -23,6 +23,11 @@ void main() {
       expect(parsed.queries.first, '某剧');
     });
 
+    test('中文数字季号剥离', () {
+      final parsed = ScraperService.parseTitle('瑞克和莫蒂第九季');
+      expect(parsed.queries.first, '瑞克和莫蒂');
+    });
+
     test('英文剧名不受误伤', () {
       final parsed = ScraperService.parseTitle(
         'Apocalypse.Hotel.2025.S01E01.CR.UBWEB',
@@ -32,3 +37,5 @@ void main() {
     });
   });
 }
+
+// 追加：中文数字季号

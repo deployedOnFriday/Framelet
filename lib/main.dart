@@ -54,7 +54,24 @@ void _dumpLibrary() {
           'episodeCount': item.episodeCount,
           'hasPoster': item.posterPath != null,
           'poster': item.posterPath,
+          'backdrop': item.backdropPath,
+          'tmdbId': item.tmdbId,
+          'season': MediaLibrary.seasonOf(item),
         });
+        // 每集的原始文件：核对剧照与单集名是否写入
+        if (item.episodeCount > 1) {
+          for (final episode in library.episodesOf(item)) {
+            rows.add({
+              'type': 'episode',
+              'of': item.title,
+              'title': episode.title,
+              'path': episode.path,
+              'stillPath': episode.stillPath,
+              'episodeTitle': episode.episodeTitle,
+              'episodeNumber': MediaLibrary.episodeNumberOf(episode.title),
+            });
+          }
+        }
       }
     }
     final file = File('${Directory.systemTemp.path}/framelet_dump.json');

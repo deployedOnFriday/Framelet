@@ -272,7 +272,7 @@ class ScraperService {
     name = name
         .replaceAll(RegExp(r'[（(]\s*(19|20)\d{2}\s*[)）]\s*$'), '')
         .replaceAll(RegExp(r'\s*[sS](?:eason)?\s*\d{1,2}\s*$'), '')
-        .replaceAll(RegExp(r'\s*第\s*\d{1,2}\s*季\s*$'), '')
+        .replaceAll(RegExp(r'\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$'), '')
         .trim();
 
     final queries = <String>[if (name.isNotEmpty) name, ...bracketNames];
