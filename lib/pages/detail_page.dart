@@ -29,7 +29,8 @@ class DetailPage extends StatelessWidget {
 
   Widget _build(BuildContext context) {
     final library = MediaLibrary.instance;
-    final current = library.findVideo(video.sourceId, video.path) ?? video;
+    // 关键：解析到聚合条目（剧名/集数/海报都在聚合层），而非原始单集文件
+    final current = library.resolveAggregated(video);
     final source = library.sourceById(current.sourceId);
     final episodes = library.episodesOf(current);
     final isSeries = episodes.length > 1;

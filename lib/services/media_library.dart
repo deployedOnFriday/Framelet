@@ -454,6 +454,18 @@ class MediaLibrary extends ChangeNotifier {
     }
   }
 
+  /// 把任意条目解析为它所属的聚合条目（剧名/集数/海报都在聚合层）。
+  ///
+  /// 详情页必须用它而不是 findVideo——后者返回的是原始单集文件。
+  ScannedVideo resolveAggregated(ScannedVideo video) {
+    final videos = _videosBySource[video.sourceId];
+    if (videos == null || videos.isEmpty) return video;
+    for (final item in aggregate(videos)) {
+      if (item.path == video.path) return item;
+    }
+    return video;
+  }
+
   /// 手动匹配：把用户选中的候选应用到这一组（剧集整组共享同一张海报）。
   Future<String?> applyCandidate(
     ScannedVideo target,
