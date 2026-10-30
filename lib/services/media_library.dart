@@ -544,10 +544,10 @@ class MediaLibrary extends ChangeNotifier {
       };
       final grouped = <String, List<ScannedVideo>>{};
       for (final video in videos) {
-        final key = byPath.containsKey(video.path)
-            ? video.path
-            : parentPathOf(video.path);
-        grouped.putIfAbsent(key, () => []).add(video);
+        // 统一按父目录分组，与展示聚合同规则；
+        // 若按「聚合条目 path」特殊处理首文件，剧集会被拆成 1+N 个组，
+        // 第 2 集起的组拿原始文件名（02~）搜索必然失败。
+        grouped.putIfAbsent(parentPathOf(video.path), () => []).add(video);
       }
       for (final group in grouped.values) {
         // 聚合条目的 path 等于组内第一个文件的 path，据此找回聚合标题。
