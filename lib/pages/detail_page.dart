@@ -55,7 +55,7 @@ class DetailPage extends StatelessWidget {
         if (isSeries)
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(28, 0, 28, 32),
-            sliver: _EpisodeList(episodes: episodes),
+            sliver: SliverToBoxAdapter(child: _EpisodeList(episodes: episodes)),
           )
         else
           const SliverToBoxAdapter(child: SizedBox(height: 40)),
