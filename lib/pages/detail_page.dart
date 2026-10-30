@@ -335,14 +335,14 @@ class _HeroWithInfo extends StatelessWidget {
       ),
     );
     if (candidate == null || !context.mounted) return;
-    final messenger = ScaffoldMessenger.of(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
     final poster = await MediaLibrary.instance.applyCandidate(
       video,
       group,
       candidate,
     );
     messenger
-      ..hideCurrentSnackBar()
+      ?..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
           content: Text(

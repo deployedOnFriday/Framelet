@@ -12,6 +12,16 @@ import 'services/playback_history.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  // 错误落盘： framework 断言等问题的精确堆栈写入临时目录，便于排障
+  FlutterError.onError = (details) {
+    try {
+      File('${Directory.systemTemp.path}/framelet_error.log').writeAsStringSync(
+        '${DateTime.now().toIso8601String()}\n${details.toString()}\n\n',
+        mode: FileMode.append,
+      );
+    } catch (_) {}
+    FlutterError.presentError(details);
+  };
   await MediaLibrary.instance.load();
   await PlaybackHistory.instance.load();
   // 诊断：FRAMELET_DUMP=1 时导出媒体库结构，便于排查聚合/刮削问题
