@@ -51,14 +51,21 @@ class DetailPage extends StatelessWidget {
             height: heroH,
           ),
         ),
-        // 剧集区
-        if (isSeries)
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(28, 0, 28, 32),
-            sliver: SliverToBoxAdapter(child: _EpisodeList(episodes: episodes)),
-          )
-        else
-          const SliverToBoxAdapter(child: SizedBox(height: 40)),
+        // 简介、剧集网格与文件信息（页面底色区域）
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(28, 4, 28, 0),
+          sliver: SliverToBoxAdapter(
+            child: _SummaryAndEpisodes(
+              video: current,
+              episodes: episodes,
+              isSeries: isSeries,
+            ),
+          ),
+        ),
+        SliverPadding(
+          padding: const EdgeInsets.fromLTRB(28, 8, 28, 40),
+          sliver: SliverToBoxAdapter(child: _FileInfo(video: current)),
+        ),
       ],
     );
   }
@@ -414,39 +421,148 @@ class _GhostButton extends StatelessWidget {
   }
 }
 
-/// 剧集区：标题 + 剧照缩略图横排。
-class _EpisodeList extends StatelessWidget {
-  const _EpisodeList({required this.episodes});
+/// 简介 + 剧集网格（页面底色区域）。
+class _SummaryAndEpisodes extends StatelessWidget {
+  const _SummaryAndEpisodes({
+    required this.video,
+    required this.episodes,
+    required this.isSeries,
+  });
 
+  final ScannedVideo video;
   final List<ScannedVideo> episodes;
+  final bool isSeries;
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          '第 1 季',
-          style: Theme.of(context).textTheme.titleMedium
-              ?.copyWith(fontWeight: FontWeight.w700),
-        ),
-        const SizedBox(height: 12),
-        SizedBox(
-          height: 130,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: episodes.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 12),
-            itemBuilder: (context, index) {
-              return _EpisodeCard(episode: episodes[index], index: index);
-            },
+        if (video.summary != null && video.summary!.isNotEmpty) ...[
+          Text(
+            '剧情简介',
+            style: Theme.of(context).textTheme.titleMedium
+                ?.copyWith(fontWeight: FontWeight.w700),
           ),
-        ),
+          const SizedBox(height: 10),
+          Text(
+            video.summary!,
+            style: const TextStyle(
+              color: AppColors.text,
+              fontSize: 13.5,
+              height: 1.8,
+            ),
+          ),
+          const SizedBox(height: 26),
+        ],
+        if (isSeries) ...[
+          Text(
+            '第 1 季 · 共 ${episodes.length} 集',
+            style: Theme.of(context).textTheme.titleMedium
+                ?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 14),
+          _EpisodeGrid(episodes: episodes),
+        ],
       ],
     );
   }
 }
 
+/// 剧集网格：铺满宽度，每行若干张卡片。
+class _EpisodeGrid extends StatelessWidget {
+  const _EpisodeGrid({required this.episodes});
+
+  final List<ScannedVideo> episodes;
+
+  @override
+  Widget build(BuildContext context) {
+    final width = MediaQuery.of(context).size.width;
+    final columns = ((width - 80) / 190).floor().clamp(3, 8);
+    return GridView.builder(
+      physics: const NeverScrollableScrollPhysics(),
+      shrinkWrap: true,
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: columns,
+        crossAxisSpacing: 12,
+        mainAxisSpacing: 12,
+        childAspectRatio: 1.5,
+      ),
+      itemCount: episodes.length,
+      itemBuilder: (context, index) =>
+          _EpisodeCard(episode: episodes[index], index: index),
+    );
+  }
+}
+
+/// 文件信息卡片：路径、大小、修改时间。
+class _FileInfo extends StatelessWidget {
+  const _FileInfo({required this.video});
+
+  final ScannedVideo video;
+
+  @override
+  Widget build(BuildContext context) {
+    final sizeMb = video.sizeBytes / (1024 * 1024);
+    final sizeLabel = sizeMb >= 1024
+        ? '${(sizeMb / 1024).toStringAsFixed(1)} GB'
+        : '${sizeMb.toStringAsFixed(0)} MB';
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '文件信息',
+            style: Theme.of(context).textTheme.titleSmall
+                ?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          _infoRow('路径', video.path),
+          _infoRow('大小', sizeLabel),
+          if (video.modified != null)
+            _infoRow(
+              '修改时间',
+              '${video.modified!.year}-'
+                  '${video.modified!.month.toString().padLeft(2, '0')}-'
+                  '${video.modified!.day.toString().padLeft(2, '0')}',
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 64,
+            child: Text(
+              label,
+              style: const TextStyle(fontSize: 12.5, color: AppColors.muted),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontSize: 12.5, color: AppColors.text),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 剧集卡片：渐变底 + 集号 + 标题 + 进度。
 class _EpisodeCard extends StatefulWidget {
   const _EpisodeCard({required this.episode, required this.index});
 
@@ -477,122 +593,90 @@ class _EpisodeCardState extends State<_EpisodeCard> {
         onTap: () => _play(context, episode),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 150),
-          width: 210,
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: _hovered
-                  ? AppColors.primary.withValues(alpha: 0.5)
-                  : AppColors.border,
-              width: _hovered ? 1.5 : 1,
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF2D5F47), Color(0xFF1B3A2E)],
             ),
+            borderRadius: BorderRadius.circular(11),
             boxShadow: _hovered
                 ? [
                     BoxShadow(
-                      color: AppColors.primary.withValues(alpha: 0.15),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
+                      color: const Color(0xFF2D5F47).withValues(alpha: 0.45),
+                      blurRadius: 14,
+                      offset: const Offset(0, 5),
                     ),
                   ]
                 : null,
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Stack(
+            fit: StackFit.expand,
             children: [
-              // 剧照区域
-              Expanded(
-                child: Container(
-                  width: double.infinity,
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [Color(0xFF2D5F47), Color(0xFF1B3A2E)],
-                    ),
-                    borderRadius: BorderRadius.vertical(
-                      top: Radius.circular(10),
-                    ),
-                  ),
-                  child: Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      Center(
-                        child: Text(
-                          '${widget.index + 1}',
-                          style: TextStyle(
-                            color: Colors.white.withValues(alpha: 0.9),
-                            fontSize: 32,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ),
-                      if (_hovered)
-                        Center(
-                          child: CircleAvatar(
-                            radius: 20,
-                            backgroundColor: Colors.black.withValues(
-                              alpha: 0.5,
-                            ),
-                            child: const Icon(
-                              Icons.play_arrow_rounded,
-                              color: Colors.white,
-                              size: 22,
-                            ),
-                          ),
-                        ),
-                      if (progress > 0)
-                        Positioned(
-                          left: 0,
-                          right: 0,
-                          bottom: 0,
-                          child: LinearProgressIndicator(
-                            value: finished ? 1 : progress,
-                            minHeight: 3,
-                            color: finished ? Colors.white70 : AppColors.accent,
-                            backgroundColor: Colors.white24,
-                          ),
-                        ),
-                      if (finished)
-                        const Positioned(
-                          right: 8,
-                          top: 8,
-                          child: Icon(
-                            Icons.check_circle_rounded,
-                            color: Colors.white70,
-                            size: 16,
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              // 集数信息
               Padding(
-                padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+                padding: const EdgeInsets.all(12),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       '第 ${widget.index + 1} 集',
                       style: const TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.text,
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: 4),
                     Text(
                       episode.title,
-                      maxLines: 1,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.8),
                         fontSize: 11,
-                        color: AppColors.muted,
+                        height: 1.35,
                       ),
                     ),
                   ],
                 ),
               ),
+              if (_hovered)
+                Center(
+                  child: CircleAvatar(
+                    radius: 21,
+                    backgroundColor: Colors.black.withValues(alpha: 0.45),
+                    child: const Icon(
+                      Icons.play_arrow_rounded,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                  ),
+                ),
+              if (progress > 0)
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: 10,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: LinearProgressIndicator(
+                      value: finished ? 1 : progress,
+                      minHeight: 3.5,
+                      color: finished ? Colors.white70 : AppColors.accent,
+                      backgroundColor: Colors.white24,
+                    ),
+                  ),
+                ),
+              if (finished)
+                const Positioned(
+                  right: 9,
+                  top: 9,
+                  child: Icon(
+                    Icons.check_circle_rounded,
+                    color: Colors.white70,
+                    size: 16,
+                  ),
+                ),
             ],
           ),
         ),
