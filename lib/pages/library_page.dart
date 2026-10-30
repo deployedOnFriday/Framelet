@@ -41,19 +41,23 @@ class _LibraryPageState extends State<LibraryPage> {
             width: 420,
             height: 44,
             child: TextField(
+              spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
               onChanged: (value) => setState(() => _query = value.trim()),
               decoration: InputDecoration(
                 hintText: '筛选${widget.title}',
-                prefixIcon: const Icon(Icons.search_rounded, size: 21),
                 filled: true,
                 fillColor: AppColors.surface,
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(8),
                   borderSide: const BorderSide(color: AppColors.border),
                 ),
                 enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(8),
                   borderSide: const BorderSide(color: AppColors.border),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(8),
+                  borderSide: const BorderSide(color: AppColors.primary),
                 ),
               ),
             ),
@@ -84,7 +88,7 @@ class _LibraryPageState extends State<LibraryPage> {
                           mainAxisExtent: 258,
                         ),
                         itemBuilder: (context, index) =>
-                            PosterCard(item: items[index]),
+                            PosterCard(item: items[index], width: 148),
                       );
                     },
                   ),

@@ -110,6 +110,8 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
                   child: SizedBox(
                     height: 44,
                     child: TextField(
+                      spellCheckConfiguration:
+                          const SpellCheckConfiguration.disabled(),
                       controller: _controller,
                       focusNode: _focus,
                       textInputAction: TextInputAction.search,

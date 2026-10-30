@@ -70,6 +70,9 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   /// 某分类的聚合条目（跨所有媒体源）。
+  ///
+  /// 刮削后同一部剧的多季带有相同 TMDB ID，此时合并为一条展示，
+  /// 集数取各季之和；详情页通过 seasonsOf 取回每一季。
   List<ScannedVideo> byKind(MediaKind kind) {
     // 先按文件夹聚合，再按聚合后的分类筛选：
     // 这样「想见你」这类 14 集的剧集不会留在电影分类里。
@@ -78,12 +81,17 @@ class MediaLibrary extends ChangeNotifier {
       final aggregated = aggregate(entry.value);
       for (final video in aggregated) {
         if (video.kind != kind) continue;
-        final key = '${video.sourceId}|${video.title.toLowerCase()}';
+        final key = video.tmdbId != null
+            ? 'tmdb|${video.tmdbId}'
+            : '${video.sourceId}|${video.title.toLowerCase()}';
         final existing = merged[key];
         if (existing == null) {
           merged[key] = video;
         } else if (video.episodeCount > existing.episodeCount) {
-          merged[key] = video;
+          // 同一部剧的多季：集数相加展示
+          merged[key] = video.copyWith(
+            episodeCount: existing.episodeCount + video.episodeCount,
+          );
         }
       }
     }
@@ -93,6 +101,20 @@ class MediaLibrary extends ChangeNotifier {
             (b.modified ?? DateTime(0)).compareTo(a.modified ?? DateTime(0)),
       );
     return list;
+  }
+
+  /// 一部剧的每一季（跨文件夹）。单季剧集返回它自己。
+  List<ScannedVideo> seasonsOf(ScannedVideo video) {
+    final tmdbId = video.tmdbId;
+    if (tmdbId == null) return [video];
+    final seasons = <ScannedVideo>[];
+    for (final videos in _videosBySource.values) {
+      for (final item in aggregate(videos)) {
+        if (item.tmdbId == tmdbId) seasons.add(item);
+      }
+    }
+    seasons.sort((a, b) => seasonOf(a).compareTo(seasonOf(b)));
+    return seasons.isEmpty ? [video] : seasons;
   }
 
   int countByKind(MediaKind kind) => byKind(kind).length;
@@ -138,6 +160,25 @@ class MediaLibrary extends ChangeNotifier {
       }
     }
     return a.compareTo(b);
+  }
+
+  /// 从文件名中解析单集编号，仅支持 S01E02 / E02 / 第02集 / 纯数字。
+  static int? episodeNumberOf(String title) {
+    final patterns = [
+      RegExp(r'[sS]\d{1,2}[eE](\d{1,3})'),
+      RegExp(r'(?:^|[.\s_-])e(?:p)?(\d{1,3})(?:$|[.\s_-])'),
+      RegExp(r'第\s*(\d{1,4})\s*[集话期]'),
+    ];
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(title);
+      if (match?.group(1) case final number?) return int.tryParse(number);
+    }
+    // 结尾数字后允许带画质标记：01~4K、14_1080p
+    final plain = RegExp(
+      r'(\d{1,4})\s*[~\-_.]?\s*(4k|8k|1080p|720p|2160p|hdr10?)?\s*$',
+      caseSensitive: false,
+    ).firstMatch(title);
+    return int.tryParse(plain?.group(1) ?? '');
   }
 
   bool get hasAnyContent =>
@@ -357,23 +398,7 @@ class MediaLibrary extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final jobs =
-          <({ScannedVideo representative, List<ScannedVideo> group})>[];
-      for (final entry in _videosBySource.entries) {
-        final videos = entry.value;
-        final grouped = <String, List<ScannedVideo>>{};
-        for (final video in videos) {
-          // 与展示聚合保持一致：带集数标记的按文件夹成组，其余单条
-          if (!WebDavService.looksLikeEpisode(video.title)) {
-            jobs.add((representative: video, group: [video]));
-            continue;
-          }
-          grouped.putIfAbsent(parentPathOf(video.path), () => []).add(video);
-        }
-        for (final group in grouped.values) {
-          jobs.add((representative: group.first, group: group));
-        }
-      }
+      final jobs = _scrapeJobsOf(_videosBySource);
 
       scrapeTotal = jobs.length;
       if (scrapeTotal == 0) {
@@ -386,7 +411,9 @@ class MediaLibrary extends ChangeNotifier {
           (v) => v.posterPath != null,
           orElse: () => job.representative,
         );
-        if (!force && target.posterPath != null) {
+        if (!force &&
+            target.posterPath != null &&
+            target.backdropPath != null) {
           scrapeDone++;
           scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal（跳过已有海报）';
           notifyListeners();
@@ -416,6 +443,39 @@ class MediaLibrary extends ChangeNotifier {
           }
         }
 
+        final matchedResult = result;
+        final matchedId = matchedResult?.tmdbId;
+        if (matchedResult != null && matchedId != null) {
+          final details = await ScraperService.fetchTmdbDetails(
+            mediaType: matchedResult.mediaType ?? 'movie',
+            id: matchedId,
+          );
+          result = details ?? result;
+        }
+
+        final scrapedBackdrop = result == null
+            ? null
+            : await _downloadBackdrop(result);
+        final seasonNumber = seasonOf(job.representative);
+        final episodeInfos = <int, ({String? title, String? stillUrl})>{};
+        if (result?.mediaType == 'tv' && result?.tmdbId != null) {
+          episodeInfos.addAll(
+            await ScraperService.fetchEpisodeStills(
+              tvId: result!.tmdbId!,
+              seasonNumber: seasonNumber,
+            ),
+          );
+        }
+        final episodeStillPaths = <int, String>{};
+        for (final entry in episodeInfos.entries) {
+          final stillUrl = entry.value.stillUrl;
+          if (stillUrl == null) continue;
+          final path = await ScraperService.downloadPoster(
+            stillUrl,
+            cacheKey: 'still_${result?.tmdbId}_s${seasonNumber}e${entry.key}',
+          );
+          if (path != null) episodeStillPaths[entry.key] = path;
+        }
         if (result != null) {
           String? posterPath;
           if (result.posterUrl != null) {
@@ -428,6 +488,7 @@ class MediaLibrary extends ChangeNotifier {
               result.summary != null ||
               result.rating != null) {
             for (final member in job.group) {
+              final episodeNumber = episodeNumberOf(member.title);
               _updateVideo(
                 member.sourceId,
                 member.path,
@@ -435,6 +496,14 @@ class MediaLibrary extends ChangeNotifier {
                   posterPath: posterPath,
                   summary: result!.summary,
                   rating: result.rating,
+                  backdropPath: scrapedBackdrop,
+                  genres: result.genres,
+                  cast: result.cast,
+                  releaseDate: result.releaseDate,
+                  runtimeSec: result.runtimeSec,
+                  stillPath: episodeStillPaths[episodeNumber],
+                  episodeTitle: episodeInfos[episodeNumber]?.title,
+                  tmdbId: result.tmdbId,
                 ),
               );
             }
@@ -454,6 +523,35 @@ class MediaLibrary extends ChangeNotifier {
     }
   }
 
+  /// 刮削任务列表：与展示聚合同规则分组，组内文件一起刮削。
+  ///
+  /// representative 必须用聚合条目——它的 title 是从目录名推导出的剧名
+  /// （如「成何体统」）；group.first 的 title 是原始文件名（如「01~4K」），
+  /// 拿它去搜索永远搜不到。
+  static List<({ScannedVideo representative, List<ScannedVideo> group})>
+  _scrapeJobsOf(Map<String, List<ScannedVideo>> videosBySource) {
+    final jobs = <({ScannedVideo representative, List<ScannedVideo> group})>[];
+    for (final videos in videosBySource.values) {
+      final aggregated = aggregate(videos);
+      final byPath = <String, ScannedVideo>{
+        for (final item in aggregated) item.path: item,
+      };
+      final grouped = <String, List<ScannedVideo>>{};
+      for (final video in videos) {
+        final key = byPath.containsKey(video.path)
+            ? video.path
+            : parentPathOf(video.path);
+        grouped.putIfAbsent(key, () => []).add(video);
+      }
+      for (final group in grouped.values) {
+        // 聚合条目的 path 等于组内第一个文件的 path，据此找回聚合标题。
+        final representative = byPath[group.first.path] ?? group.first;
+        jobs.add((representative: representative, group: group));
+      }
+    }
+    return jobs;
+  }
+
   /// 把任意条目解析为它所属的聚合条目（剧名/集数/海报都在聚合层）。
   ///
   /// 详情页必须用它而不是 findVideo——后者返回的是原始单集文件。
@@ -467,12 +565,64 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   /// 手动匹配：把用户选中的候选应用到这一组（剧集整组共享同一张海报）。
+  ///
+  /// 有 TMDB ID 时拉取完整详情（背景图/类型/演员），剧集还会下载单集剧照。
   Future<String?> applyCandidate(
     ScannedVideo target,
     List<ScannedVideo> group,
     ScrapeCandidate candidate,
   ) async {
     String? poster;
+    String? backdrop;
+    String? summary = candidate.overview;
+    String? rating = candidate.rating;
+    List<String> genres = const [];
+    List<CastMember> cast = const [];
+    String? releaseDate;
+    double? runtimeSec;
+    Map<int, String> episodeStillPaths = const {};
+    Map<int, String> episodeTitles = const {};
+    if (candidate.tmdbId != null) {
+      final details = await ScraperService.fetchTmdbDetails(
+        mediaType: candidate.mediaType,
+        id: candidate.tmdbId!,
+      );
+      if (details != null) {
+        if (details.backdropUrl != null) {
+          backdrop = await ScraperService.downloadPoster(
+            details.backdropUrl!,
+            cacheKey: 'manual_backdrop_${candidate.name}',
+          );
+        }
+        summary = details.summary ?? summary;
+        rating = details.rating ?? rating;
+        genres = details.genres;
+        cast = details.cast;
+        releaseDate = details.releaseDate;
+        runtimeSec = details.runtimeSec;
+      }
+      if (candidate.mediaType == 'tv') {
+        final seasonNumber = group.length > 1 ? seasonOf(group.first) : 1;
+        final stillUrls = await ScraperService.fetchEpisodeStills(
+          tvId: candidate.tmdbId!,
+          seasonNumber: seasonNumber,
+        );
+        episodeStillPaths = <int, String>{};
+        episodeTitles = <int, String>{};
+        for (final entry in stillUrls.entries) {
+          if (entry.value.title != null) {
+            episodeTitles[entry.key] = entry.value.title!;
+          }
+          final stillUrl = entry.value.stillUrl;
+          if (stillUrl == null) continue;
+          final path = await ScraperService.downloadPoster(
+            stillUrl,
+            cacheKey: 'still_${candidate.tmdbId}_s${seasonNumber}e${entry.key}',
+          );
+          if (path != null) episodeStillPaths[entry.key] = path;
+        }
+      }
+    }
     if (candidate.posterUrl != null) {
       poster = await ScraperService.downloadPoster(
         candidate.posterUrl!,
@@ -480,13 +630,22 @@ class MediaLibrary extends ChangeNotifier {
       );
     }
     for (final member in group) {
+      final episodeNumber = episodeNumberOf(member.title);
       _updateVideo(
         member.sourceId,
         member.path,
         (video) => video.copyWith(
           posterPath: poster,
-          summary: candidate.overview,
-          rating: candidate.rating,
+          summary: summary,
+          rating: rating,
+          backdropPath: backdrop,
+          genres: genres,
+          cast: cast,
+          releaseDate: releaseDate,
+          runtimeSec: runtimeSec,
+          stillPath: episodeStillPaths[episodeNumber],
+          episodeTitle: episodeTitles[episodeNumber],
+          tmdbId: candidate.tmdbId,
         ),
       );
     }
@@ -504,6 +663,14 @@ class MediaLibrary extends ChangeNotifier {
     if (list == null) return;
     final index = list.indexWhere((video) => video.path == path);
     if (index >= 0) list[index] = update(list[index]);
+  }
+
+  Future<String?> _downloadBackdrop(ScrapeResult result) async {
+    if (result.backdropUrl == null) return null;
+    return ScraperService.downloadPoster(
+      result.backdropUrl!,
+      cacheKey: 'backdrop_${result.mediaType ?? 'item'}_${result.name}',
+    );
   }
 
   /// 把底层错误翻译成人话。
@@ -660,6 +827,72 @@ class MediaLibrary extends ChangeNotifier {
   static String parentPathOf(String path) {
     final index = path.lastIndexOf('/');
     return index > 0 ? path.substring(0, index) : path;
+  }
+
+  /// 从路径或文件名推断季号，识别失败按第 1 季处理。
+  ///
+  /// 支持 S02、第2季、Season 2 与「剧名/2/」这类季号目录；
+  /// 只有「剧名/3」纯数字目录且文件名本身带集数时才算季号，
+  /// 避免把「01~4K.mp4」这种纯集数文件名所在目录误判成季号。
+  static int seasonOf(ScannedVideo video) {
+    int extract(String text) {
+      final patterns = [
+        RegExp(r'[sS](\d{1,2})[eE]\d{1,3}'), // S02E13
+        RegExp(r'第\s*([0-9一二三四五六七八九十]+)\s*季'),
+        RegExp(r'season\s*(\d{1,2})', caseSensitive: false),
+      ];
+      for (final pattern in patterns) {
+        final match = pattern.firstMatch(text);
+        if (match != null) {
+          final parsed =
+              int.tryParse(match.group(1)!) ?? _chineseNumber(match.group(1)!);
+          if (parsed != null) return parsed;
+        }
+      }
+      return 0;
+    }
+
+    var season = extract(video.title);
+    if (season > 0) return season;
+    season = extract(video.path);
+    if (season > 0) return season;
+
+    // 纯数字目录视为季号：仅当目录上一级不是纯数字（排除顶级目录编号）
+    var parent = parentPathOf(video.path);
+    for (var guard = 0; guard < 3; guard++) {
+      final index = parent.lastIndexOf('/');
+      if (index < 0) break;
+      final segment = parent.substring(index + 1);
+      final parsed = int.tryParse(segment);
+      if (parsed != null && parsed > 0) return parsed;
+      parent = parent.substring(0, index);
+    }
+    return 1;
+  }
+
+  static int? _chineseNumber(String raw) {
+    const digits = {
+      '一': 1,
+      '二': 2,
+      '三': 3,
+      '四': 4,
+      '五': 5,
+      '六': 6,
+      '七': 7,
+      '八': 8,
+      '九': 9,
+      '十': 10,
+    };
+    if (raw.length == 1) return digits[raw];
+    if (raw.length == 2 && raw.startsWith('十')) {
+      final one = digits[raw[1]];
+      return one == null ? null : 10 + one;
+    }
+    if (raw.length == 2 && raw.endsWith('十')) {
+      final one = digits[raw[0]];
+      return one == null ? null : one * 10;
+    }
+    return null;
   }
 
   static String _lastSegment(String path) {

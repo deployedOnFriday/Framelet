@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../models/media_source.dart';
+
 /// 刮削结果：海报地址、简介与评分。
 class ScrapeResult {
   const ScrapeResult({
@@ -10,6 +12,13 @@ class ScrapeResult {
     this.summary,
     this.rating,
     this.year,
+    this.backdropUrl,
+    this.genres = const [],
+    this.cast = const [],
+    this.releaseDate,
+    this.runtimeSec,
+    this.mediaType,
+    this.tmdbId,
   });
 
   final String name;
@@ -17,6 +26,13 @@ class ScrapeResult {
   final String? summary;
   final String? rating;
   final int? year;
+  final String? backdropUrl;
+  final List<String> genres;
+  final List<CastMember> cast;
+  final String? releaseDate;
+  final double? runtimeSec;
+  final String? mediaType;
+  final int? tmdbId;
 }
 
 /// 手动匹配用的候选条目（搜索结果的一项）。
@@ -29,6 +45,7 @@ class ScrapeCandidate {
     this.posterUrl,
     this.overview,
     this.rating,
+    this.tmdbId,
   });
 
   final String name;
@@ -38,6 +55,9 @@ class ScrapeCandidate {
   final String? posterUrl;
   final String? overview;
   final String? rating;
+
+  /// TMDB 条目 ID；有 ID 时可继续拉取详情。
+  final int? tmdbId;
 
   String get typeLabel => mediaType == 'tv' ? '剧集' : '电影';
 }
@@ -248,6 +268,12 @@ class ScraperService {
     name = name.replaceAll(RegExp(r'\s+'), ' ');
     // 去掉残留的中文集数后缀，如 "三体 01"
     name = name.replaceAll(RegExp(r'\s+\d{1,2}$'), '').trim();
+    // 剥离末尾的季/年份标记：幸福伽菜子的快乐杀手生活S1（2025）→ 幸福伽菜子的快乐杀手生活
+    name = name
+        .replaceAll(RegExp(r'[（(]\s*(19|20)\d{2}\s*[)）]\s*$'), '')
+        .replaceAll(RegExp(r'\s*[sS](?:eason)?\s*\d{1,2}\s*$'), '')
+        .replaceAll(RegExp(r'\s*第\s*\d{1,2}\s*季\s*$'), '')
+        .trim();
 
     final queries = <String>[if (name.isNotEmpty) name, ...bracketNames];
     return (queries: queries, year: year);
@@ -402,9 +428,132 @@ class ScraperService {
         summary: overview.isEmpty ? null : overview,
         rating: vote == null || vote <= 0 ? null : vote.toStringAsFixed(1),
         year: int.tryParse(date.split('-').first),
+        mediaType: (best['media_type'] as String?) ?? 'movie',
+        tmdbId: (best['id'] as num?)?.toInt(),
       );
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 读取 TMDB 详情：背景图、类型、演员、时长与日期。
+  /// credits 一次请求带回，避免为每个条目发两次。
+  static Future<ScrapeResult?> fetchTmdbDetails({
+    required String mediaType,
+    required int id,
+  }) async {
+    final key = tmdbApiKey?.trim();
+    if (key == null || key.isEmpty) return null;
+    final type = mediaType == 'tv' ? 'tv' : 'movie';
+    final pathAndQuery =
+        '/3/$type/$id'
+        '?api_key=$key&language=zh-CN&append_to_response=credits';
+    try {
+      await _throttle();
+      final body = await _tmdbGet(pathAndQuery);
+      if (body == null) return null;
+      final map = jsonDecode(body) as Map<String, Object?>;
+      final genres = (map['genres'] as List<Object?>? ?? const [])
+          .map((item) {
+            if (item is! Map<String, Object?>) return '';
+            return item['name'] as String? ?? '';
+          })
+          .where((name) => name.isNotEmpty)
+          .take(4)
+          .toList();
+      final runtimeMinutes =
+          (map['runtime'] as num?)?.toDouble() ??
+          ((map['episode_run_time'] as List<Object?>?)?.firstOrNull as num?)
+              ?.toDouble();
+      final crew =
+          (map['credits'] as Map<String, Object?>?)?['crew']
+              as List<Object?>? ??
+          const [];
+      final cast =
+          (map['credits'] as Map<String, Object?>?)?['cast']
+              as List<Object?>? ??
+          const [];
+      final members = <CastMember>[];
+      for (final item in crew.take(3)) {
+        final map = item as Map<String, Object?>;
+        if (map['job'] != 'Director') continue;
+        final name = map['name'] as String? ?? '';
+        if (name.isEmpty) continue;
+        members.add(CastMember(name: name, role: '导演'));
+      }
+      for (final item in cast) {
+        final map = item as Map<String, Object?>;
+        final name = map['name'] as String? ?? '';
+        if (name.isEmpty) continue;
+        final profilePath = map['profile_path'] as String?;
+        members.add(
+          CastMember(
+            name: name,
+            role: map['character'] as String? ?? '',
+            photoUrl: profilePath == null
+                ? null
+                : 'https://image.tmdb.org/t/p/w185$profilePath',
+          ),
+        );
+        if (members.length >= 12) break;
+      }
+      final posterPath = map['poster_path'] as String?;
+      final backdropPath = map['backdrop_path'] as String?;
+      final vote = (map['vote_average'] as num?)?.toDouble();
+      return ScrapeResult(
+        name: (map['title'] as String?) ?? (map['name'] as String?) ?? '',
+        posterUrl: posterPath == null
+            ? null
+            : 'https://image.tmdb.org/t/p/w500$posterPath',
+        summary: (map['overview'] as String? ?? '').trim(),
+        rating: vote == null || vote <= 0 ? null : vote.toStringAsFixed(1),
+        backdropUrl: backdropPath == null
+            ? null
+            : 'https://image.tmdb.org/t/p/original$backdropPath',
+        genres: genres,
+        cast: members,
+        releaseDate:
+            (map['release_date'] as String?) ??
+            (map['first_air_date'] as String?),
+        runtimeSec: runtimeMinutes == null ? null : runtimeMinutes * 60,
+        mediaType: type,
+        tmdbId: id,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 读取一季的单集信息：缩略图 URL 与标题。
+  static Future<Map<int, ({String? title, String? stillUrl})>>
+  fetchEpisodeStills({required int tvId, required int seasonNumber}) async {
+    final key = tmdbApiKey?.trim();
+    if (key == null || key.isEmpty) return const {};
+    final pathAndQuery =
+        '/3/tv/$tvId/season/$seasonNumber'
+        '?api_key=$key&language=zh-CN';
+    try {
+      await _throttle();
+      final body = await _tmdbGet(pathAndQuery);
+      if (body == null) return const {};
+      final data = jsonDecode(body) as Map<String, Object?>;
+      final episodes = data['episodes'] as List<Object?>? ?? const [];
+      final result = <int, ({String? title, String? stillUrl})>{};
+      for (final item in episodes) {
+        if (item is! Map<String, Object?>) continue;
+        final episodeNumber = (item['episode_number'] as num?)?.toInt();
+        if (episodeNumber == null) continue;
+        final stillPath = item['still_path'] as String?;
+        result[episodeNumber] = (
+          title: (item['name'] as String?)?.trim(),
+          stillUrl: stillPath == null
+              ? null
+              : 'https://image.tmdb.org/t/p/w500$stillPath',
+        );
+      }
+      return result;
+    } catch (_) {
+      return const {};
     }
   }
 

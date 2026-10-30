@@ -167,6 +167,7 @@ class _HomePageState extends State<HomePage> {
     return SizedBox(
       height: 46,
       child: TextField(
+        spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
         controller: _searchController,
         focusNode: _searchFocus,
         textInputAction: TextInputAction.search,

@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 
-import '../core/theme/app_theme.dart';
 import '../models/media_source.dart';
 import '../services/media_library.dart';
 import '../services/playback_history.dart';
@@ -10,101 +9,190 @@ import '../services/scraper_service.dart';
 import '../widgets/match_dialog.dart';
 import 'player_page.dart';
 
-/// 影片详情页：爆米花风格——剧照大图背景 + 信息浮层 + 剧集剧照列表。
-class DetailPage extends StatelessWidget {
+/// 网易爆米花风格详情页：顶部剧照渐隐 + 双栏信息 + 横向选集 + 演员区。
+///
+/// 同一部剧有多季时按 TMDB ID 关联，顶部可切换季。
+class DetailPage extends StatefulWidget {
   const DetailPage({required this.video, super.key});
 
   final ScannedVideo video;
 
   @override
+  State<DetailPage> createState() => _DetailPageState();
+}
+
+class _DetailPageState extends State<DetailPage> {
+  int _seasonIndex = 0;
+
+  @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: Listenable.merge([
-        PlaybackHistory.instance,
         MediaLibrary.instance,
+        PlaybackHistory.instance,
       ]),
-      builder: (context, _) => _build(context),
-    );
-  }
+      builder: (context, _) {
+        final library = MediaLibrary.instance;
+        final current = library.resolveAggregated(widget.video);
+        final seasons = library.seasonsOf(current);
+        final season = seasons[_seasonIndex.clamp(0, seasons.length - 1)];
+        final source = library.sourceById(season.sourceId);
+        final episodes = library.episodesOf(season);
+        final isSeries = episodes.length > 1;
+        void Function(int)? onSeasonSelected;
+        if (seasons.length > 1) {
+          onSeasonSelected = (index) => setState(() => _seasonIndex = index);
+        }
 
-  Widget _build(BuildContext context) {
-    final library = MediaLibrary.instance;
-    // 关键：解析到聚合条目（剧名/集数/海报都在聚合层），而非原始单集文件
-    final current = library.resolveAggregated(video);
-    final source = library.sourceById(current.sourceId);
-    final episodes = library.episodesOf(current);
-    final isSeries = episodes.length > 1;
-    final heroH = (MediaQuery.of(context).size.height * 0.42).clamp(
-      320.0,
-      500.0,
-    );
-
-    return CustomScrollView(
-      slivers: [
-        // 顶部剧照背景 + 信息浮层
-        SliverToBoxAdapter(
-          child: _HeroWithInfo(
-            video: current,
-            source: source,
-            episodes: episodes,
-            isSeries: isSeries,
-            height: heroH,
-          ),
-        ),
-        // 简介、剧集网格与文件信息（页面底色区域）
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(28, 4, 28, 0),
-          sliver: SliverToBoxAdapter(
-            child: _SummaryAndEpisodes(
-              video: current,
-              episodes: episodes,
-              isSeries: isSeries,
+        return Scaffold(
+          backgroundColor: Colors.white,
+          body: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _HeroSection(
+                  video: current,
+                  source: source,
+                  episodes: episodes,
+                  isSeries: isSeries,
+                  seasons: seasons,
+                  onSeasonSelected: onSeasonSelected ?? (_) {},
+                ),
+                const SizedBox(height: 30),
+                if (isSeries) ...[
+                  if (seasons.length > 1)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(32, 0, 32, 16),
+                      child: Wrap(
+                        spacing: 10,
+                        children: [
+                          for (var i = 0; i < seasons.length; i++)
+                            _SeasonChip(
+                              label: '第 ${MediaLibrary.seasonOf(seasons[i])} 季',
+                              selected: i == _seasonIndex,
+                              onTap: () => onSeasonSelected!(i),
+                            ),
+                        ],
+                      ),
+                    ),
+                  _EpisodeCarousel(episodes: episodes),
+                ] else
+                  const SizedBox(height: 20),
+                const SizedBox(height: 34),
+                if (current.cast.isNotEmpty) ...[
+                  _CastSection(cast: current.cast),
+                  const SizedBox(height: 32),
+                ],
+                _FileInfo(video: season, source: source, episodes: episodes),
+                const SizedBox(height: 44),
+              ],
             ),
           ),
-        ),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(28, 8, 28, 40),
-          sliver: SliverToBoxAdapter(child: _FileInfo(video: current)),
-        ),
-      ],
+        );
+      },
     );
   }
 }
 
-/// 顶部剧照背景（占满宽度）+ 所有信息浮在其上。
-class _HeroWithInfo extends StatelessWidget {
-  const _HeroWithInfo({
+class _HeroSection extends StatelessWidget {
+  const _HeroSection({
     required this.video,
     required this.source,
     required this.episodes,
     required this.isSeries,
-    required this.height,
+    required this.seasons,
+    required this.onSeasonSelected,
   });
 
   final ScannedVideo video;
   final MediaSource? source;
   final List<ScannedVideo> episodes;
   final bool isSeries;
-  final double height;
+
+  /// 多季时非空：季列表（含当前内容）与切换回调。
+  final List<ScannedVideo> seasons;
+  final ValueChanged<int> onSeasonSelected;
+
+  ScannedVideo _currentEpisode() {
+    if (episodes.isEmpty) return video;
+    for (final episode in episodes) {
+      final entry = PlaybackHistory.instance.entryOf(
+        episode.sourceId,
+        episode.path,
+      );
+      if (entry != null && !entry.finished && entry.positionSec > 1) {
+        return episode;
+      }
+    }
+    return episodes.first;
+  }
+
+  double _currentDuration() {
+    final episode = _currentEpisode();
+    final entry = PlaybackHistory.instance.entryOf(
+      episode.sourceId,
+      episode.path,
+    );
+    final duration = entry?.durationSec ?? 0;
+    return duration > 0 ? duration : (video.runtimeSec ?? 0);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final hasPoster =
-        video.posterPath != null && File(video.posterPath!).existsSync();
-    final currentEpisode = _currentEpisode(episodes);
+    final currentEpisode = _currentEpisode();
+    final duration = _currentDuration();
+    final backdropPath = video.backdropPath;
+
+    Widget playButton(BuildContext context) => SizedBox(
+      height: 44,
+      width: 260,
+      child: ElevatedButton.icon(
+        key: const ValueKey('detail-play'),
+        onPressed: episodes.isEmpty
+            ? null
+            : () {
+                final entry = PlaybackHistory.instance.entryOf(
+                  currentEpisode.sourceId,
+                  currentEpisode.path,
+                );
+                final resume =
+                    entry != null && !entry.finished && entry.positionSec > 1;
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => PlayerPage(
+                      video: currentEpisode,
+                      startPosition: resume ? entry.positionSec : null,
+                    ),
+                  ),
+                );
+              },
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF141414),
+          foregroundColor: Colors.white,
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+        icon: const Icon(Icons.play_arrow, size: 20),
+        label: Text(
+          isSeries
+              ? '播放 第 ${episodes.indexOf(currentEpisode) + 1} 集 ${_formatDuration(duration)}'
+              : '播放 ${_formatDuration(duration)}',
+        ),
+      ),
+    );
 
     return SizedBox(
-      height: height,
+      height: 460,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 剧照背景：清晰大图，占满整个区域
-          if (hasPoster)
+          if (backdropPath != null && File(backdropPath).existsSync())
             Image.file(
-              File(video.posterPath!),
+              File(backdropPath),
               fit: BoxFit.cover,
-              width: double.infinity,
-              height: double.infinity,
+              alignment: Alignment.topCenter,
+              errorBuilder: (_, _, _) =>
+                  Container(color: const Color(0xFFEFF1F4)),
             )
           else
             DecoratedBox(
@@ -116,29 +204,25 @@ class _HeroWithInfo extends StatelessWidget {
                 ),
               ),
             ),
-          // 渐变遮罩：顶部暗 → 中部自然 → 底部融入页面底色
-          DecoratedBox(
+          const DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                stops: const [0.0, 0.4, 0.75, 1.0],
+                stops: [0.0, 0.55, 0.85, 1.0],
                 colors: [
-                  Colors.black.withValues(alpha: 0.35),
-                  Colors.black.withValues(alpha: 0.1),
-                  AppColors.background.withValues(alpha: 0.5),
-                  AppColors.background,
+                  Color(0x00FFFFFF),
+                  Color(0x00FFFFFF),
+                  Color(0xD9FFFFFF),
+                  Colors.white,
                 ],
               ),
             ),
           ),
-          // 信息层
           Padding(
-            padding: const EdgeInsets.fromLTRB(28, 16, 28, 20),
+            padding: const EdgeInsets.fromLTRB(32, 20, 32, 32),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 顶部行：返回 + 类型
                 Row(
                   children: [
                     _GhostButton(
@@ -147,113 +231,19 @@ class _HeroWithInfo extends StatelessWidget {
                       onTap: () => Navigator.of(context).maybePop(),
                     ),
                     const Spacer(),
-                    Text(
-                      _kindLabel(video.kind),
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.55),
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-                const Spacer(),
-                // 标题
-                Text(
-                  video.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 28,
-                    fontWeight: FontWeight.w800,
-                    height: 1.2,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                // 评分与元信息
-                Row(
-                  children: [
-                    if (video.rating != null) ...[
-                      const Icon(
-                        Icons.star_rounded,
-                        size: 18,
-                        color: Color(0xFFFFC85C),
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
-                        video.rating!,
-                        style: const TextStyle(
-                          color: Color(0xFFFFC85C),
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                    ],
-                    Flexible(
-                      child: Text(
-                        [
-                          if (video.modified != null) '${video.modified!.year}',
-                          if (isSeries) '共 ${episodes.length} 集',
-                          if (source != null) '来自「${source!.name}」',
-                        ].join(' · '),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.7),
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                // 播放按钮 + 修正匹配
-                Row(
-                  children: [
                     SizedBox(
-                      height: 44,
-                      child: ElevatedButton.icon(
-                        key: const ValueKey('detail-play'),
-                        onPressed: episodes.isEmpty
-                            ? null
-                            : () => _play(context, currentEpisode),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.black87,
-                          foregroundColor: Colors.white,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          padding: const EdgeInsets.symmetric(horizontal: 20),
-                          textStyle: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        icon: const Icon(Icons.play_arrow_rounded, size: 24),
-                        label: Text(
-                          episodes.isEmpty
-                              ? '播放'
-                              : '播放 第 ${currentEpisode.index + 1} 集${_formatDuration(currentEpisode.durationSec)}',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    SizedBox(
-                      height: 44,
+                      height: 40,
                       child: OutlinedButton.icon(
                         key: const ValueKey('manual-match'),
-                        onPressed: () => _matchManually(context, episodes),
+                        onPressed: () => _matchManually(context),
                         style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.white,
+                          foregroundColor: const Color(0xFF333333),
                           side: BorderSide(
-                            color: Colors.white.withValues(alpha: 0.45),
+                            color: Colors.black.withValues(alpha: 0.12),
                           ),
                           shape: RoundedRectangleBorder(
                             borderRadius: BorderRadius.circular(8),
                           ),
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          textStyle: const TextStyle(fontSize: 13),
                         ),
                         icon: const Icon(Icons.manage_search_rounded, size: 18),
                         label: const Text('修正匹配'),
@@ -261,19 +251,110 @@ class _HeroWithInfo extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 14),
-                // 简介
-                if (video.summary != null && video.summary!.isNotEmpty)
-                  Text(
-                    video.summary!,
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.75),
-                      fontSize: 13,
-                      height: 1.65,
+                const Spacer(),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    SizedBox(
+                      width: 280,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            video.title,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 28,
+                              fontWeight: FontWeight.bold,
+                              color: Color(0xFF1A1A1A),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          playButton(context),
+                        ],
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 40),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Wrap(
+                            spacing: 0,
+                            runSpacing: 8,
+                            children: [
+                              if (video.rating != null) ...[
+                                const Icon(
+                                  Icons.star_rounded,
+                                  color: Color(0xFFF5A623),
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 3),
+                                Text(
+                                  video.rating!,
+                                  style: const TextStyle(
+                                    color: Color(0xFFF5A623),
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const _MetadataDivider(),
+                              ],
+                              if (video.releaseDate != null ||
+                                  video.modified != null)
+                                _MetadataText(
+                                  (video.releaseDate ??
+                                      _formatDate(video.modified!)),
+                                ),
+                              if (isSeries)
+                                _MetadataText(
+                                  '共 ${episodes.length} 集（库中有 ${episodes.length} 集）',
+                                ),
+                              if (video.genres.isEmpty) _MetadataText('剧情'),
+                              if (video.genres.isNotEmpty)
+                                _MetadataText(video.genres.join(' ')),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          if (video.summary != null &&
+                              video.summary!.isNotEmpty)
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    video.summary!,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      color: Color(0xFF888888),
+                                      height: 1.5,
+                                      decoration: TextDecoration.none,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                GestureDetector(
+                                  onTap: () => _showFullSummary(context),
+                                  child: const Text(
+                                    '更多',
+                                    style: TextStyle(
+                                      color: Color(0xFF2B65FF),
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -282,70 +363,35 @@ class _HeroWithInfo extends StatelessWidget {
     );
   }
 
-  /// 当前应播放的集：优先上次看到的，否则第一集。
-  ({ScannedVideo episode, int index, double durationSec}) _currentEpisode(
-    List<ScannedVideo> episodes,
-  ) {
-    if (episodes.isEmpty) return (episode: video, index: 0, durationSec: 0);
-    final history = PlaybackHistory.instance;
-    for (var i = 0; i < episodes.length; i++) {
-      final entry = history.entryOf(episodes[i].sourceId, episodes[i].path);
-      if (entry != null && !entry.finished && entry.positionSec > 1) {
-        return (episode: episodes[i], index: i, durationSec: entry.durationSec);
-      }
-    }
-    final entry = history.entryOf(episodes.first.sourceId, episodes.first.path);
-    return (
-      episode: episodes.first,
-      index: 0,
-      durationSec: entry?.durationSec ?? 0,
-    );
-  }
-
-  static String _formatDuration(double sec) {
-    if (sec <= 0) return '';
-    return ' ${(sec / 60).round()} 分钟';
-  }
-
-  static void _play(
-    BuildContext context,
-    ({ScannedVideo episode, int index, double durationSec}) current,
-  ) {
-    final entry = PlaybackHistory.instance.entryOf(
-      current.episode.sourceId,
-      current.episode.path,
-    );
-    final resume = entry != null && !entry.finished && entry.positionSec > 1;
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => PlayerPage(
-          video: current.episode,
-          startPosition: resume ? entry.positionSec : null,
-        ),
+  void _showFullSummary(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(video.title),
+        content: SingleChildScrollView(child: Text(video.summary ?? '')),
+        actions: [
+          TextButton(
+            onPressed: Navigator.of(context).pop,
+            child: const Text('收起'),
+          ),
+        ],
       ),
     );
   }
 
-  Future<void> _matchManually(
-    BuildContext context,
-    List<ScannedVideo> group,
-  ) async {
+  Future<void> _matchManually(BuildContext context) async {
     final parsed = ScraperService.parseTitle(video.title);
-    final initialQuery = parsed.queries.isEmpty
-        ? video.title
-        : parsed.queries.first;
+    final query = parsed.queries.isEmpty ? video.title : parsed.queries.first;
     final candidate = await showDialog<ScrapeCandidate>(
       context: context,
-      builder: (_) => MatchSearchDialog(
-        initialQuery: initialQuery,
-        preferTv: group.length > 1,
-      ),
+      builder: (_) =>
+          MatchSearchDialog(initialQuery: query, preferTv: isSeries),
     );
     if (candidate == null || !context.mounted) return;
     final messenger = ScaffoldMessenger.maybeOf(context);
     final poster = await MediaLibrary.instance.applyCandidate(
       video,
-      group,
+      episodes,
       candidate,
     );
     messenger
@@ -361,12 +407,20 @@ class _HeroWithInfo extends StatelessWidget {
       );
   }
 
+  static String _formatDuration(double sec) {
+    if (sec <= 0) return '';
+    return '${(sec / 60).round()} 分钟';
+  }
+
+  static String _formatDate(DateTime date) =>
+      '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+
   List<Color> _paletteFor(String title) {
     const palettes = <List<Color>>[
-      [Color(0xFF1B3A2E), Color(0xFF2D5F47)],
-      [Color(0xFF1E2A3F), Color(0xFF3D5A80)],
-      [Color(0xFF3A2A1E), Color(0xFF6B4F35)],
-      [Color(0xFF2B1B3D), Color(0xFF4A2D6B)],
+      [Color(0xFFDCEDF7), Color(0xFFD9E2F5)],
+      [Color(0xFFF4E8D8), Color(0xFFEFDCD2)],
+      [Color(0xFFE7EFE5), Color(0xFFDDE9E2)],
+      [Color(0xFFF0E7F2), Color(0xFFE7DFF0)],
     ];
     var hash = 0;
     for (final code in title.codeUnits) {
@@ -374,13 +428,35 @@ class _HeroWithInfo extends StatelessWidget {
     }
     return palettes[hash % palettes.length];
   }
+}
 
-  static String _kindLabel(MediaKind kind) => switch (kind) {
-    MediaKind.movie => '电影',
-    MediaKind.series => '电视剧',
-    MediaKind.anime => '动漫',
-    MediaKind.variety => '综艺',
-  };
+class _MetadataText extends StatelessWidget {
+  const _MetadataText(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: const TextStyle(fontSize: 13, color: Color(0xFF666666)),
+    );
+  }
+}
+
+class _MetadataDivider extends StatelessWidget {
+  const _MetadataDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Padding(
+      padding: EdgeInsets.symmetric(horizontal: 10),
+      child: Text(
+        '|',
+        style: TextStyle(fontSize: 12, color: Color(0xFFDDDDDD)),
+      ),
+    );
+  }
 }
 
 class _GhostButton extends StatelessWidget {
@@ -397,7 +473,7 @@ class _GhostButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.black.withValues(alpha: 0.35),
+      color: Colors.white.withValues(alpha: 0.72),
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
         onTap: onTap,
@@ -407,11 +483,11 @@ class _GhostButton extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, color: Colors.white, size: 18),
+              Icon(icon, size: 18, color: const Color(0xFF333333)),
               const SizedBox(width: 5),
               Text(
                 label,
-                style: const TextStyle(color: Colors.white, fontSize: 13),
+                style: const TextStyle(color: Color(0xFF333333), fontSize: 13),
               ),
             ],
           ),
@@ -421,139 +497,102 @@ class _GhostButton extends StatelessWidget {
   }
 }
 
-/// 简介 + 剧集网格（页面底色区域）。
-class _SummaryAndEpisodes extends StatelessWidget {
-  const _SummaryAndEpisodes({
-    required this.video,
-    required this.episodes,
-    required this.isSeries,
-  });
-
-  final ScannedVideo video;
-  final List<ScannedVideo> episodes;
-  final bool isSeries;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        if (video.summary != null && video.summary!.isNotEmpty) ...[
-          Text(
-            '剧情简介',
-            style: Theme.of(context).textTheme.titleMedium
-                ?.copyWith(fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 10),
-          Text(
-            video.summary!,
-            style: const TextStyle(
-              color: AppColors.text,
-              fontSize: 13.5,
-              height: 1.8,
-            ),
-          ),
-          const SizedBox(height: 26),
-        ],
-        if (isSeries) ...[
-          Text(
-            '第 1 季 · 共 ${episodes.length} 集',
-            style: Theme.of(context).textTheme.titleMedium
-                ?.copyWith(fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 14),
-          _EpisodeGrid(episodes: episodes),
-        ],
-      ],
-    );
-  }
-}
-
-/// 剧集网格：铺满宽度，每行若干张卡片。
-class _EpisodeGrid extends StatelessWidget {
-  const _EpisodeGrid({required this.episodes});
+class _EpisodeCarousel extends StatefulWidget {
+  const _EpisodeCarousel({required this.episodes});
 
   final List<ScannedVideo> episodes;
 
   @override
-  Widget build(BuildContext context) {
-    final width = MediaQuery.of(context).size.width;
-    final columns = ((width - 80) / 190).floor().clamp(3, 8);
-    return GridView.builder(
-      physics: const NeverScrollableScrollPhysics(),
-      shrinkWrap: true,
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: columns,
-        crossAxisSpacing: 12,
-        mainAxisSpacing: 12,
-        childAspectRatio: 1.5,
-      ),
-      itemCount: episodes.length,
-      itemBuilder: (context, index) =>
-          _EpisodeCard(episode: episodes[index], index: index),
-    );
-  }
+  State<_EpisodeCarousel> createState() => _EpisodeCarouselState();
 }
 
-/// 文件信息卡片：路径、大小、修改时间。
-class _FileInfo extends StatelessWidget {
-  const _FileInfo({required this.video});
+class _EpisodeCarouselState extends State<_EpisodeCarousel> {
+  final ScrollController _controller = ScrollController();
 
-  final ScannedVideo video;
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _scroll(bool forward) {
+    if (!_controller.hasClients) return;
+    final target = (_controller.offset + (forward ? 660 : -660)).clamp(
+      0.0,
+      _controller.position.maxScrollExtent,
+    );
+    _controller.animateTo(
+      target,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    final sizeMb = video.sizeBytes / (1024 * 1024);
-    final sizeLabel = sizeMb >= 1024
-        ? '${(sizeMb / 1024).toStringAsFixed(1)} GB'
-        : '${sizeMb.toStringAsFixed(0)} MB';
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: AppColors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.border),
-      ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '文件信息',
-            style: Theme.of(context).textTheme.titleSmall
-                ?.copyWith(fontWeight: FontWeight.w700),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        '第 1 季',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1A1A1A),
+                        ),
+                      ),
+                      SizedBox(width: 4),
+                      Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 16,
+                        color: Color(0xFF666666),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 6),
+                  SizedBox(
+                    width: 16,
+                    height: 3,
+                    child: ColoredBox(color: Color(0xFF141414)),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  _CircleArrow(
+                    onTap: () => _scroll(false),
+                    icon: Icons.arrow_left,
+                  ),
+                  const SizedBox(width: 10),
+                  _CircleArrow(
+                    onTap: () => _scroll(true),
+                    icon: Icons.arrow_right,
+                  ),
+                ],
+              ),
+            ],
           ),
-          const SizedBox(height: 10),
-          _infoRow('路径', video.path),
-          _infoRow('大小', sizeLabel),
-          if (video.modified != null)
-            _infoRow(
-              '修改时间',
-              '${video.modified!.year}-'
-                  '${video.modified!.month.toString().padLeft(2, '0')}-'
-                  '${video.modified!.day.toString().padLeft(2, '0')}',
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _infoRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+          const SizedBox(height: 16),
           SizedBox(
-            width: 64,
-            child: Text(
-              label,
-              style: const TextStyle(fontSize: 12.5, color: AppColors.muted),
-            ),
-          ),
-          Expanded(
-            child: Text(
-              value,
-              style: const TextStyle(fontSize: 12.5, color: AppColors.text),
+            height: 148,
+            child: ListView.separated(
+              clipBehavior: Clip.none,
+              controller: _controller,
+              scrollDirection: Axis.horizontal,
+              itemCount: widget.episodes.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 16),
+              itemBuilder: (context, index) =>
+                  _EpisodeCard(episode: widget.episodes[index], index: index),
             ),
           ),
         ],
@@ -562,121 +601,149 @@ class _FileInfo extends StatelessWidget {
   }
 }
 
-/// 剧集卡片：渐变底 + 集号 + 标题 + 进度。
-class _EpisodeCard extends StatefulWidget {
+/// 季切换标签。
+class _SeasonChip extends StatelessWidget {
+  const _SeasonChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? const Color(0xFF141414) : const Color(0xFFF2F3F5),
+      borderRadius: BorderRadius.circular(16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w600,
+              color: selected ? Colors.white : const Color(0xFF666666),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CircleArrow extends StatelessWidget {
+  const _CircleArrow({required this.onTap, required this.icon});
+
+  final VoidCallback onTap;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: const Color(0xFFF2F3F5),
+      shape: const CircleBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: Icon(icon, size: 18, color: const Color(0xFF666666)),
+        ),
+      ),
+    );
+  }
+}
+
+class _EpisodeCard extends StatelessWidget {
   const _EpisodeCard({required this.episode, required this.index});
 
   final ScannedVideo episode;
   final int index;
 
-  @override
-  State<_EpisodeCard> createState() => _EpisodeCardState();
-}
-
-class _EpisodeCardState extends State<_EpisodeCard> {
-  bool _hovered = false;
+  Widget get _placeholder => DecoratedBox(
+    decoration: const BoxDecoration(
+      gradient: LinearGradient(colors: [Color(0xFF48506A), Color(0xFF252B3D)]),
+    ),
+    child: Center(
+      child: Text(
+        '第 ${index + 1} 集',
+        style: const TextStyle(
+          color: Colors.white70,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) {
-    final episode = widget.episode;
     final entry = PlaybackHistory.instance.entryOf(
       episode.sourceId,
       episode.path,
     );
-    final finished = entry?.finished ?? false;
-    final progress = entry?.progress ?? 0.0;
-
-    return MouseRegion(
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onTap: () => _play(context, episode),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF2D5F47), Color(0xFF1B3A2E)],
-            ),
-            borderRadius: BorderRadius.circular(11),
-            boxShadow: _hovered
-                ? [
-                    BoxShadow(
-                      color: const Color(0xFF2D5F47).withValues(alpha: 0.45),
-                      blurRadius: 14,
-                      offset: const Offset(0, 5),
-                    ),
-                  ]
-                : null,
-          ),
-          child: Stack(
-            fit: StackFit.expand,
+    final progress = entry?.progress ?? 0;
+    final thumbnailPath = episode.stillPath ?? episode.backdropPath;
+    return Material(
+      color: Colors.transparent,
+      child: SizedBox(
+        width: 200,
+        child: InkWell(
+          onTap: () => _play(context),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      '第 ${widget.index + 1} 集',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      episode.title,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.8),
-                        fontSize: 11,
-                        height: 1.35,
-                      ),
-                    ),
-                  ],
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: SizedBox(
+                  width: 200,
+                  height: 115,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (thumbnailPath != null &&
+                          File(thumbnailPath).existsSync())
+                        Image.file(
+                          File(thumbnailPath),
+                          fit: BoxFit.cover,
+                          alignment: Alignment.topCenter,
+                          errorBuilder: (context, error, stackTrace) =>
+                              _placeholder,
+                        )
+                      else
+                        _placeholder,
+                      if (progress > 0)
+                        Align(
+                          alignment: Alignment.bottomCenter,
+                          child: LinearProgressIndicator(
+                            value: entry!.finished ? 1 : progress,
+                            minHeight: 3,
+                            backgroundColor: Colors.black26,
+                            valueColor: const AlwaysStoppedAnimation(
+                              Color(0xFF2B65FF),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
                 ),
               ),
-              if (_hovered)
-                Center(
-                  child: CircleAvatar(
-                    radius: 21,
-                    backgroundColor: Colors.black.withValues(alpha: 0.45),
-                    child: const Icon(
-                      Icons.play_arrow_rounded,
-                      color: Colors.white,
-                      size: 24,
-                    ),
-                  ),
-                ),
-              if (progress > 0)
-                Positioned(
-                  left: 12,
-                  right: 12,
-                  bottom: 10,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: finished ? 1 : progress,
-                      minHeight: 3.5,
-                      color: finished ? Colors.white70 : AppColors.accent,
-                      backgroundColor: Colors.white24,
-                    ),
-                  ),
-                ),
-              if (finished)
-                const Positioned(
-                  right: 9,
-                  top: 9,
-                  child: Icon(
-                    Icons.check_circle_rounded,
-                    color: Colors.white70,
-                    size: 16,
-                  ),
-                ),
+              const SizedBox(height: 8),
+              Text(
+                episode.episodeTitle != null && episode.episodeTitle!.isNotEmpty
+                    ? '${index + 1}. ${episode.episodeTitle}'
+                    : '${index + 1}. ${episode.title}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13, color: Color(0xFF222222)),
+              ),
             ],
           ),
         ),
@@ -684,7 +751,7 @@ class _EpisodeCardState extends State<_EpisodeCard> {
     );
   }
 
-  void _play(BuildContext context, ScannedVideo episode) {
+  void _play(BuildContext context) {
     final entry = PlaybackHistory.instance.entryOf(
       episode.sourceId,
       episode.path,
@@ -698,5 +765,139 @@ class _EpisodeCardState extends State<_EpisodeCard> {
         ),
       ),
     );
+  }
+}
+
+class _CastSection extends StatelessWidget {
+  const _CastSection({required this.cast});
+
+  final List<CastMember> cast;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '相关演员',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF141414),
+            ),
+          ),
+          const SizedBox(height: 18),
+          Wrap(
+            spacing: 20,
+            runSpacing: 18,
+            children: [
+              for (final member in cast)
+                SizedBox(
+                  width: 90,
+                  child: Column(
+                    children: [
+                      CircleAvatar(
+                        radius: 42,
+                        backgroundColor: const Color(0xFFE5E6EB),
+                        backgroundImage: _photo(member),
+                        child: _photo(member) == null
+                            ? const Icon(
+                                Icons.person,
+                                size: 48,
+                                color: Colors.white,
+                              )
+                            : null,
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        member.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF222222),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        member.role,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF999999),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  NetworkImage? _photo(CastMember member) =>
+      member.photoUrl == null ? null : NetworkImage(member.photoUrl!);
+}
+
+class _FileInfo extends StatelessWidget {
+  const _FileInfo({
+    required this.video,
+    required this.source,
+    required this.episodes,
+  });
+
+  final ScannedVideo video;
+  final MediaSource? source;
+  final List<ScannedVideo> episodes;
+
+  @override
+  Widget build(BuildContext context) {
+    final current = episodes.isEmpty ? video : episodes.first;
+    final sizeMb = current.sizeBytes / (1024 * 1024);
+    final sizeLabel = sizeMb >= 1024
+        ? '${(sizeMb / 1024).toStringAsFixed(1)} GB'
+        : '${sizeMb.toStringAsFixed(0)} MB';
+    final runtime = video.runtimeSec;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Divider(color: Color(0xFFF0F0F0), thickness: 1, height: 1),
+          const SizedBox(height: 16),
+          Text(
+            current.title,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${source?.name ?? '媒体库'} · ${current.path}',
+            style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            [
+              if (runtime != null && runtime > 0) _formatSeconds(runtime),
+              sizeLabel,
+            ].join('  '),
+            style: const TextStyle(fontSize: 12, color: Color(0xFF888888)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatSeconds(double seconds) {
+    final total = seconds.round();
+    final minutes = total ~/ 60;
+    final secs = total % 60;
+    return '$minutes 分钟 $secs 秒';
   }
 }

@@ -318,6 +318,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 16),
           TextField(
+            spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
             key: const ValueKey('tmdb-key'),
             controller: _tmdbKeyController,
             decoration: const InputDecoration(
@@ -329,6 +330,7 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 12),
           TextField(
+            spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
             key: const ValueKey('scrape-proxy'),
             controller: _proxyController,
             decoration: const InputDecoration(
@@ -800,6 +802,8 @@ class _WebDavSourceDialogState extends State<WebDavSourceDialog> {
                 TextFormField(
                   controller: _passwordController,
                   obscureText: _obscurePassword,
+                  spellCheckConfiguration:
+                      const SpellCheckConfiguration.disabled(),
                   validator: (value) {
                     if (widget.existing != null) return null; // 编辑可留空沿用旧密码
                     if (value == null || value.isEmpty) return '请填写密码';
@@ -959,6 +963,7 @@ class _WebDavSourceDialogState extends State<WebDavSourceDialog> {
     return TextFormField(
       key: key,
       controller: controller,
+      spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
       validator:
           validator ??
           (value) => value == null || value.trim().isEmpty ? '请填写$label' : null,

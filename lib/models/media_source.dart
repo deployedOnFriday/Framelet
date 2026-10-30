@@ -67,6 +67,27 @@ class MediaSource {
       DateTime.now().microsecondsSinceEpoch.toRadixString(36);
 }
 
+/// 演员信息：TMDB credits 数据的最小化展示模型。
+class CastMember {
+  const CastMember({required this.name, required this.role, this.photoUrl});
+
+  final String name;
+  final String role;
+  final String? photoUrl;
+
+  Map<String, Object?> toJson() => {
+    'name': name,
+    'role': role,
+    'photoUrl': photoUrl,
+  };
+
+  factory CastMember.fromJson(Map<String, Object?> json) => CastMember(
+    name: json['name']! as String,
+    role: json['role'] as String? ?? '',
+    photoUrl: json['photoUrl'] as String?,
+  );
+}
+
 /// 视频文件分类，与左侧导航一一对应。
 enum MediaKind { movie, series, anime, variety }
 
@@ -82,6 +103,14 @@ class ScannedVideo {
     this.posterPath,
     this.summary,
     this.rating,
+    this.backdropPath,
+    this.genres = const [],
+    this.cast = const [],
+    this.releaseDate,
+    this.runtimeSec,
+    this.stillPath,
+    this.episodeTitle,
+    this.tmdbId,
   });
 
   final String sourceId;
@@ -101,6 +130,30 @@ class ScannedVideo {
   /// 评分（0-10 文本，例如 "8.6"）。
   final String? rating;
 
+  /// 刮削得到的高清背景图文件路径。
+  final String? backdropPath;
+
+  /// 类型标签，例如 ['剧情', '悬疑']。
+  final List<String> genres;
+
+  /// 主要演员与导演。
+  final List<CastMember> cast;
+
+  /// 上映/首播日期，格式 yyyy-MM-dd。
+  final String? releaseDate;
+
+  /// TMDB 提供的影片时长（秒）。
+  final double? runtimeSec;
+
+  /// 单集缩略图文件路径。
+  final String? stillPath;
+
+  /// TMDB 单集标题（刮削得到）。
+  final String? episodeTitle;
+
+  /// 所属剧集的 TMDB 条目 ID，多季关联与刮削去重用。
+  final int? tmdbId;
+
   Map<String, Object?> toJson() => {
     'sourceId': sourceId,
     'path': path,
@@ -112,6 +165,14 @@ class ScannedVideo {
     'posterPath': posterPath,
     'summary': summary,
     'rating': rating,
+    'backdropPath': backdropPath,
+    'genres': genres,
+    'cast': cast.map((member) => member.toJson()).toList(),
+    'releaseDate': releaseDate,
+    'runtimeSec': runtimeSec,
+    'stillPath': stillPath,
+    'episodeTitle': episodeTitle,
+    'tmdbId': tmdbId,
   };
 
   factory ScannedVideo.fromJson(Map<String, Object?> json) => ScannedVideo(
@@ -127,6 +188,19 @@ class ScannedVideo {
     posterPath: json['posterPath'] as String?,
     summary: json['summary'] as String?,
     rating: json['rating'] as String?,
+    backdropPath: json['backdropPath'] as String?,
+    genres: (json['genres'] as List<Object?>? ?? const [])
+        .whereType<String>()
+        .toList(),
+    cast: (json['cast'] as List<Object?>? ?? const [])
+        .whereType<Map>()
+        .map((member) => CastMember.fromJson(member.cast<String, Object?>()))
+        .toList(),
+    releaseDate: json['releaseDate'] as String?,
+    runtimeSec: (json['runtimeSec'] as num?)?.toDouble(),
+    stillPath: json['stillPath'] as String?,
+    episodeTitle: json['episodeTitle'] as String?,
+    tmdbId: (json['tmdbId'] as num?)?.toInt(),
   );
 
   ScannedVideo copyWith({
@@ -136,6 +210,14 @@ class ScannedVideo {
     String? posterPath,
     String? summary,
     String? rating,
+    String? backdropPath,
+    List<String>? genres,
+    List<CastMember>? cast,
+    String? releaseDate,
+    double? runtimeSec,
+    String? stillPath,
+    String? episodeTitle,
+    int? tmdbId,
   }) => ScannedVideo(
     sourceId: sourceId,
     path: path,
@@ -147,6 +229,14 @@ class ScannedVideo {
     posterPath: posterPath ?? this.posterPath,
     summary: summary ?? this.summary,
     rating: rating ?? this.rating,
+    backdropPath: backdropPath ?? this.backdropPath,
+    genres: genres ?? this.genres,
+    cast: cast ?? this.cast,
+    releaseDate: releaseDate ?? this.releaseDate,
+    runtimeSec: runtimeSec ?? this.runtimeSec,
+    stillPath: stillPath ?? this.stillPath,
+    episodeTitle: episodeTitle ?? this.episodeTitle,
+    tmdbId: tmdbId ?? this.tmdbId,
   );
 }
 

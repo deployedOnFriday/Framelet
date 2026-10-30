@@ -116,6 +116,46 @@ void main() {
     });
   });
 
+  group('季号识别', () {
+    test('S02E13 文件名识别为第 2 季', () {
+      expect(MediaLibrary.seasonOf(video('/剧/某剧/某剧.S02E13', '某剧.S02E13')), 2);
+    });
+
+    test('第2季 目录识别为第 2 季', () {
+      expect(MediaLibrary.seasonOf(video('/剧/某剧/第2季/01', '01')), 2);
+    });
+
+    test('纯数字季目录识别为第 3 季', () {
+      expect(MediaLibrary.seasonOf(video('/剧/某剧/3/01', '01')), 3);
+    });
+
+    test('无季号标记时按第 1 季', () {
+      expect(MediaLibrary.seasonOf(video('/剧/某剧/01~4K', '01~4K')), 1);
+    });
+
+    test('中文季号（第二季）识别', () {
+      expect(MediaLibrary.seasonOf(video('/剧/某剧/第二季/01', '01')), 2);
+    });
+  });
+
+  group('集数解析', () {
+    test('01~4K 解析为第 1 集', () {
+      expect(MediaLibrary.episodeNumberOf('01~4K'), 1);
+    });
+
+    test('14_1080p 解析为第 14 集', () {
+      expect(MediaLibrary.episodeNumberOf('14_1080p'), 14);
+    });
+
+    test('S02E13 解析为第 13 集', () {
+      expect(MediaLibrary.episodeNumberOf('某剧.S02E13'), 13);
+    });
+
+    test('第08集 解析为第 8 集', () {
+      expect(MediaLibrary.episodeNumberOf('某剧.第08集'), 8);
+    });
+  });
+
   group('分类判定', () {
     test('文件名含 S01E13 时判定为剧集，即使目录是电影', () {
       expect(
