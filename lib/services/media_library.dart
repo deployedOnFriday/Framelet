@@ -798,7 +798,17 @@ class MediaLibrary extends ChangeNotifier {
     for (final entry in byFolder.entries) {
       final group = entry.value
         ..sort((a, b) => _naturalCompare(a.path, b.path));
-      final folderTitle = _seriesTitle(entry.key, group);
+      // 展示名优先用 TMDB 官方名，缺失时用清洗后的文件夹名
+      final tmdbTitle = group
+          .firstWhere(
+            (video) => (video.tmdbTitle ?? '').isNotEmpty,
+            orElse: () => group.first,
+          )
+          .tmdbTitle;
+      final rawFolderTitle = _seriesTitle(entry.key, group);
+      final folderTitle = rawFolderTitle == null
+          ? null
+          : _cleanFolderTitle(rawFolderTitle);
 
       // 无有效目录名（文件直接放在电影/网盘等通用或根目录下）：
       // 各文件独立，标题保持文件名
@@ -833,7 +843,9 @@ class MediaLibrary extends ChangeNotifier {
         }
         result.add(
           group.first.copyWith(
-            title: folderTitle,
+            title: (tmdbTitle != null && tmdbTitle.isNotEmpty)
+                ? tmdbTitle
+                : folderTitle,
             kind: kind,
             episodeCount: group.length,
             posterPath: posterSource.posterPath,
@@ -845,16 +857,25 @@ class MediaLibrary extends ChangeNotifier {
         continue;
       }
 
-      // 单文件电影：标题取目录名
+      // 单文件电影：标题优先 TMDB 名，回退目录名
       if (group.length == 1) {
-        result.add(group.first.copyWith(title: folderTitle, tmdbId: tmdbId));
+        result.add(
+          group.first.copyWith(
+            title: (tmdbTitle != null && tmdbTitle.isNotEmpty)
+                ? tmdbTitle
+                : folderTitle,
+            tmdbId: tmdbId,
+          ),
+        );
         continue;
       }
 
       // 同目录多文件但无集数标记：视为同一部影片的多版本，合并为一条电影
       result.add(
         group.first.copyWith(
-          title: folderTitle,
+          title: (tmdbTitle != null && tmdbTitle.isNotEmpty)
+              ? tmdbTitle
+              : folderTitle,
           episodeCount: 1,
           posterPath: posterSource.posterPath,
           summary: posterSource.summary,
@@ -864,6 +885,24 @@ class MediaLibrary extends ChangeNotifier {
       );
     }
     return result;
+  }
+
+  /// 清洗文件夹名作为展示标题：剥掉尾部的年份/画质/码率等杂质。
+  /// 清洗后为空（全是杂质）时返回 null。
+  static String? _cleanFolderTitle(String raw) {
+    var title = raw.trim();
+    title = title
+        .replaceAll(RegExp(r'[（(]\s*(19|20)\d{2}\s*[）)]\s*$'), '')
+        .replaceAll(RegExp(r'[（(][^）)]*[）)]\s*$'), '')
+        .replaceAll(
+          RegExp(
+            r'\s*(60fps|120fps|60帧|120帧|高码|高码率|hq|4k|8k|1080p|2160p|hdr10?)\s*$',
+            caseSensitive: false,
+          ),
+          '',
+        )
+        .trim();
+    return title.isEmpty ? null : title;
   }
 
   /// 从一组路径中提取 {tmdbid-NNN} 标记（媒体管理器命名习惯，取第一个命中的）。
