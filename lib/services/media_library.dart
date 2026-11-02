@@ -790,9 +790,21 @@ class MediaLibrary extends ChangeNotifier {
 
       // 剧集模式：同目录多文件带集数标记
       if (_isSeriesGroup(group)) {
-        final kind = group.first.kind == MediaKind.movie
+        var kind = group.first.kind == MediaKind.movie
             ? MediaKind.series
             : group.first.kind;
+        // 按 TMDB 类型修正分类：动画→动漫、真人秀/脱口秀→综艺
+        // （genres 在刮削时写入，byKind 每次实时聚合，刮完即自动归位）
+        final genreSource = group.firstWhere(
+          (video) => video.genres.isNotEmpty,
+          orElse: () => group.first,
+        );
+        final genreText = genreSource.genres.join(' ');
+        if (genreText.contains('动画')) {
+          kind = MediaKind.anime;
+        } else if (genreText.contains('真人秀') || genreText.contains('脱口秀')) {
+          kind = MediaKind.variety;
+        }
         result.add(
           group.first.copyWith(
             title: folderTitle,
