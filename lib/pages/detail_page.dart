@@ -78,9 +78,8 @@ class _DetailPageState extends State<DetailPage> {
                     ),
                   _EpisodeCarousel(
                     episodes: episodes,
-                    seasonLabel: seasons.length > 1
-                        ? '第 ${MediaLibrary.seasonOf(seasons[_seasonIndex])} 季'
-                        : '剧集',
+                    seasonLabel:
+                        '第 ${MediaLibrary.seasonOf(seasons[_seasonIndex])} 季',
                   ),
                 ] else
                   const SizedBox(height: 20),
@@ -508,7 +507,7 @@ class _EpisodeCarousel extends StatefulWidget {
 
   final List<ScannedVideo> episodes;
 
-  /// 单季时显示「剧集」，多季时显示「第 N 季」。
+  /// 季标题（如「第 8 季」）；花絮归在该季内部。
   final String seasonLabel;
 
   @override
