@@ -76,6 +76,7 @@ class _DetailPageState extends State<DetailPage> {
                     ),
                   _EpisodeCarousel(
                     episodes: episodes,
+                    posterPath: season.posterPath,
                     seasonLabel:
                         '第 ${MediaLibrary.seasonOf(seasons[_seasonIndex])} 季',
                   ),
@@ -501,9 +502,16 @@ class _GhostButton extends StatelessWidget {
 }
 
 class _EpisodeCarousel extends StatefulWidget {
-  const _EpisodeCarousel({required this.episodes, required this.seasonLabel});
+  const _EpisodeCarousel({
+    required this.episodes,
+    required this.seasonLabel,
+    this.posterPath,
+  });
 
   final List<ScannedVideo> episodes;
+
+  /// 剧集海报——花絮卡片没有独立缩略图时用它兜底。
+  final String? posterPath;
 
   /// 季标题（如「第 8 季」）；花絮归在该季内部。
   final String seasonLabel;
@@ -641,8 +649,10 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
                 scrollDirection: Axis.horizontal,
                 itemCount: extras.length,
                 separatorBuilder: (_, _) => const SizedBox(width: 12),
-                itemBuilder: (context, index) =>
-                    _ExtraCard(episode: extras[index]),
+                itemBuilder: (context, index) => _ExtraCard(
+                  episode: extras[index],
+                  posterPath: widget.posterPath,
+                ),
               ),
             ),
           ],
@@ -969,9 +979,12 @@ class _FileInfo extends StatelessWidget {
 
 /// 花絮/相关视频小卡片（较小，无集号）。
 class _ExtraCard extends StatelessWidget {
-  const _ExtraCard({required this.episode});
+  const _ExtraCard({required this.episode, this.posterPath});
 
   final ScannedVideo episode;
+
+  /// 花絮没有独立缩略图，用剧集海报兜底。
+  final String? posterPath;
 
   @override
   Widget build(BuildContext context) {
@@ -994,29 +1007,48 @@ class _ExtraCard extends StatelessWidget {
       },
       child: Container(
         width: 150,
-        padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: const Color(0xFFEFEFEF),
           borderRadius: BorderRadius.circular(10),
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
-              Icons.movie_filter_outlined,
-              size: 20,
-              color: Color(0xFF888888),
+            ClipRRect(
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(10),
+              ),
+              child: SizedBox(
+                height: 74,
+                width: double.infinity,
+                child: posterPath != null && File(posterPath!).existsSync()
+                    ? Image.file(
+                        File(posterPath!),
+                        fit: BoxFit.cover,
+                        color: Colors.black.withValues(alpha: 0.25),
+                        colorBlendMode: BlendMode.darken,
+                      )
+                    : const ColoredBox(
+                        color: Color(0xFFE0E0E0),
+                        child: Icon(
+                          Icons.movie_filter_outlined,
+                          size: 20,
+                          color: Color(0xFF999999),
+                        ),
+                      ),
+              ),
             ),
-            const SizedBox(height: 8),
-            Text(
-              episode.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontSize: 11.5,
-                color: Color(0xFF333333),
-                height: 1.4,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+              child: Text(
+                episode.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  color: Color(0xFF333333),
+                  height: 1.4,
+                ),
               ),
             ),
           ],

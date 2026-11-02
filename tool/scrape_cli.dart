@@ -268,7 +268,10 @@ void main(List<String> args) async {
       resultOut[member.path] = {
         'posterPath': posterPath,
         'backdropPath': backdropPath,
-        'summary': (seasonOverview ?? details?.summary ?? result.summary),
+        // 第 1 季可用整剧简介；其他季季简介为空则不写（避免显示第一季文案）
+        'summary':
+            seasonOverview ??
+            (seasonNumber == 1 ? (details?.summary ?? result.summary) : null),
         'rating': (details?.rating ?? result.rating),
         'tmdbId': result.tmdbId,
         'tmdbTitle': result.name,
