@@ -1301,9 +1301,10 @@ class _MediaInfoDialogState extends State<_MediaInfoDialog> {
       final minutes = widget.durationSec ~/ 60;
       final seconds = (widget.durationSec % 60).toInt();
       result['时长'] = '$minutes 分 ${seconds.toString().padLeft(2, '0')} 秒';
-      // 文件平均码率（总码率，含音视频），即时码率取不到时的兜底
+      // 文件平均码率（总码率，含音视频），即时码率取不到时的兜底。
+      // file-size 单位是字节，码率是比特/秒，必须 ×8，否则只有真实值的 1/8。
       if (size != null && size > 0) {
-        result['平均码率'] = _prettyBitrate(size / widget.durationSec);
+        result['平均码率'] = _prettyBitrate(size * 8 / widget.durationSec);
       }
     }
     if (!mounted) return;
