@@ -682,7 +682,6 @@ class _PlayerPageState extends State<PlayerPage> {
       context: context,
       builder: (context) => _MediaInfoDialog(
         title: _current.title,
-        path: _current.path,
         durationSec: _durationSec,
         platform: platform is NativePlayer ? platform : null,
       ),
@@ -1180,13 +1179,11 @@ class _ControlButtonLabel extends StatelessWidget {
 class _MediaInfoDialog extends StatefulWidget {
   const _MediaInfoDialog({
     required this.title,
-    required this.path,
     required this.durationSec,
     required this.platform,
   });
 
   final String title;
-  final String path;
   final double durationSec;
   final NativePlayer? platform;
 
@@ -1200,7 +1197,7 @@ class _MediaInfoDialogState extends State<_MediaInfoDialog> {
   String? _audioBitrate;
   Timer? _rateTimer;
 
-  /// 行的展示顺序（文件名与文件路径在首尾单独放）。
+  /// 行的展示顺序（文件名单独放首）。
   static const _order = [
     '分辨率',
     '帧率',
@@ -1327,7 +1324,6 @@ class _MediaInfoDialogState extends State<_MediaInfoDialog> {
       MapEntry('文件名', widget.title),
       for (final key in _order)
         if (values[key] != null) MapEntry(key, values[key]!),
-      MapEntry('文件路径', widget.path),
     ];
   }
 
@@ -1344,33 +1340,13 @@ class _MediaInfoDialogState extends State<_MediaInfoDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                const Text(
-                  '影片信息',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const Spacer(),
-                if (widget.platform != null) ...[
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF4CD964),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                  const SizedBox(width: 5),
-                  const Text(
-                    '码率实时刷新',
-                    style: TextStyle(color: Colors.white38, fontSize: 11),
-                  ),
-                ],
-              ],
+            const Text(
+              '影片信息',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+              ),
             ),
             const SizedBox(height: 12),
             ConstrainedBox(
