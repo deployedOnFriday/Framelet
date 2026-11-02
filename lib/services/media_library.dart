@@ -230,6 +230,13 @@ class MediaLibrary extends ChangeNotifier {
       ),
       RegExp(r'第\s*(\d{1,4})\s*[集话期]'),
     ];
+    // 综艺「第N期上/中/下」：每期按 上=1、中=2、下=3 顺延，与 TMDB 分集一致
+    final part = RegExp(r'第\s*(\d{1,3})\s*期\s*([上中下])').firstMatch(title);
+    if (part != null) {
+      final base = int.tryParse(part.group(1)!);
+      final sub = const {'上': 1, '中': 2, '下': 3}[part.group(2)];
+      if (base != null && sub != null) return (base - 1) * 3 + sub;
+    }
     for (final pattern in patterns) {
       final match = pattern.firstMatch(title);
       if (match?.group(1) case final number?) return int.tryParse(number);

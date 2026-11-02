@@ -281,6 +281,13 @@ String _defaultResultPath() {
 }
 
 int? _episodeNumber(String title) {
+  // 综艺「第N期上/中/下」：上=1、中=2、下=3 顺延，与 TMDB 分集一致
+  final part = RegExp(r'第\s*(\d{1,3})\s*期\s*([上中下])').firstMatch(title);
+  if (part != null) {
+    final base = int.tryParse(part.group(1)!);
+    final sub = const {'上': 1, '中': 2, '下': 3}[part.group(2)];
+    if (base != null && sub != null) return (base - 1) * 3 + sub;
+  }
   final patterns = [
     RegExp(r'[sS]\d{1,2}[eE](\d{1,3})'),
     RegExp(r'(?:^|[.\s_-])e(?:p)?(\d{1,3})(?:$|[.\s_-])', caseSensitive: false),
