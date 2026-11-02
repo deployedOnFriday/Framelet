@@ -29,6 +29,22 @@ class _HomePageState extends State<HomePage> {
   final _bannerController = PageController();
   final _searchController = TextEditingController();
   final _searchFocus = FocusNode();
+
+  /// 正在同步（扫描+自动刮削）。
+  bool _syncing = false;
+
+  Future<void> _syncNow() async {
+    if (_syncing) return;
+    setState(() => _syncing = true);
+    try {
+      final count = await MediaLibrary.instance.syncAll();
+      if (!mounted) return;
+      _showMessage(count > 0 ? '已同步 $count 个媒体源' : '没有已连接的媒体源');
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
+  }
+
   Timer? _carouselTimer;
   int _bannerIndex = 0;
 
@@ -154,10 +170,37 @@ class _HomePageState extends State<HomePage> {
             color: AppColors.primary,
           ),
           const SizedBox(width: 10),
-          Text(
-            '媒体库已同步 · 共 ${library.sources.length} 个媒体源、$total 个视频文件',
-            style: const TextStyle(color: AppColors.primary, fontSize: 13),
+          Expanded(
+            child: Text(
+              '媒体库已同步 · 共 ${library.sources.length} 个媒体源、$total 个视频文件',
+              style: const TextStyle(color: AppColors.primary, fontSize: 13),
+            ),
           ),
+          if (_syncing)
+            const Padding(
+              padding: EdgeInsets.only(right: 6),
+              child: SizedBox(
+                width: 16,
+                height: 16,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppColors.primary,
+                ),
+              ),
+            )
+          else
+            IconButton(
+              onPressed: _syncNow,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(),
+              tooltip: '同步媒体库并刮削',
+              icon: const Icon(
+                Icons.sync_rounded,
+                size: 19,
+                color: AppColors.primary,
+              ),
+            ),
         ],
       ),
     );

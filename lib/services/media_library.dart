@@ -164,6 +164,21 @@ class MediaLibrary extends ChangeNotifier {
 
   int countByKind(MediaKind kind) => byKind(kind).length;
 
+  /// 同步所有已连接媒体源（扫描完成后会自动触发刮削）。
+  Future<int> syncAll() async {
+    final targets = _sources.where((source) => source.connected).toList();
+    var done = 0;
+    for (final source in targets) {
+      try {
+        await scan(source.id);
+        done++;
+      } catch (_) {
+        // 单个源失败不影响其他源
+      }
+    }
+    return done;
+  }
+
   /// 未刮削的聚合条目（不进前端，等设置页手动处理）。
   List<ScannedVideo> unscrapedItems() {
     final result = <ScannedVideo>[];
