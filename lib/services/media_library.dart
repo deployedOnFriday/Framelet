@@ -188,12 +188,18 @@ class MediaLibrary extends ChangeNotifier {
     for (final videos in _videosBySource.values) {
       for (final candidate in videos) {
         if (candidate.sourceId != video.sourceId) continue;
-        if (WebDavService.isExtraFile(candidate.title)) continue;
+        // 花絮不过滤：详情页需要它们单独分区展示
         if (parentPathOf(candidate.path) != parent) continue;
         result.add(candidate);
       }
     }
-    result.sort((a, b) => _naturalCompare(a.path, b.path));
+    // 正片排前、花絮排后；同类按自然顺序
+    result.sort((a, b) {
+      final aExtra = WebDavService.isExtraFile(a.title) ? 1 : 0;
+      final bExtra = WebDavService.isExtraFile(b.title) ? 1 : 0;
+      if (aExtra != bExtra) return aExtra - bExtra;
+      return _naturalCompare(a.path, b.path);
+    });
     return result.isEmpty ? [video] : result;
   }
 

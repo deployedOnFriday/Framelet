@@ -570,6 +570,34 @@ class ScraperService {
     }
   }
 
+  /// 拉取某一季的详情：季海报与季简介（多季剧每季海报/简介不同）。
+  static Future<({String? posterUrl, String? overview})?> fetchSeasonDetails({
+    required int tvId,
+    required int seasonNumber,
+  }) async {
+    final key = tmdbApiKey?.trim();
+    if (key == null || key.isEmpty) return null;
+    final pathAndQuery =
+        '/3/tv/$tvId/season/$seasonNumber'
+        '?api_key=$key&language=zh-CN';
+    try {
+      await _throttle();
+      final body = await _tmdbGet(pathAndQuery);
+      if (body == null) return null;
+      final data = jsonDecode(body) as Map<String, Object?>;
+      final posterPath = data['poster_path'] as String?;
+      final overview = (data['overview'] as String?)?.trim();
+      return (
+        posterUrl: posterPath == null
+            ? null
+            : 'https://image.tmdb.org/t/p/w500$posterPath',
+        overview: (overview == null || overview.isEmpty) ? null : overview,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 在 TVmaze 搜索并挑选最匹配的剧集/影片。
   static Future<ScrapeResult?> search(String query, {int? year}) async {
     if (query.trim().isEmpty) return null;

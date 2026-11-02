@@ -240,6 +240,25 @@ void main(List<String> args) async {
       }
     }
 
+    // 季海报与季简介：多季剧每季不同（如综艺第八季 vs 第一季）
+    String? seasonOverview;
+    if ((result.mediaType ?? '') == 'tv') {
+      final seasonDetails = await ScraperService.fetchSeasonDetails(
+        tvId: result.tmdbId!,
+        seasonNumber: seasonNumber,
+      );
+      if (seasonDetails != null) {
+        seasonOverview = seasonDetails.overview;
+        if (seasonDetails.posterUrl != null) {
+          final seasonPoster = await ScraperService.downloadPoster(
+            seasonDetails.posterUrl!,
+            cacheKey: 'cli_season_${result.tmdbId}_s$seasonNumber',
+          );
+          if (seasonPoster != null) posterPath = seasonPoster;
+        }
+      }
+    }
+
     // 写回组内每个文件
     for (final member in group) {
       // 标题可能被 cleanTitle 洗掉集数标记（Whirlwind.Girl.E01 →
@@ -249,7 +268,7 @@ void main(List<String> args) async {
       resultOut[member.path] = {
         'posterPath': posterPath,
         'backdropPath': backdropPath,
-        'summary': (details?.summary ?? result.summary),
+        'summary': (seasonOverview ?? details?.summary ?? result.summary),
         'rating': (details?.rating ?? result.rating),
         'tmdbId': result.tmdbId,
         'tmdbTitle': result.name,
