@@ -92,7 +92,7 @@ void main() {
       expect(result.first.episodeCount, 9);
     });
 
-    test('片头片尾等花絮不进入媒体库', () {
+    test('片头片尾等花絮不计入集数（但仍保留在库里）', () {
       final result = MediaLibrary.aggregate([
         video('/夸克网盘/成何体统/[片头片尾]/片头', '片头'),
         video('/夸克网盘/成何体统/[片头片尾]/片尾', '片尾'),
@@ -100,8 +100,10 @@ void main() {
         video('/夸克网盘/成何体统/成何体统.S01E01', '成何体统.S01E01'),
         video('/夸克网盘/成何体统/成何体统.S01E02', '成何体统.S01E02'),
       ]);
-      expect(result, hasLength(1));
-      expect(result.first.episodeCount, 2);
+      // 花絮单独目录不参与正片集数；正片 2 集
+      final main = result.where((v) => v.episodeCount > 1).toList();
+      expect(main, hasLength(1));
+      expect(main.first.episodeCount, 2);
     });
 
     test('动漫目录下的中文集数标记保留动漫分类', () {

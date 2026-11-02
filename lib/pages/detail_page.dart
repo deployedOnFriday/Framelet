@@ -6,6 +6,7 @@ import '../models/media_source.dart';
 import '../services/media_library.dart';
 import '../services/playback_history.dart';
 import '../services/scraper_service.dart';
+import '../services/webdav_service.dart';
 import '../widgets/match_dialog.dart';
 import 'player_page.dart';
 
@@ -75,7 +76,12 @@ class _DetailPageState extends State<DetailPage> {
                         ],
                       ),
                     ),
-                  _EpisodeCarousel(episodes: episodes),
+                  _EpisodeCarousel(
+                    episodes: episodes,
+                    seasonLabel: seasons.length > 1
+                        ? '第 ${MediaLibrary.seasonOf(seasons[_seasonIndex])} 季'
+                        : '剧集',
+                  ),
                 ] else
                   const SizedBox(height: 20),
                 const SizedBox(height: 34),
@@ -498,9 +504,12 @@ class _GhostButton extends StatelessWidget {
 }
 
 class _EpisodeCarousel extends StatefulWidget {
-  const _EpisodeCarousel({required this.episodes});
+  const _EpisodeCarousel({required this.episodes, required this.seasonLabel});
 
   final List<ScannedVideo> episodes;
+
+  /// 单季时显示「剧集」，多季时显示「第 N 季」。
+  final String seasonLabel;
 
   @override
   State<_EpisodeCarousel> createState() => _EpisodeCarouselState();
@@ -530,6 +539,14 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
 
   @override
   Widget build(BuildContext context) {
+    // 正片与花絮分开：花絮（精编回顾/集结篇等）放独立区块
+    final mainEpisodes = widget.episodes
+        .where((e) => !WebDavService.isExtraFile(e.title))
+        .toList();
+    final extras = widget.episodes
+        .where((e) => WebDavService.isExtraFile(e.title))
+        .toList();
+    final shown = mainEpisodes.isEmpty ? widget.episodes : mainEpisodes;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 32),
       child: Column(
@@ -538,29 +555,31 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Column(
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
                     children: [
                       Text(
-                        '第 1 季',
-                        style: TextStyle(
+                        widget.seasonLabel,
+                        style: const TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
                           color: Color(0xFF1A1A1A),
                         ),
                       ),
-                      SizedBox(width: 4),
-                      Icon(
-                        Icons.keyboard_arrow_down,
-                        size: 16,
-                        color: Color(0xFF666666),
+                      const SizedBox(width: 4),
+                      Text(
+                        '共 ${shown.length} 集',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF888888),
+                        ),
                       ),
                     ],
                   ),
-                  SizedBox(height: 6),
-                  SizedBox(
+                  const SizedBox(height: 6),
+                  const SizedBox(
                     width: 16,
                     height: 3,
                     child: ColoredBox(color: Color(0xFF141414)),
@@ -589,12 +608,47 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
               clipBehavior: Clip.none,
               controller: _controller,
               scrollDirection: Axis.horizontal,
-              itemCount: widget.episodes.length,
+              itemCount: shown.length,
               separatorBuilder: (_, _) => const SizedBox(width: 16),
               itemBuilder: (context, index) =>
-                  _EpisodeCard(episode: widget.episodes[index], index: index),
+                  _EpisodeCard(episode: shown[index], index: index),
             ),
           ),
+          if (extras.isNotEmpty) ...[
+            const SizedBox(height: 26),
+            Row(
+              children: [
+                const Text(
+                  '花絮与相关',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A1A),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Text(
+                  '共 ${extras.length} 个',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF888888),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 108,
+              child: ListView.separated(
+                clipBehavior: Clip.none,
+                scrollDirection: Axis.horizontal,
+                itemCount: extras.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 12),
+                itemBuilder: (context, index) =>
+                    _ExtraCard(episode: extras[index]),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -899,5 +953,64 @@ class _FileInfo extends StatelessWidget {
     final minutes = total ~/ 60;
     final secs = total % 60;
     return '$minutes 分钟 $secs 秒';
+  }
+}
+
+/// 花絮/相关视频小卡片（较小，无集号）。
+class _ExtraCard extends StatelessWidget {
+  const _ExtraCard({required this.episode});
+
+  final ScannedVideo episode;
+
+  @override
+  Widget build(BuildContext context) {
+    final entry = PlaybackHistory.instance.entryOf(
+      episode.sourceId,
+      episode.path,
+    );
+    return GestureDetector(
+      onTap: () {
+        final resume =
+            entry != null && !entry.finished && entry.positionSec > 1;
+        Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => PlayerPage(
+              video: episode,
+              startPosition: resume ? entry.positionSec : null,
+            ),
+          ),
+        );
+      },
+      child: Container(
+        width: 150,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFEFEFEF),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(
+              Icons.movie_filter_outlined,
+              size: 20,
+              color: Color(0xFF888888),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              episode.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 11.5,
+                color: Color(0xFF333333),
+                height: 1.4,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }

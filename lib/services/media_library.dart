@@ -874,8 +874,7 @@ class MediaLibrary extends ChangeNotifier {
   static List<ScannedVideo> aggregate(List<ScannedVideo> videos) {
     final byFolder = <String, List<ScannedVideo>>{};
     for (final video in videos) {
-      // 片头片尾、预告花絮等不是正片，直接不进入媒体库
-      if (WebDavService.isExtraFile(video.title)) continue;
+      // 花絮不再丢弃：保留在同一部剧的组里，详情页单独分区展示
       byFolder.putIfAbsent(parentPathOf(video.path), () => []).add(video);
     }
 
@@ -911,6 +910,10 @@ class MediaLibrary extends ChangeNotifier {
 
       // 剧集模式：同目录多文件带集数标记
       if (_isSeriesGroup(group)) {
+        // 集数只统计正片，花絮单列
+        final mainCount = group
+            .where((video) => !WebDavService.isExtraFile(video.title))
+            .length;
         var kind = group.first.kind == MediaKind.movie
             ? MediaKind.series
             : group.first.kind;
@@ -932,7 +935,7 @@ class MediaLibrary extends ChangeNotifier {
                 ? tmdbTitle
                 : folderTitle,
             kind: kind,
-            episodeCount: group.length,
+            episodeCount: mainCount > 0 ? mainCount : group.length,
             posterPath: posterSource.posterPath,
             summary: posterSource.summary,
             rating: posterSource.rating,
