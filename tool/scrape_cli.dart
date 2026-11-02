@@ -153,19 +153,7 @@ void main(List<String> args) async {
     print('[$done/${jobs.length}] $title（${group.length} 集）');
     final preferTv = group.length > 1 || kind != 'movie';
     final parsed = ScraperService.parseTitle(title);
-    // 目录名与 TMDB 命名差异的别名表
-    const aliases = <String, String>{
-      '魔幻手机1': '魔幻手机',
-      '唐朝诡事录1': '唐朝诡事录',
-      '令人心动的 offer8': '令人心动的 offer',
-      '令人心动的offer8': '令人心动的offer',
-    };
-    final queries = <String>[
-      if (aliases[title] != null) aliases[title]!,
-      ...parsed.queries,
-      if (aliases[parsed.queries.firstOrNull ?? ''] != null)
-        aliases[parsed.queries.firstOrNull ?? '']!,
-    ];
+    final queries = parsed.queries;
     ScrapeResult? result;
     // 路径自带 {tmdbid-NNN} 时免搜索直取详情（最精确）
     int? pathTmdbId;

@@ -270,6 +270,8 @@ class ScraperService {
     name = name.replaceAll(RegExp(r'\s+'), ' ');
     // 去掉残留的中文集数后缀，如 "三体 01"
     name = name.replaceAll(RegExp(r'\s+\d{1,2}$'), '').trim();
+    // 剥离分类前缀（「动漫 启示录酒店…」→「启示录酒店…」）
+    name = name.replaceAll(RegExp(r'^(动漫|动画|综艺|电影|电视剧|剧集)[\s：:－-]*'), '');
     // 剥离末尾的季/年份标记：幸福伽菜子的快乐杀手生活S1（2025）→ 幸福伽菜子的快乐杀手生活
     name = name
         .replaceAll(RegExp(r'[（(]\s*(19|20)\d{2}\s*[)）]\s*$'), '')
@@ -278,6 +280,15 @@ class ScraperService {
         .trim();
 
     final queries = <String>[if (name.isNotEmpty) name, ...bracketNames];
+    // 通用规则：标题尾部的 1~2 位纯数字多为季号（唐朝诡事录1/魔幻手机2），
+    // 生成一个剥掉后的变体用于搜索——命中率高且无需逐部写别名
+    final tail = RegExp(r'^(.*[^0-9])(\d{1,2})$').firstMatch(name);
+    if (tail != null) {
+      final stripped = tail.group(1)!.trim();
+      if (stripped.length >= 2 && !queries.contains(stripped)) {
+        queries.add(stripped);
+      }
+    }
     return (queries: queries, year: year);
   }
 

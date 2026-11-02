@@ -89,9 +89,10 @@ class MediaLibrary extends ChangeNotifier {
         if (existing == null) {
           merged[key] = video;
         } else if (video.episodeCount > existing.episodeCount) {
-          // 同一部剧的多季：集数相加展示
+          // 同一部剧的多季：集数相加展示，剧名统一用 TMDB 官方名
           merged[key] = video.copyWith(
             episodeCount: existing.episodeCount + video.episodeCount,
+            title: (video.tmdbTitle ?? video.title),
           );
         }
       }
@@ -363,6 +364,31 @@ class MediaLibrary extends ChangeNotifier {
           notifyListeners();
         },
       );
+      // 重新扫描只更新文件结构：按 path 把之前刮到的数据（海报/剧照/匹配）
+      // 合并回新条目，避免一次重扫把整个媒体库的元数据抹掉。
+      final previous = _videosBySource[sourceId];
+      if (previous != null && previous.isNotEmpty) {
+        final byPath = {for (final video in previous) video.path: video};
+        for (var i = 0; i < videos.length; i++) {
+          final old = byPath[videos[i].path];
+          if (old == null) continue;
+          if (old.tmdbId == null && old.posterPath == null) continue;
+          videos[i] = videos[i].copyWith(
+            posterPath: old.posterPath,
+            backdropPath: old.backdropPath,
+            summary: old.summary,
+            rating: old.rating,
+            tmdbId: old.tmdbId,
+            tmdbTitle: old.tmdbTitle,
+            genres: old.genres,
+            cast: old.cast,
+            releaseDate: old.releaseDate,
+            runtimeSec: old.runtimeSec,
+            stillPath: old.stillPath,
+            episodeTitle: old.episodeTitle,
+          );
+        }
+      }
       _videosBySource[sourceId] = videos;
       final now = DateTime.now();
       final index = _sources.indexWhere((item) => item.id == sourceId);
