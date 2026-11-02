@@ -139,7 +139,11 @@ void main(List<String> args) async {
   for (final entry in grouped.entries) {
     final group = entry.value;
     final agg = aggregatedByPath[group.first.path];
-    final title = agg != null ? agg['title'] as String : group.first.title;
+    // 没有聚合记录（多季合并后非主季的文件）时，用文件夹名兜底，
+    // 否则会拿原始文件名（01）去搜索，必然失败
+    final title = agg != null
+        ? agg['title'] as String
+        : _folderTitle(group.first.parent);
     final kind = agg != null ? agg['kind'] as String : 'movie';
     jobs.add((title, kind, group));
   }
@@ -241,8 +245,7 @@ void main(List<String> args) async {
       // 标题可能被 cleanTitle 洗掉集数标记（Whirlwind.Girl.E01 →
       // Whirlwind.Girl），回退用原始文件名解析集号
       final rawName = member.path.split('/').last;
-      final epNumber =
-          _episodeNumber(member.title) ?? _episodeNumber(rawName);
+      final epNumber = _episodeNumber(member.title) ?? _episodeNumber(rawName);
       resultOut[member.path] = {
         'posterPath': posterPath,
         'backdropPath': backdropPath,
@@ -292,4 +295,24 @@ int? _episodeNumber(String title) {
     caseSensitive: false,
   ).firstMatch(title);
   return int.tryParse(plain?.group(1) ?? '');
+}
+
+/// 从父目录路径取文件夹名并做最小清洗（剥季号/年份/画质尾巴）。
+String _folderTitle(String parent) {
+  var name = parent.split('/').lastWhere((s) => s.isNotEmpty, orElse: () => '');
+  try {
+    name = Uri.decodeComponent(name);
+  } catch (_) {}
+  name = name
+      .replaceAll(RegExp(r'[（(]\s*(19|20)\d{2}\s*[）)]'), '')
+      .replaceAll(RegExp(r'[（(][^）)]*[）)]'), '')
+      .replaceAll(
+        RegExp(
+          r'\s*(60fps|120fps|60帧|120帧|高码|4k|8k|1080p|2160p)\s*',
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .trim();
+  return name;
 }

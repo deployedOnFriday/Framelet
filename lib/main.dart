@@ -87,18 +87,23 @@ void _dumpLibrary() {
           'tmdbId': item.tmdbId,
           'season': MediaLibrary.seasonOf(item),
         });
-        // 每集的原始文件：核对剧照与单集名是否写入
+        // 每集的原始文件：展开该剧所有季（合并条目的 path 只代表其中一季）
         if (item.episodeCount > 1) {
-          for (final episode in library.episodesOf(item)) {
-            rows.add({
-              'type': 'episode',
-              'of': item.title,
-              'title': episode.title,
-              'path': episode.path,
-              'stillPath': episode.stillPath,
-              'episodeTitle': episode.episodeTitle,
-              'episodeNumber': MediaLibrary.episodeNumberOf(episode.title),
-            });
+          final seenPaths = <String>{};
+          for (final season in library.seasonsOf(item)) {
+            for (final episode in library.episodesOf(season)) {
+              if (!seenPaths.add(episode.path)) continue;
+              rows.add({
+                'type': 'episode',
+                'of': item.title,
+                'title': episode.title,
+                'path': episode.path,
+                'stillPath': episode.stillPath,
+                'episodeTitle': episode.episodeTitle,
+                'episodeNumber': MediaLibrary.episodeNumberOf(episode.title),
+                'season': MediaLibrary.seasonOf(season),
+              });
+            }
           }
         }
       }
