@@ -523,179 +523,139 @@ class _PlayerPageState extends State<PlayerPage> {
       .where((t) => t.id != 'auto' && t.id != 'no')
       .toList();
 
-  Future<void> _showSpeedSheet() async {
-    final picked = await showModalBottomSheet<double>(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 18, 20, 10),
-              child: Text(
-                '倍速播放',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            for (final rate in _speedOptions)
-              ListTile(
-                dense: true,
-                title: Text(
-                  rate == 1.0 ? '正常' : '${rate}x',
-                  style: const TextStyle(color: Colors.white70, fontSize: 13),
-                ),
-                trailing: rate == _speed
-                    ? const Icon(Icons.check_rounded,
-                        size: 18, color: Color(0xFF2B65FF))
-                    : null,
-                onTap: () => Navigator.of(context).pop(rate),
-              ),
-            const SizedBox(height: 8),
-          ],
+  // ---------------------------------------------------------------------------
+  // 底部控制条：倍速 / 音轨 / 字幕 / 上一集 / 下一集
+  // ---------------------------------------------------------------------------
+
+  /// 弹出菜单的统一深色背景。
+  static const _menuColor = Color(0xF21A1A1A);
+
+  /// 菜单项统一外观：选中项左侧打勾并高亮。
+  Widget _menuRow(String label, bool selected) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 22,
+          child: selected
+              ? const Icon(
+                  Icons.check_rounded,
+                  size: 16,
+                  color: Color(0xFF5B8CFF),
+                )
+              : null,
         ),
-      ),
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.white : Colors.white70,
+              fontSize: 13,
+            ),
+          ),
+        ),
+      ],
     );
-    _refocus();
-    if (picked != null && picked != _speed) await _setSpeed(picked);
   }
 
-  Future<void> _showAudioSheet() async {
-    final tracks = _realAudioTracks;
-    if (tracks.isEmpty) {
-      _showOsd('没有可选音轨');
-      return;
-    }
+  /// 统一样式的菜单项（当前选中项打勾）。
+  PopupMenuItem<String> _menuItem(
+    String value,
+    String label,
+    String currentId,
+  ) => PopupMenuItem(
+    value: value,
+    height: 40,
+    child: _menuRow(label, value == currentId),
+  );
+
+  /// 倍速按钮：显示当前倍速，点击向上弹菜单。
+  Widget _buildSpeedButton() {
+    return PopupMenuButton<double>(
+      tooltip: '倍速',
+      color: _menuColor,
+      position: PopupMenuPosition.over,
+      initialValue: _speed,
+      padding: EdgeInsets.zero,
+      onSelected: (rate) {
+        _refocus();
+        _setSpeed(rate);
+      },
+      itemBuilder: (_) => [
+        for (final rate in _speedOptions)
+          PopupMenuItem(
+            value: rate,
+            height: 40,
+            child: _menuRow(
+              rate == 1.0 ? '正常' : '${rate}x',
+              rate == _speed,
+            ),
+          ),
+      ],
+      child: _ControlButtonLabel(
+        label:
+            '${_speed == _speed.truncateToDouble() ? _speed.toInt() : _speed}x',
+      ),
+    );
+  }
+
+  /// 音轨按钮：多音轨时出现在底部控制条，点击向上弹菜单。
+  Widget _buildAudioButton(List<AudioTrack> tracks) {
     final currentId = _player.state.track.audio.id;
-    final picked = await showModalBottomSheet<AudioTrack>(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 18, 20, 10),
-              child: Text(
-                '选择音轨',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            for (var i = 0; i < tracks.length; i++)
-              ListTile(
-                dense: true,
-                title: Text(
-                  _audioLabel(tracks[i], i + 1),
-                  style: const TextStyle(color: Colors.white70, fontSize: 13),
-                ),
-                trailing: tracks[i].id == currentId
-                    ? const Icon(Icons.check_rounded,
-                        size: 18, color: Color(0xFF2B65FF))
-                    : null,
-                onTap: () => Navigator.of(context).pop(tracks[i]),
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
+    return PopupMenuButton<String>(
+      tooltip: '音轨',
+      color: _menuColor,
+      position: PopupMenuPosition.over,
+      padding: EdgeInsets.zero,
+      onSelected: (id) async {
+        _refocus();
+        if (id == 'auto') {
+          await _player.setAudioTrack(AudioTrack.auto());
+          _showOsd('音轨：自动');
+        } else {
+          final track = tracks.firstWhere((t) => t.id == id);
+          await _player.setAudioTrack(track);
+          _showOsd('音轨：${_audioLabel(track, tracks.indexOf(track) + 1)}');
+        }
+      },
+      itemBuilder: (_) => [
+        _menuItem('auto', '自动', currentId),
+        for (var i = 0; i < tracks.length; i++)
+          _menuItem(tracks[i].id, _audioLabel(tracks[i], i + 1), currentId),
+      ],
+      child: const _ControlButtonLabel(icon: Icons.audiotrack_rounded),
     );
-    _refocus();
-    if (picked != null && picked.id != currentId) {
-      await _player.setAudioTrack(picked);
-      _showOsd('音轨：${_audioLabel(picked, tracks.indexOf(picked) + 1)}');
-    }
   }
 
-  Future<void> _showSubtitleSheet() async {
+  /// 字幕按钮：有内嵌字幕轨时出现在底部控制条，支持关闭/自动/指定轨。
+  Widget _buildSubtitleButton(List<SubtitleTrack> tracks) {
     final currentId = _player.state.track.subtitle.id;
-    final tracks = _realSubtitleTracks;
-    final picked = await showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A1A),
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 18, 20, 10),
-              child: Text(
-                '选择字幕',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-            ListTile(
-              dense: true,
-              title: const Text(
-                '关闭字幕',
-                style: TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-              trailing: currentId == 'no'
-                  ? const Icon(Icons.check_rounded,
-                      size: 18, color: Color(0xFF2B65FF))
-                  : null,
-              onTap: () => Navigator.of(context).pop('no'),
-            ),
-            ListTile(
-              dense: true,
-              title: const Text(
-                '自动',
-                style: TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-              trailing: currentId == 'auto'
-                  ? const Icon(Icons.check_rounded,
-                      size: 18, color: Color(0xFF2B65FF))
-                  : null,
-              onTap: () => Navigator.of(context).pop('auto'),
-            ),
-            for (var i = 0; i < tracks.length; i++)
-              ListTile(
-                dense: true,
-                title: Text(
-                  _subtitleLabel(tracks[i], i + 1),
-                  style: const TextStyle(color: Colors.white70, fontSize: 13),
-                ),
-                trailing: tracks[i].id == currentId
-                    ? const Icon(Icons.check_rounded,
-                        size: 18, color: Color(0xFF2B65FF))
-                    : null,
-                onTap: () => Navigator.of(context).pop(tracks[i].id),
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
+    return PopupMenuButton<String>(
+      tooltip: '字幕',
+      color: _menuColor,
+      position: PopupMenuPosition.over,
+      padding: EdgeInsets.zero,
+      onSelected: (id) async {
+        _refocus();
+        if (id == 'no') {
+          await _player.setSubtitleTrack(SubtitleTrack.no());
+          _showOsd('字幕已关闭');
+        } else if (id == 'auto') {
+          await _player.setSubtitleTrack(SubtitleTrack.auto());
+          _showOsd('字幕：自动');
+        } else {
+          final track = tracks.firstWhere((t) => t.id == id);
+          await _player.setSubtitleTrack(track);
+          _showOsd('字幕：${_subtitleLabel(track, tracks.indexOf(track) + 1)}');
+        }
+      },
+      itemBuilder: (_) => [
+        _menuItem('no', '关闭字幕', currentId),
+        _menuItem('auto', '自动', currentId),
+        for (var i = 0; i < tracks.length; i++)
+          _menuItem(tracks[i].id, _subtitleLabel(tracks[i], i + 1), currentId),
+      ],
+      child: const _ControlButtonLabel(icon: Icons.subtitles_rounded),
     );
-    _refocus();
-    if (picked == null) return;
-    if (picked == currentId) return;
-    if (picked == 'no') {
-      await _player.setSubtitleTrack(SubtitleTrack.no());
-      _showOsd('字幕已关闭');
-    } else if (picked == 'auto') {
-      await _player.setSubtitleTrack(SubtitleTrack.auto());
-      _showOsd('字幕：自动');
-    } else {
-      final track = tracks.firstWhere((t) => t.id == picked);
-      await _player.setSubtitleTrack(track);
-      _showOsd(
-        '字幕：${_subtitleLabel(track, tracks.indexOf(track) + 1)}',
-      );
-    }
   }
 
   /// 右键弹出影片技术信息（分辨率/码率/编码/帧率等）。
@@ -797,13 +757,13 @@ class _PlayerPageState extends State<PlayerPage> {
       }
     }
 
+    // mpv 的 video-bitrate/audio-bitrate 是即时码率，返回形如
+    // "2498312.000000" 的浮点字符串——必须用 double 解析，
+    // 旧版 int.tryParse 解析失败导致码率整行不显示。
     String? formatBitrate(String? value) {
-      final bps = int.tryParse(value ?? '');
+      final bps = double.tryParse((value ?? '').trim());
       if (bps == null || bps <= 0) return null;
-      final mbps = bps / 1000000;
-      return mbps >= 1
-          ? '${mbps.toStringAsFixed(1)} Mbps'
-          : '${(bps / 1000).toStringAsFixed(0)} Kbps';
+      return _prettyBitrate(bps);
     }
 
     final width = await read('video-params/w');
@@ -843,7 +803,19 @@ class _PlayerPageState extends State<PlayerPage> {
       final seconds = (_durationSec % 60).toInt();
       result['时长'] = '$minutes 分 ${seconds.toString().padLeft(2, '0')} 秒';
     }
+    // 文件平均码率（总码率，含音视频），mpv 即时码率取不到时的可靠兜底
+    if (size != null && size > 0 && _durationSec > 0) {
+      result['平均码率'] = _prettyBitrate(size / _durationSec);
+    }
     return result;
+  }
+
+  /// 码率格式化：>=1Mbps 用 Mbps，否则 Kbps。
+  static String _prettyBitrate(double bps) {
+    final mbps = bps / 1000000;
+    return mbps >= 1
+        ? '${mbps.toStringAsFixed(1)} Mbps'
+        : '${(bps / 1000).toStringAsFixed(0)} Kbps';
   }
 
   /// 选集面板：列出本剧所有集（含进度），点击切换。
@@ -969,8 +941,6 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Widget _buildScreen(BuildContext context) {
-    final audioTracks = _realAudioTracks;
-    final subtitleTracks = _realSubtitleTracks;
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -978,10 +948,8 @@ class _PlayerPageState extends State<PlayerPage> {
         children: [
           Positioned.fill(
             child: MaterialDesktopVideoControlsTheme(
-              // 内建快捷键全部置空：由页面层 CallbackShortcuts 统一接管，
-              // 避免空格/方向键被两套处理器双重触发。
-              normal: _controlsTheme,
-              fullscreen: _controlsTheme,
+              normal: _desktopControlsTheme(),
+              fullscreen: _desktopControlsTheme(),
               child: Video(
                 key: _videoKey,
                 controller: _controller,
@@ -1151,19 +1119,6 @@ class _PlayerPageState extends State<PlayerPage> {
                         ),
                       ),
                     ),
-                    if (audioTracks.length > 1) ...[
-                      _TopChip(label: '音轨', onTap: _showAudioSheet),
-                      const SizedBox(width: 8),
-                    ],
-                    if (subtitleTracks.isNotEmpty) ...[
-                      _TopChip(label: '字幕', onTap: _showSubtitleSheet),
-                      const SizedBox(width: 8),
-                    ],
-                    _TopChip(
-                      label:
-                          '${_speed == _speed.truncateToDouble() ? _speed.toInt() : _speed}x',
-                      onTap: _showSpeedSheet,
-                    ),
                     if (_playlist.length > 1) ...[
                       const SizedBox(width: 8),
                       _TopChip(
@@ -1181,10 +1136,39 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  /// 控制条主题：仅禁用内建键盘快捷键，其余保持默认。
-  static const _controlsTheme = MaterialDesktopVideoControlsThemeData(
-    keyboardShortcuts: {},
-  );
+  /// 控制条主题：禁用内建键盘快捷键（由页面层统一接管）；
+  /// 底部控制条挂上 上一集/下一集/音轨/字幕/倍速，内建的
+  /// SkipPrevious/SkipNext 只会切 Player 内部播放列表（我们不用），换成自己的切集。
+  MaterialDesktopVideoControlsThemeData _desktopControlsTheme() {
+    final audioTracks = _realAudioTracks;
+    final subtitleTracks = _realSubtitleTracks;
+    final multi = _playlist.length > 1;
+    return MaterialDesktopVideoControlsThemeData(
+      keyboardShortcuts: const {},
+      bottomButtonBar: [
+        if (multi)
+          _ControlIconButton(
+            icon: Icons.skip_previous_rounded,
+            tooltip: '上一集（P）',
+            onTap: _prevEpisode,
+          ),
+        const MaterialDesktopPlayOrPauseButton(),
+        if (multi)
+          _ControlIconButton(
+            icon: Icons.skip_next_rounded,
+            tooltip: '下一集（N）',
+            onTap: _nextEpisode,
+          ),
+        const MaterialDesktopVolumeButton(),
+        const MaterialDesktopPositionIndicator(),
+        const Spacer(),
+        if (audioTracks.length > 1) _buildAudioButton(audioTracks),
+        if (subtitleTracks.isNotEmpty) _buildSubtitleButton(subtitleTracks),
+        _buildSpeedButton(),
+        const MaterialDesktopFullscreenButton(),
+      ],
+    );
+  }
 }
 
 class _BackButton extends StatelessWidget {
@@ -1224,7 +1208,7 @@ void _debugLog(String message) {
   }
 }
 
-/// 播放器顶部小胶囊按钮（倍速/音轨/字幕/选集）。
+/// 播放器顶部小胶囊按钮（选集）。
 class _TopChip extends StatelessWidget {
   const _TopChip({required this.label, required this.onTap});
 
@@ -1250,6 +1234,61 @@ class _TopChip extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 底部控制条的图标按钮（上一集/下一集）——内建 Skip 按钮走 Player 内部
+/// 播放列表（我们不用），所以自己接切集逻辑。
+class _ControlIconButton extends StatelessWidget {
+  const _ControlIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: IconButton(
+        onPressed: onTap,
+        iconSize: 24,
+        color: Colors.white,
+        padding: const EdgeInsets.all(8),
+        constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+        splashRadius: 20,
+        icon: Icon(icon),
+      ),
+    );
+  }
+}
+
+/// 底部控制条的胶囊按钮外观：倍速显示当前值，音轨/字幕显示图标。
+class _ControlButtonLabel extends StatelessWidget {
+  const _ControlButtonLabel({this.label, this.icon});
+
+  final String? label;
+  final IconData? icon;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
+      child: label != null
+          ? Text(
+              label!,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+              ),
+            )
+          : Icon(icon, color: Colors.white, size: 22),
     );
   }
 }
