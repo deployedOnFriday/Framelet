@@ -598,7 +598,8 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  /// 音轨按钮：多音轨时出现在底部控制条，点击向上弹菜单。
+  /// 音轨按钮：常驻底部控制条（单音轨也保留入口，菜单里给提示），
+  /// 点击向上弹菜单。
   Widget _buildAudioButton(List<AudioTrack> tracks) {
     final currentId = _player.state.track.audio.id;
     return PopupMenuButton<String>(
@@ -621,10 +622,39 @@ class _PlayerPageState extends State<PlayerPage> {
         _menuItem('auto', '自动', currentId),
         for (var i = 0; i < tracks.length; i++)
           _menuItem(tracks[i].id, _audioLabel(tracks[i], i + 1), currentId),
+        if (tracks.length <= 1)
+          const PopupMenuItem<String>(
+            enabled: false,
+            height: 34,
+            child: Text(
+              '该视频只有一条音轨',
+              style: TextStyle(color: Colors.white30, fontSize: 12),
+            ),
+          ),
       ],
       child: const _ControlButtonLabel(
         icon: Icons.audiotrack_rounded,
         label: '音轨',
+      ),
+    );
+  }
+
+  /// 选集按钮：显示当前集数，点击弹出底部选集面板。
+  Widget _buildEpisodeButton() {
+    return Tooltip(
+      message: '选集',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {
+            _refocus();
+            _showEpisodePicker();
+          },
+          child: _ControlButtonLabel(
+            icon: Icons.video_library_rounded,
+            label: '选集 ${_currentIndex + 1}/${_playlist.length}',
+          ),
+        ),
       ),
     );
   }
@@ -990,13 +1020,6 @@ class _PlayerPageState extends State<PlayerPage> {
                         ),
                       ),
                     ),
-                    if (_playlist.length > 1) ...[
-                      const SizedBox(width: 8),
-                      _TopChip(
-                        label: '选集 ${_currentIndex + 1}/${_playlist.length}',
-                        onTap: _showEpisodePicker,
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -1008,8 +1031,12 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   /// 控制条主题：禁用内建键盘快捷键（由页面层统一接管）；
-  /// 底部控制条挂上 上一集/下一集/音轨/字幕/倍速，内建的
+  /// 底部控制条挂上 上一集/下一集/选集/音轨/字幕/倍速，内建的
   /// SkipPrevious/SkipNext 只会切 Player 内部播放列表（我们不用），换成自己的切集。
+  ///
+  /// 注意：media_kit 的底栏是一个不换行的 Row，电视剧多出「上一集/下一集」后
+  /// 右侧按钮会被挤出可视区域（看起来像音轨/字幕按钮消失）。这里把右半部分
+  /// 包进 Expanded + 横向滚动，窄窗口下也不会被裁掉。
   MaterialDesktopVideoControlsThemeData _desktopControlsTheme() {
     final audioTracks = _realAudioTracks;
     final subtitleTracks = _realSubtitleTracks;
@@ -1032,12 +1059,26 @@ class _PlayerPageState extends State<PlayerPage> {
           ),
         const MaterialDesktopVolumeButton(),
         const MaterialDesktopPositionIndicator(),
-        const Spacer(),
-        if (audioTracks.length > 1) _buildAudioButton(audioTracks),
-        // 字幕入口常显：没内嵌轨也要能打开菜单确认/关闭
-        _buildSubtitleButton(subtitleTracks),
-        _buildSpeedButton(),
-        const MaterialDesktopFullscreenButton(),
+        Expanded(
+          child: Align(
+            alignment: Alignment.centerRight,
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              reverse: true,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (multi) _buildEpisodeButton(),
+                  // 音轨/字幕入口常显：电视剧单音轨、无内嵌字幕轨也要能点开确认
+                  _buildAudioButton(audioTracks),
+                  _buildSubtitleButton(subtitleTracks),
+                  _buildSpeedButton(),
+                  const MaterialDesktopFullscreenButton(),
+                ],
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -1077,36 +1118,6 @@ void _debugLog(String message) {
     );
   } catch (_) {
     // 日志失败不影响播放
-  }
-}
-
-/// 播放器顶部小胶囊按钮（选集）。
-class _TopChip extends StatelessWidget {
-  const _TopChip({required this.label, required this.onTap});
-
-  final String label;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ),
-    );
   }
 }
 
