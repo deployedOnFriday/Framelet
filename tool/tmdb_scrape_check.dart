@@ -38,7 +38,9 @@ Future<void> main() async {
     print(
       '  ✓ 命中: ${hit.name} (${hit.year}) 评分 ${hit.rating} (${stopwatch.elapsedMilliseconds}ms)',
     );
-    print('    简介: ${(hit.summary ?? '').substring(0, (hit.summary?.length ?? 0).clamp(0, 50))}…');
+    print(
+      '    简介: ${(hit.summary ?? '').substring(0, (hit.summary?.length ?? 0).clamp(0, 50))}…',
+    );
     if (hit.posterUrl != null) {
       final path = await ScraperService.downloadPoster(
         hit.posterUrl!,

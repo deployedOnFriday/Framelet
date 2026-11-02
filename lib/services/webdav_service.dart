@@ -275,6 +275,10 @@ class WebDavService {
 
   /// 文件名 -> 展示标题：去扩展名、去常见压制标签。
   static String cleanTitle(String fileName) {
+    fileName = fileName.replaceAll(
+      RegExp(r'\s*\{tmdbid-\d+\}\s*', caseSensitive: false),
+      ' ',
+    );
     final dot = fileName.lastIndexOf('.');
     var title = dot > 0 ? fileName.substring(0, dot) : fileName;
     title = title.replaceAll(RegExp(r'\.[0-9A-Za-z]{2,4}$'), '');

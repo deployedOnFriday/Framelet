@@ -23,7 +23,9 @@ Future<void> main() async {
       if (hit != null) {
         print('  命中: ${hit.name} (${hit.year}) 评分 ${hit.rating}');
         print('  海报: ${hit.posterUrl}');
-        print('  简介: ${(hit.summary ?? '').substring(0, (hit.summary?.length ?? 0).clamp(0, 60))}…');
+        print(
+          '  简介: ${(hit.summary ?? '').substring(0, (hit.summary?.length ?? 0).clamp(0, 60))}…',
+        );
         break;
       }
     }

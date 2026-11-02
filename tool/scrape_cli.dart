@@ -143,14 +143,46 @@ void main(List<String> args) async {
     print('[$done/${jobs.length}] $title（${group.length} 集）');
     final preferTv = group.length > 1 || kind != 'movie';
     final parsed = ScraperService.parseTitle(title);
+    // 目录名与 TMDB 命名差异的别名表
+    const aliases = <String, String>{
+      '魔幻手机1': '魔幻手机',
+      '唐朝诡事录1': '唐朝诡事录',
+      '令人心动的 offer8': '令人心动的 offer',
+      '令人心动的offer8': '令人心动的offer',
+    };
+    final queries = <String>[
+      if (aliases[title] != null) aliases[title]!,
+      ...parsed.queries,
+      if (aliases[parsed.queries.firstOrNull ?? ''] != null)
+        aliases[parsed.queries.firstOrNull ?? '']!,
+    ];
     ScrapeResult? result;
-    for (final query in parsed.queries) {
-      result = await ScraperService.searchTmdb(
-        query,
-        year: parsed.year,
-        preferTv: preferTv,
+    // 路径自带 {tmdbid-NNN} 时免搜索直取详情（最精确）
+    int? pathTmdbId;
+    final tmdbPattern = RegExp(r'\{tmdbid-(\d+)\}', caseSensitive: false);
+    for (final member in group) {
+      final m = tmdbPattern.firstMatch(member.path);
+      if (m != null) {
+        pathTmdbId = int.tryParse(m.group(1)!);
+        break;
+      }
+    }
+    if (pathTmdbId != null) {
+      print('  路径自带 tmdbid=$pathTmdbId，免搜索');
+      result = await ScraperService.fetchTmdbDetails(
+        mediaType: preferTv ? 'tv' : 'movie',
+        id: pathTmdbId,
       );
-      if (result != null) break;
+    }
+    if (result == null) {
+      for (final query in queries) {
+        result = await ScraperService.searchTmdb(
+          query,
+          year: parsed.year,
+          preferTv: preferTv,
+        );
+        if (result != null) break;
+      }
     }
 
     if (result == null || result.tmdbId == null) {
@@ -215,6 +247,7 @@ void main(List<String> args) async {
         'summary': (details?.summary ?? result.summary),
         'rating': (details?.rating ?? result.rating),
         'tmdbId': result.tmdbId,
+        'tmdbTitle': result.name,
         'stillPath': episodeStillPaths[epNumber],
         'episodeTitle': episodeTitles[epNumber],
       };
@@ -245,7 +278,7 @@ String _defaultResultPath() {
 int? _episodeNumber(String title) {
   final patterns = [
     RegExp(r'[sS]\d{1,2}[eE](\d{1,3})'),
-    RegExp(r'(?:^|[.\s_-])e(?:p)?(\d{1,3})(?:$|[.\s_-])'),
+    RegExp(r'(?:^|[.\s_-])e(?:p)?(\d{1,3})(?:$|[.\s_-])', caseSensitive: false),
     RegExp(r'第\s*(\d{1,4})\s*[集话期]'),
   ];
   for (final pattern in patterns) {
@@ -253,7 +286,7 @@ int? _episodeNumber(String title) {
     if (match?.group(1) case final number?) return int.tryParse(number);
   }
   final plain = RegExp(
-    r'(\d{1,4})\s*[~\-_.]?\s*(4k|8k|1080p|720p|2160p|hdr10?)?\s*$',
+    r'(?:^|[.\s_~-])(\d{1,4})\s*[~\-_.]?\s*(4k|8k|1080p|720p|2160p|hdr10?)?\s*$',
     caseSensitive: false,
   ).firstMatch(title);
   return int.tryParse(plain?.group(1) ?? '');

@@ -167,16 +167,20 @@ class MediaLibrary extends ChangeNotifier {
   static int? episodeNumberOf(String title) {
     final patterns = [
       RegExp(r'[sS]\d{1,2}[eE](\d{1,3})'),
-      RegExp(r'(?:^|[.\s_-])e(?:p)?(\d{1,3})(?:$|[.\s_-])'),
+      RegExp(
+        r'(?:^|[.\s_-])e(?:p)?(\d{1,3})(?:$|[.\s_-])',
+        caseSensitive: false,
+      ),
       RegExp(r'第\s*(\d{1,4})\s*[集话期]'),
     ];
     for (final pattern in patterns) {
       final match = pattern.firstMatch(title);
       if (match?.group(1) case final number?) return int.tryParse(number);
     }
-    // 结尾数字后允许带画质标记：01~4K、14_1080p
+    // 结尾数字后允许带画质标记：01~4K、14_1080p。
+    // 数字前必须紧跟分隔符或行首，避免把 H265 的 265 当集数。
     final plain = RegExp(
-      r'(\d{1,4})\s*[~\-_.]?\s*(4k|8k|1080p|720p|2160p|hdr10?)?\s*$',
+      r'(?:^|[.\s_~-])(\d{1,4})\s*[~\-_.]?\s*(4k|8k|1080p|720p|2160p|hdr10?)?\s*$',
       caseSensitive: false,
     ).firstMatch(title);
     return int.tryParse(plain?.group(1) ?? '');
@@ -467,7 +471,16 @@ class MediaLibrary extends ChangeNotifier {
         }
 
         final matchedResult = result;
-        final matchedId = matchedResult?.tmdbId;
+        final matchedId = job.representative.tmdbId ?? matchedResult?.tmdbId;
+        if (matchedId != null && matchedResult == null) {
+          // 路径自带 {tmdbid-NNN}：免搜索直取详情
+          _scrapeLog('  路径自带 tmdbid=$matchedId，免搜索直取详情');
+          final details = await ScraperService.fetchTmdbDetails(
+            mediaType: isSeriesJob ? 'tv' : 'movie',
+            id: matchedId,
+          );
+          result = details;
+        }
         if (matchedResult != null && matchedId != null) {
           _scrapeLog('  拉取详情 tmdbId=$matchedId');
           final details = await ScraperService.fetchTmdbDetails(
@@ -609,6 +622,7 @@ class MediaLibrary extends ChangeNotifier {
           tmdbId: (data['tmdbId'] as num?)?.toInt(),
           stillPath: data['stillPath'] as String?,
           episodeTitle: data['episodeTitle'] as String?,
+          tmdbTitle: data['tmdbTitle'] as String?,
         );
         changed = true;
         updated++;
@@ -766,7 +780,16 @@ class MediaLibrary extends ChangeNotifier {
         result.addAll(group);
         continue;
       }
-      final title = _seriesTitle(entry.key, group);
+      // 剧名优先用 TMDB 官方名（导入后可用），回退目录名推导
+      final tmdbTitle = group
+          .firstWhere(
+            (video) => (video.tmdbTitle ?? '').isNotEmpty,
+            orElse: () => group.first,
+          )
+          .tmdbTitle;
+      final title = (tmdbTitle != null && tmdbTitle.isNotEmpty)
+          ? tmdbTitle
+          : _seriesTitle(entry.key, group);
       // 电影目录下的剧集修正为电视剧；动漫/综艺保持原分类
       final kind = group.first.kind == MediaKind.movie
           ? MediaKind.series
@@ -775,6 +798,7 @@ class MediaLibrary extends ChangeNotifier {
         (video) => video.posterPath != null,
         orElse: () => group.first,
       );
+      final tmdbId = _tmdbIdFromPaths(group.map((video) => video.path));
       result.add(
         group.first.copyWith(
           title: title,
@@ -783,10 +807,21 @@ class MediaLibrary extends ChangeNotifier {
           posterPath: posterSource.posterPath,
           summary: posterSource.summary,
           rating: posterSource.rating,
+          tmdbId: tmdbId,
         ),
       );
     }
     return result;
+  }
+
+  /// 从一组路径中提取 {tmdbid-NNN} 标记（媒体管理器命名习惯，取第一个命中的）。
+  static int? _tmdbIdFromPaths(Iterable<String> paths) {
+    final pattern = RegExp(r'\{tmdbid-(\d+)\}', caseSensitive: false);
+    for (final path in paths) {
+      final match = pattern.firstMatch(path);
+      if (match != null) return int.tryParse(match.group(1)!);
+    }
+    return null;
   }
 
   /// 一组同目录文件是否属于同一部剧集。
@@ -833,10 +868,7 @@ class MediaLibrary extends ChangeNotifier {
     while (guard < 4) {
       final isSeasonFolder =
           RegExp(r'^\d{1,2}$').hasMatch(segment) ||
-          RegExp(
-            r'^season\s*\d+\s*[（()）]*$',
-            caseSensitive: false,
-          ).hasMatch(segment);
+          RegExp(r'^season\s*\d+', caseSensitive: false).hasMatch(segment);
       if (!_isGenericFolder(segment) && !isSeasonFolder && segment.isNotEmpty) {
         return WebDavService.cleanTitle(segment);
       }

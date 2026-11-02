@@ -93,6 +93,7 @@ class ScannedVideo {
     this.stillPath,
     this.episodeTitle,
     this.tmdbId,
+    this.tmdbTitle,
   });
 
   final String sourceId;
@@ -136,6 +137,9 @@ class ScannedVideo {
   /// 所属剧集的 TMDB 条目 ID，多季关联与刮削去重用。
   final int? tmdbId;
 
+  /// TMDB 官方剧名（聚合展示优先用它）。
+  final String? tmdbTitle;
+
   Map<String, Object?> toJson() => {
     'sourceId': sourceId,
     'path': path,
@@ -155,6 +159,7 @@ class ScannedVideo {
     'stillPath': stillPath,
     'episodeTitle': episodeTitle,
     'tmdbId': tmdbId,
+    'tmdbTitle': tmdbTitle,
   };
 
   factory ScannedVideo.fromJson(Map<String, Object?> json) => ScannedVideo(
@@ -183,6 +188,7 @@ class ScannedVideo {
     stillPath: json['stillPath'] as String?,
     episodeTitle: json['episodeTitle'] as String?,
     tmdbId: (json['tmdbId'] as num?)?.toInt(),
+    tmdbTitle: json['tmdbTitle'] as String?,
   );
 
   ScannedVideo copyWith({
@@ -200,6 +206,7 @@ class ScannedVideo {
     String? stillPath,
     String? episodeTitle,
     int? tmdbId,
+    String? tmdbTitle,
   }) => ScannedVideo(
     sourceId: sourceId,
     path: path,
@@ -219,6 +226,7 @@ class ScannedVideo {
     stillPath: stillPath ?? this.stillPath,
     episodeTitle: episodeTitle ?? this.episodeTitle,
     tmdbId: tmdbId ?? this.tmdbId,
+    tmdbTitle: tmdbTitle ?? this.tmdbTitle,
   );
 }
 
