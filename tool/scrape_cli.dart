@@ -69,6 +69,16 @@ int seasonOf(Item item) {
   if (season > 0) return season;
   season = extract(item.path);
   if (season > 0) return season;
+
+  // 所在目录名的尾部数字视为季号：唐朝诡事录2 → 第2季
+  final parent = item.parent;
+  final index = parent.lastIndexOf('/');
+  final segment = index >= 0 ? parent.substring(index + 1) : parent;
+  final tailMatch = RegExp(r'(\d{1,2})\s*$').firstMatch(segment);
+  if (tailMatch != null) {
+    final parsed = int.tryParse(tailMatch.group(1)!);
+    if (parsed != null && parsed > 0) return parsed;
+  }
   return 1;
 }
 

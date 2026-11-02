@@ -944,6 +944,14 @@ class MediaLibrary extends ChangeNotifier {
     season = extract(video.path);
     if (season > 0) return season;
 
+    // 所在目录名的尾部数字视为季号：唐朝诡事录2 → 第2季
+    final parentSegment = _lastSegment(parentPathOf(video.path));
+    final tailMatch = RegExp(r'(\d{1,2})\s*$').firstMatch(parentSegment);
+    if (tailMatch != null) {
+      final parsed = int.tryParse(tailMatch.group(1)!);
+      if (parsed != null && parsed > 0) return parsed;
+    }
+
     // 纯数字目录视为季号：仅当目录上一级不是纯数字（排除顶级目录编号）
     var parent = parentPathOf(video.path);
     for (var guard = 0; guard < 3; guard++) {
