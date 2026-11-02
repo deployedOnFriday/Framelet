@@ -58,7 +58,9 @@ int seasonOf(Item item) {
     ]) {
       final match = pattern.firstMatch(text);
       if (match != null) {
-        final parsed = int.tryParse(match.group(1)!);
+        final raw = match.group(1)!;
+        // 支持中文数字季号（第九季 → 9）
+        final parsed = int.tryParse(raw) ?? _chineseNumber(raw);
         if (parsed != null) return parsed;
       }
     }
@@ -344,4 +346,31 @@ String _folderTitle(String parent) {
       )
       .trim();
   return name;
+}
+
+/// 中文数字转整数（支持 一~九十九）。
+int? _chineseNumber(String raw) {
+  const digits = {
+    '一': 1,
+    '二': 2,
+    '三': 3,
+    '四': 4,
+    '五': 5,
+    '六': 6,
+    '七': 7,
+    '八': 8,
+    '九': 9,
+    '十': 10,
+  };
+  if (raw.isEmpty) return null;
+  if (raw == '十') return 10;
+  if (raw.contains('十')) {
+    final parts = raw.split('十');
+    final tens = parts[0].isEmpty ? 1 : (digits[parts[0]] ?? 0);
+    final ones = parts.length > 1 && parts[1].isNotEmpty
+        ? (digits[parts[1]] ?? 0)
+        : 0;
+    return tens * 10 + ones;
+  }
+  return digits[raw];
 }
