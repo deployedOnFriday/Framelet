@@ -307,12 +307,8 @@ class _HeroSection extends StatelessWidget {
                                 ),
                                 const _MetadataDivider(),
                               ],
-                              if (video.releaseDate != null ||
-                                  video.modified != null)
-                                _MetadataText(
-                                  (video.releaseDate ??
-                                      _formatDate(video.modified!)),
-                                ),
+                              if (_yearOf(video) != null)
+                                _MetadataText(_yearOf(video)!),
                               if (isSeries)
                                 _MetadataText(
                                   '共 ${episodes.length} 集（库中有 ${episodes.length} 集）',
@@ -415,9 +411,6 @@ class _HeroSection extends StatelessWidget {
     if (sec <= 0) return '';
     return '${(sec / 60).round()} 分钟';
   }
-
-  static String _formatDate(DateTime date) =>
-      '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 
   List<Color> _paletteFor(String title) {
     const palettes = <List<Color>>[
@@ -1056,4 +1049,14 @@ class _ExtraCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 影片年份：优先 TMDB 首播/上映年份，回退文件修改时间年份。
+String? _yearOf(ScannedVideo video) {
+  final release = video.releaseDate;
+  if (release != null && release.trim().length >= 4) {
+    return release.trim().substring(0, 4);
+  }
+  if (video.modified != null) return '${video.modified!.year}';
+  return null;
 }
