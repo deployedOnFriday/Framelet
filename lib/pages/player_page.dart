@@ -111,6 +111,153 @@ class _PlayerPageState extends State<PlayerPage> {
     await _player.setRate(next);
   }
 
+  /// 右键弹出影片技术信息（分辨率/码率/编码/帧率等）。
+  Future<void> _showMediaInfo() async {
+    final info = await _collectMediaInfo();
+    if (!mounted) return;
+    final rows = <MapEntry<String, String>>[
+      MapEntry('文件名', _current.title),
+      ...info.entries,
+      MapEntry('文件路径', _current.path),
+    ];
+    await showDialog<void>(
+      context: context,
+      builder: (context) => Dialog(
+        backgroundColor: const Color(0xF21A1A1A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: Container(
+          width: 560,
+          padding: const EdgeInsets.fromLTRB(22, 18, 22, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '影片信息',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 420),
+                child: SingleChildScrollView(
+                  child: Column(
+                    children: [
+                      for (final row in rows)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 9),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SizedBox(
+                                width: 92,
+                                child: Text(
+                                  row.key,
+                                  style: const TextStyle(
+                                    color: Colors.white38,
+                                    fontSize: 12.5,
+                                  ),
+                                ),
+                              ),
+                              Expanded(
+                                child: SelectableText(
+                                  row.value,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12.5,
+                                    height: 1.5,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('关闭'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 从 mpv 读取技术参数并格式化。
+  Future<Map<String, String>> _collectMediaInfo() async {
+    final result = <String, String>{};
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return result;
+    Future<String?> read(String property) async {
+      try {
+        final value = await platform.getProperty(property);
+        if (value.isEmpty || value == 'no') return null;
+        return value;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    String? formatBitrate(String? value) {
+      final bps = int.tryParse(value ?? '');
+      if (bps == null || bps <= 0) return null;
+      final mbps = bps / 1000000;
+      return mbps >= 1
+          ? '${mbps.toStringAsFixed(1)} Mbps'
+          : '${(bps / 1000).toStringAsFixed(0)} Kbps';
+    }
+
+    final width = await read('video-params/w');
+    final height = await read('video-params/h');
+    if (width != null && height != null) {
+      result['分辨率'] = '$width × $height';
+    }
+    final fps = await read('container-fps') ?? await read('video-params/fps');
+    if (fps != null) {
+      final parsed = double.tryParse(fps);
+      if (parsed != null) result['帧率'] = '${parsed.toStringAsFixed(2)} fps';
+    }
+    final videoCodec = await read('video-codec-name');
+    if (videoCodec != null) result['视频编码'] = videoCodec.toUpperCase();
+    final videoRate = formatBitrate(await read('video-bitrate'));
+    if (videoRate != null) result['视频码率'] = videoRate;
+    final audioCodec = await read('audio-codec-name');
+    if (audioCodec != null) result['音频编码'] = audioCodec.toUpperCase();
+    final audioRate = formatBitrate(await read('audio-bitrate'));
+    if (audioRate != null) result['音频码率'] = audioRate;
+    final channels = await read('audio-params/channel-count');
+    if (channels != null) result['声道'] = '$channels 声道';
+    final sampleRate = await read('audio-params/samplerate');
+    if (sampleRate != null) {
+      final khz = double.tryParse(sampleRate);
+      if (khz != null) result['采样率'] = '${(khz / 1000).toStringAsFixed(1)} kHz';
+    }
+    final size = int.tryParse(await read('file-size') ?? '');
+    if (size != null && size > 0) {
+      final gb = size / (1024 * 1024 * 1024);
+      result['文件大小'] = gb >= 1
+          ? '${gb.toStringAsFixed(2)} GB'
+          : '${(size / 1024 / 1024).toStringAsFixed(0)} MB';
+    }
+    if (_durationSec > 0) {
+      final minutes = _durationSec ~/ 60;
+      final seconds = (_durationSec % 60).toInt();
+      result['时长'] = '$minutes 分 ${seconds.toString().padLeft(2, '0')} 秒';
+    }
+    return result;
+  }
+
   /// 选集面板：列出本剧所有集，点击切换。
   Future<void> _showEpisodePicker() async {
     final picked = await showModalBottomSheet<ScannedVideo>(
@@ -298,6 +445,14 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onSecondaryTapDown: (_) => _showMediaInfo(),
+      child: _buildScreen(context),
+    );
+  }
+
+  Widget _buildScreen(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
