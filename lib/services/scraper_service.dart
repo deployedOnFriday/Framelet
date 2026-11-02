@@ -411,7 +411,7 @@ class ScraperService {
           best = map;
         }
       }
-      if (best == null || bestScore < 0.45) return null;
+      if (best == null || bestScore < 0.35) return null;
 
       final posterPath = best['poster_path'] as String?;
       final overview = (best['overview'] as String? ?? '').trim();
@@ -608,7 +608,7 @@ class ScraperService {
           );
         }
       }
-      return bestScore >= 0.45 ? best : null;
+      return bestScore >= 0.35 ? best : null;
     } catch (_) {
       return null;
     } finally {
