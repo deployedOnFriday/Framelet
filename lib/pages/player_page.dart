@@ -622,11 +622,15 @@ class _PlayerPageState extends State<PlayerPage> {
         for (var i = 0; i < tracks.length; i++)
           _menuItem(tracks[i].id, _audioLabel(tracks[i], i + 1), currentId),
       ],
-      child: const _ControlButtonLabel(icon: Icons.audiotrack_rounded),
+      child: const _ControlButtonLabel(
+        icon: Icons.audiotrack_rounded,
+        label: '音轨',
+      ),
     );
   }
 
-  /// 字幕按钮：有内嵌字幕轨时出现在底部控制条，支持关闭/自动/指定轨。
+  /// 字幕按钮：常驻底部控制条（没内嵌字幕轨也保留入口，
+  /// 菜单里给「无内嵌字幕轨」提示），支持关闭/自动/指定轨。
   Widget _buildSubtitleButton(List<SubtitleTrack> tracks) {
     final currentId = _player.state.track.subtitle.id;
     return PopupMenuButton<String>(
@@ -653,169 +657,37 @@ class _PlayerPageState extends State<PlayerPage> {
         _menuItem('auto', '自动', currentId),
         for (var i = 0; i < tracks.length; i++)
           _menuItem(tracks[i].id, _subtitleLabel(tracks[i], i + 1), currentId),
+        if (tracks.isEmpty)
+          const PopupMenuItem<String>(
+            enabled: false,
+            height: 34,
+            child: Text(
+              '无内嵌字幕轨',
+              style: TextStyle(color: Colors.white30, fontSize: 12),
+            ),
+          ),
       ],
-      child: const _ControlButtonLabel(icon: Icons.subtitles_rounded),
+      child: const _ControlButtonLabel(
+        icon: Icons.subtitles_rounded,
+        label: '字幕',
+      ),
     );
   }
 
   /// 右键弹出影片技术信息（分辨率/码率/编码/帧率等）。
+  /// 对话框打开期间每秒刷新实时码率。
   Future<void> _showMediaInfo() async {
-    final info = await _collectMediaInfo();
-    if (!mounted) return;
-    final rows = <MapEntry<String, String>>[
-      MapEntry('文件名', _current.title),
-      ...info.entries,
-      MapEntry('文件路径', _current.path),
-    ];
+    final platform = _player.platform;
     await showDialog<void>(
       context: context,
-      builder: (context) => Dialog(
-        backgroundColor: const Color(0xF21A1A1A),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        child: Container(
-          width: 560,
-          padding: const EdgeInsets.fromLTRB(22, 18, 22, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '影片信息',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 12),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 420),
-                child: SingleChildScrollView(
-                  child: Column(
-                    children: [
-                      for (final row in rows)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 9),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              SizedBox(
-                                width: 92,
-                                child: Text(
-                                  row.key,
-                                  style: const TextStyle(
-                                    color: Colors.white38,
-                                    fontSize: 12.5,
-                                  ),
-                                ),
-                              ),
-                              Expanded(
-                                child: SelectableText(
-                                  row.value,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 12.5,
-                                    height: 1.5,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(height: 6),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('关闭'),
-                ),
-              ),
-            ],
-          ),
-        ),
+      builder: (context) => _MediaInfoDialog(
+        title: _current.title,
+        path: _current.path,
+        durationSec: _durationSec,
+        platform: platform is NativePlayer ? platform : null,
       ),
     );
     _refocus();
-  }
-
-  /// 从 mpv 读取技术参数并格式化。
-  Future<Map<String, String>> _collectMediaInfo() async {
-    final result = <String, String>{};
-    final platform = _player.platform;
-    if (platform is! NativePlayer) return result;
-    Future<String?> read(String property) async {
-      try {
-        final value = await platform.getProperty(property);
-        if (value.isEmpty || value == 'no') return null;
-        return value;
-      } catch (_) {
-        return null;
-      }
-    }
-
-    // mpv 的 video-bitrate/audio-bitrate 是即时码率，返回形如
-    // "2498312.000000" 的浮点字符串——必须用 double 解析，
-    // 旧版 int.tryParse 解析失败导致码率整行不显示。
-    String? formatBitrate(String? value) {
-      final bps = double.tryParse((value ?? '').trim());
-      if (bps == null || bps <= 0) return null;
-      return _prettyBitrate(bps);
-    }
-
-    final width = await read('video-params/w');
-    final height = await read('video-params/h');
-    if (width != null && height != null) {
-      result['分辨率'] = '$width × $height';
-    }
-    final fps = await read('container-fps') ?? await read('video-params/fps');
-    if (fps != null) {
-      final parsed = double.tryParse(fps);
-      if (parsed != null) result['帧率'] = '${parsed.toStringAsFixed(2)} fps';
-    }
-    final videoCodec = await read('video-codec-name');
-    if (videoCodec != null) result['视频编码'] = videoCodec.toUpperCase();
-    final videoRate = formatBitrate(await read('video-bitrate'));
-    if (videoRate != null) result['视频码率'] = videoRate;
-    final audioCodec = await read('audio-codec-name');
-    if (audioCodec != null) result['音频编码'] = audioCodec.toUpperCase();
-    final audioRate = formatBitrate(await read('audio-bitrate'));
-    if (audioRate != null) result['音频码率'] = audioRate;
-    final channels = await read('audio-params/channel-count');
-    if (channels != null) result['声道'] = '$channels 声道';
-    final sampleRate = await read('audio-params/samplerate');
-    if (sampleRate != null) {
-      final khz = double.tryParse(sampleRate);
-      if (khz != null) result['采样率'] = '${(khz / 1000).toStringAsFixed(1)} kHz';
-    }
-    final size = int.tryParse(await read('file-size') ?? '');
-    if (size != null && size > 0) {
-      final gb = size / (1024 * 1024 * 1024);
-      result['文件大小'] = gb >= 1
-          ? '${gb.toStringAsFixed(2)} GB'
-          : '${(size / 1024 / 1024).toStringAsFixed(0)} MB';
-    }
-    if (_durationSec > 0) {
-      final minutes = _durationSec ~/ 60;
-      final seconds = (_durationSec % 60).toInt();
-      result['时长'] = '$minutes 分 ${seconds.toString().padLeft(2, '0')} 秒';
-    }
-    // 文件平均码率（总码率，含音视频），mpv 即时码率取不到时的可靠兜底
-    if (size != null && size > 0 && _durationSec > 0) {
-      result['平均码率'] = _prettyBitrate(size / _durationSec);
-    }
-    return result;
-  }
-
-  /// 码率格式化：>=1Mbps 用 Mbps，否则 Kbps。
-  static String _prettyBitrate(double bps) {
-    final mbps = bps / 1000000;
-    return mbps >= 1
-        ? '${mbps.toStringAsFixed(1)} Mbps'
-        : '${(bps / 1000).toStringAsFixed(0)} Kbps';
   }
 
   /// 选集面板：列出本剧所有集（含进度），点击切换。
@@ -1163,7 +1035,8 @@ class _PlayerPageState extends State<PlayerPage> {
         const MaterialDesktopPositionIndicator(),
         const Spacer(),
         if (audioTracks.length > 1) _buildAudioButton(audioTracks),
-        if (subtitleTracks.isNotEmpty) _buildSubtitleButton(subtitleTracks),
+        // 字幕入口常显：没内嵌轨也要能打开菜单确认/关闭
+        _buildSubtitleButton(subtitleTracks),
         _buildSpeedButton(),
         const MaterialDesktopFullscreenButton(),
       ],
@@ -1268,7 +1141,8 @@ class _ControlIconButton extends StatelessWidget {
   }
 }
 
-/// 底部控制条的胶囊按钮外观：倍速显示当前值，音轨/字幕显示图标。
+/// 底部控制条的胶囊按钮外观：可同时显示图标与文字（音轨/字幕），
+/// 或只显示文字（倍速）。
 class _ControlButtonLabel extends StatelessWidget {
   const _ControlButtonLabel({this.label, this.icon});
 
@@ -1278,17 +1152,276 @@ class _ControlButtonLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 12),
-      child: label != null
-          ? Text(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 12),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) Icon(icon, color: Colors.white, size: 19),
+          if (icon != null && label != null) const SizedBox(width: 4),
+          if (label != null)
+            Text(
               label!,
               style: const TextStyle(
                 color: Colors.white,
                 fontSize: 12.5,
                 fontWeight: FontWeight.w600,
               ),
-            )
-          : Icon(icon, color: Colors.white, size: 22),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 影片技术信息对话框：静态参数读一次，码率每秒轮询 mpv 实时刷新。
+///
+/// mpv 的 video-bitrate/audio-bitrate 是即时码率（流媒体/可变码率会跳动），
+/// 只读一次就没意义了；这里用 1 秒定时器刷新，并显示「实时」标记。
+class _MediaInfoDialog extends StatefulWidget {
+  const _MediaInfoDialog({
+    required this.title,
+    required this.path,
+    required this.durationSec,
+    required this.platform,
+  });
+
+  final String title;
+  final String path;
+  final double durationSec;
+  final NativePlayer? platform;
+
+  @override
+  State<_MediaInfoDialog> createState() => _MediaInfoDialogState();
+}
+
+class _MediaInfoDialogState extends State<_MediaInfoDialog> {
+  final Map<String, String> _static = {};
+  String? _videoBitrate;
+  String? _audioBitrate;
+  Timer? _rateTimer;
+
+  /// 行的展示顺序（文件名与文件路径在首尾单独放）。
+  static const _order = [
+    '分辨率',
+    '帧率',
+    '视频编码',
+    '视频码率',
+    '音频编码',
+    '音频码率',
+    '声道',
+    '采样率',
+    '文件大小',
+    '时长',
+    '平均码率',
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStatic();
+    _rateTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => _refreshRates(),
+    );
+    _refreshRates();
+  }
+
+  @override
+  void dispose() {
+    _rateTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<String?> _read(String property) async {
+    final platform = widget.platform;
+    if (platform == null) return null;
+    try {
+      final value = await platform.getProperty(property);
+      if (value.isEmpty || value == 'no') return null;
+      return value;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// mpv 即时码率是 "2498312.000000" 这类浮点字符串，必须 double 解析。
+  String? _formatBitrate(String? raw) {
+    final bps = double.tryParse((raw ?? '').trim());
+    if (bps == null || bps <= 0) return null;
+    return _prettyBitrate(bps);
+  }
+
+  static String _prettyBitrate(double bps) {
+    final mbps = bps / 1000000;
+    return mbps >= 1
+        ? '${mbps.toStringAsFixed(1)} Mbps'
+        : '${(bps / 1000).toStringAsFixed(0)} Kbps';
+  }
+
+  Future<void> _refreshRates() async {
+    if (widget.platform == null) return;
+    final video = _formatBitrate(await _read('video-bitrate'));
+    final audio = _formatBitrate(await _read('audio-bitrate'));
+    if (!mounted) return;
+    if (video == _videoBitrate && audio == _audioBitrate) return;
+    setState(() {
+      _videoBitrate = video;
+      _audioBitrate = audio;
+    });
+  }
+
+  Future<void> _loadStatic() async {
+    final result = <String, String>{};
+    final width = await _read('video-params/w');
+    final height = await _read('video-params/h');
+    if (width != null && height != null) {
+      result['分辨率'] = '$width × $height';
+    }
+    final fps = await _read('container-fps') ?? await _read('video-params/fps');
+    if (fps != null) {
+      final parsed = double.tryParse(fps);
+      if (parsed != null) result['帧率'] = '${parsed.toStringAsFixed(2)} fps';
+    }
+    final videoCodec = await _read('video-codec-name');
+    if (videoCodec != null) result['视频编码'] = videoCodec.toUpperCase();
+    final audioCodec = await _read('audio-codec-name');
+    if (audioCodec != null) result['音频编码'] = audioCodec.toUpperCase();
+    final channels = await _read('audio-params/channel-count');
+    if (channels != null) result['声道'] = '$channels 声道';
+    final sampleRate = await _read('audio-params/samplerate');
+    if (sampleRate != null) {
+      final khz = double.tryParse(sampleRate);
+      if (khz != null) result['采样率'] = '${(khz / 1000).toStringAsFixed(1)} kHz';
+    }
+    final size = int.tryParse(await _read('file-size') ?? '');
+    if (size != null && size > 0) {
+      final gb = size / (1024 * 1024 * 1024);
+      result['文件大小'] = gb >= 1
+          ? '${gb.toStringAsFixed(2)} GB'
+          : '${(size / 1024 / 1024).toStringAsFixed(0)} MB';
+    }
+    if (widget.durationSec > 0) {
+      final minutes = widget.durationSec ~/ 60;
+      final seconds = (widget.durationSec % 60).toInt();
+      result['时长'] = '$minutes 分 ${seconds.toString().padLeft(2, '0')} 秒';
+      // 文件平均码率（总码率，含音视频），即时码率取不到时的兜底
+      if (size != null && size > 0) {
+        result['平均码率'] = _prettyBitrate(size / widget.durationSec);
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _static
+        ..clear()
+        ..addAll(result);
+    });
+  }
+
+  List<MapEntry<String, String>> _rows() {
+    final values = <String, String>{
+      ..._static,
+      '视频码率': ?_videoBitrate,
+      '音频码率': ?_audioBitrate,
+    };
+    return [
+      MapEntry('文件名', widget.title),
+      for (final key in _order)
+        if (values[key] != null) MapEntry(key, values[key]!),
+      MapEntry('文件路径', widget.path),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = _rows();
+    return Dialog(
+      backgroundColor: const Color(0xF21A1A1A),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      child: Container(
+        width: 560,
+        padding: const EdgeInsets.fromLTRB(22, 18, 22, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Text(
+                  '影片信息',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                if (widget.platform != null) ...[
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF4CD964),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  const Text(
+                    '码率实时刷新',
+                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                  ),
+                ],
+              ],
+            ),
+            const SizedBox(height: 12),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 420),
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    for (final row in rows)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 9),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SizedBox(
+                              width: 92,
+                              child: Text(
+                                row.key,
+                                style: const TextStyle(
+                                  color: Colors.white38,
+                                  fontSize: 12.5,
+                                ),
+                              ),
+                            ),
+                            Expanded(
+                              child: SelectableText(
+                                row.value,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12.5,
+                                  height: 1.5,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('关闭'),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
