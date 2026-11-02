@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -327,10 +328,16 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   /// 读取刮削设置并注入到刮削服务。
+  /// 扫描完成后自动刮削新内容（默认开启）。
+  bool autoScrapeAfterScan = true;
+
   Future<void> _loadScrapeSettings() async {
     try {
       scrapeProxy = await _store.read('framelet.scrape.proxy');
       tmdbKey = await _store.read('framelet.scrape.tmdbkey');
+      final auto = await _store.read('framelet.scrape.auto');
+      // 未设置过时默认开启
+      autoScrapeAfterScan = auto == null ? true : auto == '1';
       ScraperService.proxyAddress = (scrapeProxy ?? '').trim().isEmpty
           ? null
           : scrapeProxy!.trim();
@@ -343,6 +350,12 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   /// 保存刮削设置。留空表示清除该项。
+  Future<void> setAutoScrapeAfterScan(bool value) async {
+    autoScrapeAfterScan = value;
+    await _store.write('framelet.scrape.auto', value ? '1' : '0');
+    notifyListeners();
+  }
+
   Future<void> saveScrapeSettings({String? proxy, String? tmdbKey}) async {
     if (proxy != null) {
       scrapeProxy = proxy.trim();
@@ -481,6 +494,13 @@ class MediaLibrary extends ChangeNotifier {
       scanProgress = '扫描完成，共发现 ${videos.length} 个视频';
       await _persistSources();
       await _persistVideos(sourceId);
+      // 扫描完成后自动刮削：只补没刮过的条目（已有海报的自动跳过）
+      if (autoScrapeAfterScan &&
+          (tmdbKey ?? '').trim().isNotEmpty &&
+          !scraping &&
+          unscrapedItems().isNotEmpty) {
+        unawaited(scrapeAll());
+      }
     } catch (error) {
       _sourceErrors[sourceId] = describeError(error);
       final index = _sources.indexWhere((item) => item.id == sourceId);

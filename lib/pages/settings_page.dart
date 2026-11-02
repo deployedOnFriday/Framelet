@@ -225,6 +225,46 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             const SizedBox(height: 18),
+            Container(
+              padding: const EdgeInsets.fromLTRB(16, 4, 10, 4),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '同步后自动刮削',
+                          style: TextStyle(
+                            fontSize: 13.5,
+                            color: AppColors.text,
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          '扫描完成自动补齐未匹配的条目，已有海报的会跳过',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: AppColors.muted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Switch(
+                    value: library.autoScrapeAfterScan,
+                    activeThumbColor: AppColors.primary,
+                    onChanged: (value) => library.setAutoScrapeAfterScan(value),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
             Builder(
               builder: (context) {
                 final unscraped = library.unscrapedItems();
