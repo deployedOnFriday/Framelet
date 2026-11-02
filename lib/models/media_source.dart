@@ -140,6 +140,9 @@ class ScannedVideo {
   /// TMDB 官方剧名（聚合展示优先用它）。
   final String? tmdbTitle;
 
+  /// 是否已刮削（有海报或已匹配 TMDB）——未刮的不进入前端展示。
+  bool get isScraped => posterPath != null || tmdbId != null;
+
   Map<String, Object?> toJson() => {
     'sourceId': sourceId,
     'path': path,

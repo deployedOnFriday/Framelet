@@ -82,6 +82,8 @@ class MediaLibrary extends ChangeNotifier {
       final aggregated = aggregate(entry.value);
       for (final video in aggregated) {
         if (video.kind != kind) continue;
+        // 前端只展示已刮削的条目；未刮的收在设置页处理
+        if (!video.isScraped) continue;
         final key = video.tmdbId != null
             ? 'tmdb|${video.tmdbId}'
             : '${video.sourceId}|${video.title.toLowerCase()}';
@@ -120,6 +122,20 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   int countByKind(MediaKind kind) => byKind(kind).length;
+
+  /// 未刮削的聚合条目（不进前端，等设置页手动处理）。
+  List<ScannedVideo> unscrapedItems() {
+    final result = <ScannedVideo>[];
+    final seen = <String>{};
+    for (final videos in _videosBySource.values) {
+      for (final video in aggregate(videos)) {
+        if (video.isScraped) continue;
+        if (!seen.add(video.path)) continue;
+        result.add(video);
+      }
+    }
+    return result;
+  }
 
   /// 某聚合条目对应的单集文件列表（电影返回自身）。
   ///

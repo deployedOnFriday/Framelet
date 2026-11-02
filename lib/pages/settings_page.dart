@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../core/theme/app_theme.dart';
 import '../models/media_source.dart';
 import '../services/media_library.dart';
+import '../services/scraper_service.dart';
+import '../widgets/match_dialog.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -221,6 +223,15 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ],
               ),
+            ),
+            const SizedBox(height: 18),
+            Builder(
+              builder: (context) {
+                final unscraped = library.unscrapedItems();
+                return unscraped.isEmpty
+                    ? const SizedBox.shrink()
+                    : _UnmatchedSection(items: unscraped);
+              },
             ),
             const SizedBox(height: 18),
             _buildScrapeSourceSettings(context, library),
@@ -580,6 +591,112 @@ class _SettingsPageState extends State<SettingsPage> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+}
+
+/// 未匹配内容区：列出没刮出来的条目，逐条手动匹配后才进入前端。
+class _UnmatchedSection extends StatelessWidget {
+  const _UnmatchedSection({required this.items});
+
+  final List<ScannedVideo> items;
+
+  Future<void> _match(BuildContext context, ScannedVideo item) async {
+    final library = MediaLibrary.instance;
+    final episodes = library.episodesOf(item);
+    final parsed = ScraperService.parseTitle(item.title);
+    final initialQuery = parsed.queries.isEmpty
+        ? item.title
+        : parsed.queries.first;
+    final candidate = await showDialog<ScrapeCandidate>(
+      context: context,
+      builder: (_) => MatchSearchDialog(
+        initialQuery: initialQuery,
+        preferTv: episodes.length > 1,
+      ),
+    );
+    if (candidate == null || !context.mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    await library.applyCandidate(item, episodes, candidate);
+    messenger
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text('「${candidate.name}」已匹配，已在前端展示')));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '未匹配内容（${items.length}）',
+            style: Theme.of(context).textTheme.titleSmall
+                ?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            '这些没能自动匹配到 TMDB，暂不显示在前端。点「匹配」手动搜索选一下，匹配成功就会出现在海报墙上。',
+            style: TextStyle(color: AppColors.muted, fontSize: 12, height: 1.6),
+          ),
+          const SizedBox(height: 10),
+          ...items.map(
+            (item) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          item.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: AppColors.text,
+                          ),
+                        ),
+                        Text(
+                          item.path,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AppColors.muted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    height: 34,
+                    child: OutlinedButton.icon(
+                      onPressed: () => _match(context, item),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.primary,
+                        side: const BorderSide(color: AppColors.primary),
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        textStyle: const TextStyle(fontSize: 12.5),
+                      ),
+                      icon: const Icon(Icons.manage_search_rounded, size: 16),
+                      label: const Text('匹配'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 
