@@ -805,9 +805,16 @@ class _EpisodeCard extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                episode.episodeTitle != null && episode.episodeTitle!.isNotEmpty
-                    ? '${index + 1}. ${episode.episodeTitle}'
-                    : '${index + 1}. ${episode.title}',
+                () {
+                  final title = episode.episodeTitle;
+                  // 占位集名（第1话/第2集/Episode 1）没有信息量，只显示集号
+                  if (title != null &&
+                      title.trim().isNotEmpty &&
+                      !_isPlaceholderEpisodeTitle(title)) {
+                    return '${index + 1}. $title';
+                  }
+                  return '第 ${index + 1} 集';
+                }(),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 13, color: Color(0xFF222222)),
@@ -1059,4 +1066,18 @@ String? _yearOf(ScannedVideo video) {
   }
   if (video.modified != null) return '${video.modified!.year}';
   return null;
+}
+
+/// 集名是否只是占位（第N话/第N集/Episode N/E{N}），这类不显示。
+bool _isPlaceholderEpisodeTitle(String raw) {
+  final text = raw.trim();
+  if (text.isEmpty) return true;
+  final pattern = RegExp(
+    r'^(第\s*[0-9一二三四五六七八九十百]+\s*[话話集期回]'
+    r'|episode\s*\d+'
+    r'|e\d{1,3}'
+    r'|第\s*\d+\s*[话話集])$',
+    caseSensitive: false,
+  );
+  return pattern.hasMatch(text);
 }
