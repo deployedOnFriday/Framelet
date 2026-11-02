@@ -64,15 +64,13 @@ class _DetailPageState extends State<DetailPage> {
                   if (seasons.length > 1)
                     Padding(
                       padding: const EdgeInsets.fromLTRB(32, 0, 32, 16),
-                      child: Wrap(
-                        spacing: 10,
+                      child: Row(
                         children: [
-                          for (var i = 0; i < seasons.length; i++)
-                            _SeasonChip(
-                              label: '第 ${MediaLibrary.seasonOf(seasons[i])} 季',
-                              selected: i == _seasonIndex,
-                              onTap: () => onSeasonSelected!(i),
-                            ),
+                          _SeasonDropdown(
+                            seasons: seasons,
+                            currentIndex: _seasonIndex,
+                            onSelected: (i) => onSeasonSelected!(i),
+                          ),
                         ],
                       ),
                     ),
@@ -654,36 +652,50 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
   }
 }
 
-/// 季切换标签。
-class _SeasonChip extends StatelessWidget {
-  const _SeasonChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
+/// 季切换下拉框（不占版面，点击展开）。
+class _SeasonDropdown extends StatelessWidget {
+  const _SeasonDropdown({
+    required this.seasons,
+    required this.currentIndex,
+    required this.onSelected,
   });
 
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
+  final List<ScannedVideo> seasons;
+  final int currentIndex;
+  final ValueChanged<int> onSelected;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: selected ? const Color(0xFF141414) : const Color(0xFFF2F3F5),
-      borderRadius: BorderRadius.circular(16),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
-              color: selected ? Colors.white : const Color(0xFF666666),
-            ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF2F2F2),
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<int>(
+          value: currentIndex,
+          isDense: true,
+          borderRadius: BorderRadius.circular(10),
+          icon: const Icon(Icons.keyboard_arrow_down, size: 18),
+          style: const TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF1A1A1A),
           ),
+          items: [
+            for (var i = 0; i < seasons.length; i++)
+              DropdownMenuItem<int>(
+                value: i,
+                child: Text(
+                  '第 ${MediaLibrary.seasonOf(seasons[i])} 季',
+                  style: const TextStyle(fontSize: 13),
+                ),
+              ),
+          ],
+          onChanged: (index) {
+            if (index != null && index != currentIndex) onSelected(index);
+          },
         ),
       ),
     );
