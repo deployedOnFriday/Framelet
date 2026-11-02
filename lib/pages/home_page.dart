@@ -188,29 +188,40 @@ class _HomePageState extends State<HomePage> {
   Widget _buildSyncButton() {
     return SizedBox(
       height: 46,
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.surface,
+      child: Material(
+        color: AppColors.primary,
+        borderRadius: BorderRadius.circular(11),
+        child: InkWell(
           borderRadius: BorderRadius.circular(11),
-          border: Border.all(color: AppColors.border),
-        ),
-        child: IconButton(
-          onPressed: _syncing ? null : _syncNow,
-          tooltip: '同步媒体库并刮削',
-          icon: _syncing
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: AppColors.primary,
+          onTap: _syncing ? null : _syncNow,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (_syncing)
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
+                  )
+                else
+                  const Icon(Icons.sync_rounded, size: 19, color: Colors.white),
+                const SizedBox(width: 7),
+                Text(
+                  _syncing ? '同步中' : '同步',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
                   ),
-                )
-              : const Icon(
-                  Icons.sync_rounded,
-                  size: 20,
-                  color: AppColors.primary,
                 ),
+              ],
+            ),
+          ),
         ),
       ),
     );
