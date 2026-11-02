@@ -279,6 +279,20 @@ class WebDavService {
       RegExp(r'\s*\{tmdbid-\d+\}\s*', caseSensitive: false),
       ' ',
     );
+    // 记录第一个方括号段（[消失的爱人][2014]… 整名都在括号里的兜底）
+    final bracket = RegExp(r'[\[【]([^\]】]{2,30})[\]】]')
+        .firstMatch(fileName)
+        ?.group(1);
+    // 书名号与残缺括号当分隔符
+    fileName = fileName
+        .replaceAll('《', ' ')
+        .replaceAll('》', ' ')
+        .replaceAll('】', ' ')
+        .replaceAll('【', ' ');
+    // 「No.14｜」类编号前缀与防屏蔽竖线
+    fileName = fileName
+        .replaceAll(RegExp(r'^\s*No\.?\d*\s*[｜|]?\s*'), '')
+        .replaceAll('丨', '');
     final dot = fileName.lastIndexOf('.');
     var title = dot > 0 ? fileName.substring(0, dot) : fileName;
     title = title.replaceAll(RegExp(r'\.[0-9A-Za-z]{2,4}$'), '');
@@ -294,6 +308,9 @@ class WebDavService {
           ' ',
         )
         .trim();
+    if (title.isEmpty && bracket != null && bracket.trim().isNotEmpty) {
+      title = bracket.trim();
+    }
     return title.isEmpty ? fileName : title;
   }
 }

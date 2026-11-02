@@ -760,10 +760,6 @@ class MediaLibrary extends ChangeNotifier {
     return '连接失败：$text';
   }
 
-  /// 把扫描出的文件聚合成展示条目。
-  ///
-  /// 规则：**按文件夹聚合**——同一目录下带集数标记的文件（S01E13/E13/第13集）
-  /// 合并为一条剧集条目并统计集数；无集数标记的按单文件展示（电影）。
   static List<ScannedVideo> aggregate(List<ScannedVideo> videos) {
     final byFolder = <String, List<ScannedVideo>>{};
     for (final video in videos) {
@@ -776,34 +772,52 @@ class MediaLibrary extends ChangeNotifier {
     for (final entry in byFolder.entries) {
       final group = entry.value
         ..sort((a, b) => _naturalCompare(a.path, b.path));
-      if (group.length < 2 || !_isSeriesGroup(group)) {
+      final folderTitle = _seriesTitle(entry.key, group);
+
+      // 无有效目录名（文件直接放在电影/网盘等通用或根目录下）：
+      // 各文件独立，标题保持文件名
+      if (folderTitle == null || folderTitle.isEmpty) {
         result.addAll(group);
         continue;
       }
-      // 剧名优先用 TMDB 官方名（导入后可用），回退目录名推导
-      final tmdbTitle = group
-          .firstWhere(
-            (video) => (video.tmdbTitle ?? '').isNotEmpty,
-            orElse: () => group.first,
-          )
-          .tmdbTitle;
-      final title = (tmdbTitle != null && tmdbTitle.isNotEmpty)
-          ? tmdbTitle
-          : _seriesTitle(entry.key, group);
-      // 电影目录下的剧集修正为电视剧；动漫/综艺保持原分类
-      final kind = group.first.kind == MediaKind.movie
-          ? MediaKind.series
-          : group.first.kind;
+
+      // 目录名有效：标题一律取目录名（文件名常是压制信息，不可读）
+      final tmdbId = _tmdbIdFromPaths(group.map((video) => video.path));
       final posterSource = group.firstWhere(
         (video) => video.posterPath != null,
         orElse: () => group.first,
       );
-      final tmdbId = _tmdbIdFromPaths(group.map((video) => video.path));
+
+      // 剧集模式：同目录多文件带集数标记
+      if (_isSeriesGroup(group)) {
+        final kind = group.first.kind == MediaKind.movie
+            ? MediaKind.series
+            : group.first.kind;
+        result.add(
+          group.first.copyWith(
+            title: folderTitle,
+            kind: kind,
+            episodeCount: group.length,
+            posterPath: posterSource.posterPath,
+            summary: posterSource.summary,
+            rating: posterSource.rating,
+            tmdbId: tmdbId,
+          ),
+        );
+        continue;
+      }
+
+      // 单文件电影：标题取目录名
+      if (group.length == 1) {
+        result.add(group.first.copyWith(title: folderTitle, tmdbId: tmdbId));
+        continue;
+      }
+
+      // 同目录多文件但无集数标记：视为同一部影片的多版本，合并为一条电影
       result.add(
         group.first.copyWith(
-          title: title,
-          kind: kind,
-          episodeCount: group.length,
+          title: folderTitle,
+          episodeCount: 1,
           posterPath: posterSource.posterPath,
           summary: posterSource.summary,
           rating: posterSource.rating,
@@ -861,7 +875,8 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   /// 由所在目录推导剧名：跳过「电影」「1」（季号）这类无效目录，向上找真正的剧名。
-  static String _seriesTitle(String parentPath, List<ScannedVideo> group) {
+  /// 返回 null 表示没有有效目录名（如文件直接放在通用/根目录下）。
+  static String? _seriesTitle(String parentPath, List<ScannedVideo> group) {
     var path = parentPath;
     var segment = _lastSegment(path);
     var guard = 0;
@@ -879,7 +894,7 @@ class MediaLibrary extends ChangeNotifier {
       segment = nextSegment;
       guard++;
     }
-    return _commonPrefixTitle(group);
+    return null;
   }
 
   /// 文件夹名是否只是"电影/电视剧/动漫/综艺"这类通用名。
@@ -902,13 +917,6 @@ class MediaLibrary extends ChangeNotifier {
       'film',
     };
     return generic.contains(lower) || lower.length <= 1;
-  }
-
-  /// 从组内文件名推导公共前缀作为剧名（如 "Signal.S01E01" → "Signal"）。
-  static String _commonPrefixTitle(List<ScannedVideo> group) {
-    if (group.isEmpty) return '';
-    final first = group.first.title;
-    return WebDavService.cleanTitle(first);
   }
 
   static String parentPathOf(String path) {

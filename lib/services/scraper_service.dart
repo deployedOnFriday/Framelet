@@ -232,6 +232,8 @@ class ScraperService {
         .where((s) => s.isNotEmpty)
         .toList();
     text = text.replaceAll(RegExp(r'[\[【][^\]】]*[\]】]'), ' ');
+    // 圆括号内容剥掉（(1994)/(加长版) 等），年份由独立 token 识别
+    text = text.replaceAll(RegExp(r'[（(][^）)]*[）)]'), ' ');
 
     final tokens = text
         .split(RegExp(r'[.\s_]+'))
@@ -240,7 +242,7 @@ class ScraperService {
         .toList();
 
     const junkPattern =
-        r'^(1080p|720p|2160p|4k|8k|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|dv|dolby|atmos|10bit|8bit|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10)$';
+        r'^(1080p|720p|2160p|4k|8k|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|dv|dolby|atmos|10bit|8bit|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|60fps|120fps|60帧|120帧|高码|高bitrate|hq|web)$';
     final junk = RegExp(junkPattern, caseSensitive: false);
     final episode = RegExp(
       r'^(s\d{1,2}(e\d{1,2})?|e\d{1,2}|ep\d{1,3}|\d{1,2}[集期])$',
