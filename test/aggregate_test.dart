@@ -154,6 +154,39 @@ void main() {
     test('第08集 解析为第 8 集', () {
       expect(MediaLibrary.episodeNumberOf('某剧.第08集'), 8);
     });
+
+    test('标题被洗掉集号时回退原始文件名', () {
+      final v = video('/剧/旋风少女/Whirlwind.Girl.E01.mp4', 'Whirlwind.Girl');
+      expect(MediaLibrary.episodeNumberOfVideo(v), 1);
+    });
+
+    test('标题自身带集号时优先用标题', () {
+      final v = video('/剧/某剧/第12集.mp4', '第12集');
+      expect(MediaLibrary.episodeNumberOfVideo(v), 12);
+    });
+  });
+
+  group('cleanTitle 集数标记保护', () {
+    test('E01 不再被当作扩展名剥掉', () {
+      expect(
+        WebDavService.cleanTitle('Whirlwind.Girl.E01.mp4'),
+        'Whirlwind.Girl.E01',
+      );
+    });
+
+    test('纯数字集号同样保留', () {
+      expect(WebDavService.cleanTitle('某剧.01.mp4'), '某剧.01');
+    });
+
+    test('双重扩展名仍会被剥掉', () {
+      expect(WebDavService.cleanTitle('流浪地球.mkv.torrent'), '流浪地球');
+    });
+
+    test('画质后缀仍会被清洗且不影响集数标记', () {
+      final title = WebDavService.cleanTitle('某剧.S01E01.1080p.WEB-DL.mkv');
+      expect(title, contains('S01E01'));
+      expect(title, isNot(contains('1080p')));
+    });
   });
 
   group('分类判定', () {
@@ -175,6 +208,36 @@ void main() {
       expect(
         WebDavService.resolveKind('进击的巨人.第03集', MediaKind.anime),
         MediaKind.anime,
+      );
+    });
+  });
+
+  group('剧名规范化（跨 TMDB ID 合并判据）', () {
+    test('尾部季号数字剥离', () {
+      expect(MediaLibrary.normalizeSeriesTitle('旋风少女2'), '旋风少女');
+      expect(MediaLibrary.normalizeSeriesTitle('旋风少女'), '旋风少女');
+    });
+
+    test('第X季/Season N 剥离', () {
+      expect(MediaLibrary.normalizeSeriesTitle('某剧第2季'), '某剧');
+      expect(MediaLibrary.normalizeSeriesTitle('某剧 Season 3'), '某剧');
+    });
+
+    test('季号+副标题归并到基名（魔幻手机2：傻妞归来 → 魔幻手机）', () {
+      expect(MediaLibrary.normalizeSeriesTitle('魔幻手机2：傻妞归来'), '魔幻手机');
+      expect(
+        MediaLibrary.normalizeSeriesTitle('魔幻手机2：傻妞归来') ==
+            MediaLibrary.normalizeSeriesTitle('魔幻手机'),
+        isTrue,
+      );
+    });
+
+    test('名字包含但无关的不误合并（秘密 vs 秘密森林）', () {
+      expect(MediaLibrary.normalizeSeriesTitle('秘密森林'), '秘密森林');
+      expect(
+        MediaLibrary.normalizeSeriesTitle('秘密森林') ==
+            MediaLibrary.normalizeSeriesTitle('秘密'),
+        isFalse,
       );
     });
   });

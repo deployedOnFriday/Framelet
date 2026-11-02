@@ -295,7 +295,14 @@ class WebDavService {
         .replaceAll('丨', '');
     final dot = fileName.lastIndexOf('.');
     var title = dot > 0 ? fileName.substring(0, dot) : fileName;
-    title = title.replaceAll(RegExp(r'\.[0-9A-Za-z]{2,4}$'), '');
+    // 去双重扩展名（Movie.mkv.torrent → Movie）。
+    // 但末尾 token 像集数标记（E01/EP01/纯数字）时必须保留：
+    // 旧版会把 Whirlwind.Girl.E01 的 ".E01" 当扩展名剥掉，
+    // 同目录所有文件的标题都退化成 "Whirlwind.Girl"，集号解析随之失效
+    final trailing = RegExp(r'\.([0-9A-Za-z]{2,4})$').firstMatch(title);
+    if (trailing != null && !_isEpisodeToken(trailing.group(1)!)) {
+      title = title.substring(0, trailing.start);
+    }
     title = title
         .replaceAll(RegExp(r'[-_～~\s]*(全集|完整版|全\d{1,3}集|完结)$'), '')
         .trim();
@@ -313,4 +320,9 @@ class WebDavService {
     }
     return title.isEmpty ? fileName : title;
   }
+
+  /// 末尾 token 是否像集数标记：E01、EP01、01、001、S01E01。
+  static bool _isEpisodeToken(String token) =>
+      RegExp(r'^([eE][pP]?\d{1,3}|[sS]\d{1,2}[eE]\d{1,3}|\d{1,4})$')
+          .hasMatch(token);
 }

@@ -238,7 +238,11 @@ void main(List<String> args) async {
 
     // 写回组内每个文件
     for (final member in group) {
-      final epNumber = _episodeNumber(member.title);
+      // 标题可能被 cleanTitle 洗掉集数标记（Whirlwind.Girl.E01 →
+      // Whirlwind.Girl），回退用原始文件名解析集号
+      final rawName = member.path.split('/').last;
+      final epNumber =
+          _episodeNumber(member.title) ?? _episodeNumber(rawName);
       resultOut[member.path] = {
         'posterPath': posterPath,
         'backdropPath': backdropPath,

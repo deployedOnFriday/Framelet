@@ -84,17 +84,16 @@ class MediaLibrary extends ChangeNotifier {
         if (video.kind != kind) continue;
         // 前端只展示已刮削的条目；未刮的收在设置页处理
         if (!video.isScraped) continue;
-        final key = video.tmdbId != null
-            ? 'tmdb|${video.tmdbId}'
-            : '${video.sourceId}|${video.title.toLowerCase()}';
+        final key = _seriesMergeKey(video);
         final existing = merged[key];
         if (existing == null) {
           merged[key] = video;
-        } else if (video.episodeCount > existing.episodeCount) {
-          // 同一部剧的多季：集数相加展示，剧名统一用 TMDB 官方名
+        } else {
+          // 同一部剧的多季：集数无条件相加（两季集数相同也要累加），
+          // 剧名统一用规范化基名（魔幻手机2：傻妞归来 → 魔幻手机）
           merged[key] = video.copyWith(
             episodeCount: existing.episodeCount + video.episodeCount,
-            title: (video.tmdbTitle ?? video.title),
+            title: normalizeSeriesTitle(video.tmdbTitle ?? video.title),
           );
         }
       }
@@ -107,18 +106,59 @@ class MediaLibrary extends ChangeNotifier {
     return list;
   }
 
-  /// 一部剧的每一季（跨文件夹）。单季剧集返回它自己。
+  /// 一部剧的每一季（跨文件夹、跨 TMDB ID）。单季剧集返回它自己。
+  ///
+  /// 判据与 byKind 合并一致：规范化剧名相同即同一部剧的不同季，
+  /// 因此《旋风少女》《旋风少女2》即使 TMDB 是两个条目也能归到一起。
   List<ScannedVideo> seasonsOf(ScannedVideo video) {
-    final tmdbId = video.tmdbId;
-    if (tmdbId == null) return [video];
+    final key = _seriesMergeKey(video);
     final seasons = <ScannedVideo>[];
     for (final videos in _videosBySource.values) {
       for (final item in aggregate(videos)) {
-        if (item.tmdbId == tmdbId) seasons.add(item);
+        if (_seriesMergeKey(item) == key) seasons.add(item);
       }
     }
     seasons.sort((a, b) => seasonOf(a).compareTo(seasonOf(b)));
     return seasons.isEmpty ? [video] : seasons;
+  }
+
+  /// 合并键：电影按 TMDB ID；剧集按「规范化剧名」——
+  /// 剥掉季号后同名视为同一部剧，跨 TMDB ID 也能合并展示。
+  static String _seriesMergeKey(ScannedVideo video) {
+    if (video.kind != MediaKind.movie) {
+      final normalized = normalizeSeriesTitle(video.title);
+      if (normalized.isNotEmpty) {
+        return 'series|${normalized.toLowerCase()}';
+      }
+    }
+    return video.tmdbId != null
+        ? 'tmdb|${video.tmdbId}'
+        : '${video.sourceId}|${video.title.toLowerCase()}';
+  }
+
+  /// 规范化剧名：剥掉季号/年份等后缀，用于判断是否同一部剧。
+  ///
+  /// 支持「魔幻手机2：傻妞归来」这类「基名+季号+副标题」——
+  /// 数字后必须紧跟副标题分隔符才剥离，避免把《秘密森林》并进《秘密》。
+  static String normalizeSeriesTitle(String title) {
+    var text = title.trim();
+    final withSubtitle = RegExp(r'^(.*?)\s*\d{1,2}\s*[：:·\-（(].+$')
+        .firstMatch(text);
+    if (withSubtitle != null) {
+      final base = withSubtitle.group(1)!.trim();
+      if (base.isNotEmpty) text = base;
+    }
+    text = text.replaceAll(RegExp(r'\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$'), '');
+    text = text.replaceAll(
+      RegExp(r'\s*season\s*\d+\s*$', caseSensitive: false),
+      '',
+    );
+    text = text.replaceAll(RegExp(r'\s*[sS]\d{1,2}\s*$'), '');
+    // 尾部季号数字（旋风少女2 → 旋风少女），数字前不限字符
+    text = text.replaceAll(RegExp(r'\d{1,2}\s*$'), '');
+    text = text.replaceAll(RegExp(r'[\s:：·\-]+$'), '');
+    text = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return text;
   }
 
   int countByKind(MediaKind kind) => byKind(kind).length;
@@ -202,6 +242,14 @@ class MediaLibrary extends ChangeNotifier {
     ).firstMatch(title);
     return int.tryParse(plain?.group(1) ?? '');
   }
+
+  /// 解析单集编号：优先清洗后的标题，失败回退原始文件名。
+  ///
+  /// 旧缓存的标题可能被旧版 cleanTitle 洗掉集数标记
+  /// （Whirlwind.Girl.E01.mp4 → Whirlwind.Girl），原始文件名保底，
+  /// 这样不重扫媒体源也能把集标题/剧照对回文件。
+  static int? episodeNumberOfVideo(ScannedVideo video) =>
+      episodeNumberOf(video.title) ?? episodeNumberOf(_lastSegment(video.path));
 
   bool get hasAnyContent =>
       _videosBySource.values.any((videos) => videos.isNotEmpty);
@@ -493,18 +541,63 @@ class MediaLibrary extends ChangeNotifier {
         notifyListeners();
 
         final parsed = ScraperService.parseTitle(job.representative.title);
-        ScrapeResult? result;
-        // 优先 TMDB（中文片名与电影覆盖最好），失败回退 TVmaze
         final preferTv =
             job.group.length > 1 || job.representative.kind != MediaKind.movie;
-        for (final query in parsed.queries) {
-          result = await ScraperService.searchTmdb(
-            query,
-            year: parsed.year,
-            preferTv: preferTv,
+        final seasonNumber = seasonOf(job.representative);
+
+        // 候选评估：拉详情 + 目标季集数据，满足要求才算命中。
+        // TMDB 上存在残缺的重复条目（如「旋风少女2」只登记了 1 季 1 集，
+        // 而主条目「旋风少女」自带两季）——精确同名反而先命中它们，
+        // 表现为多季拆成多个条目、整季集标题与剧照拉空。
+        // 剧集因此要求目标季能拉到集数据；拉不到只记为保底候选，
+        // 由外层换下一个查询词（通常是剥掉季号的主名）重试。
+        ScrapeResult? best;
+        ScrapeResult? firstUsable;
+        var episodeInfos = const <int, ({String? title, String? stillUrl})>{};
+
+        Future<void> consider(int tmdbId, String mediaType) async {
+          _scrapeLog('  拉取详情 tmdbId=$tmdbId');
+          final details = await ScraperService.fetchTmdbDetails(
+            mediaType: mediaType,
+            id: tmdbId,
           );
-          if (result != null) break;
+          if (details == null) return;
+          firstUsable ??= details;
+          if (best != null) return;
+          if (details.mediaType == 'tv') {
+            _scrapeLog('  拉取季剧照 season=$seasonNumber');
+            final episodes = await ScraperService.fetchEpisodeStills(
+              tvId: details.tmdbId ?? tmdbId,
+              seasonNumber: seasonNumber,
+            );
+            if (isSeriesJob && episodes.isEmpty) return;
+            episodeInfos = episodes;
+          }
+          best = details;
         }
+
+        // 1) 既有匹配优先复用（路径 {tmdbid-NNN} 或上次刮削的 tmdbId），
+        //    重扫时海报与条目保持稳定
+        final cachedId = job.representative.tmdbId;
+        if (cachedId != null) {
+          _scrapeLog('  复用既有 tmdbId=$cachedId');
+          await consider(cachedId, isSeriesJob ? 'tv' : 'movie');
+        }
+        // 2) TMDB 搜索（中文片名与电影覆盖最好），逐个查询词尝试
+        if (best == null) {
+          for (final query in parsed.queries) {
+            final hit = await ScraperService.searchTmdb(
+              query,
+              year: parsed.year,
+              preferTv: preferTv,
+            );
+            if (hit?.tmdbId == null) continue;
+            await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
+            if (best != null) break;
+          }
+        }
+        // 3) TVmaze 兜底（无 TMDB Key 或 TMDB 不可达）
+        var result = best ?? firstUsable;
         if (result == null) {
           for (final query in parsed.queries) {
             result = await ScraperService.search(query, year: parsed.year);
@@ -512,40 +605,9 @@ class MediaLibrary extends ChangeNotifier {
           }
         }
 
-        final matchedResult = result;
-        final matchedId = job.representative.tmdbId ?? matchedResult?.tmdbId;
-        if (matchedId != null && matchedResult == null) {
-          // 路径自带 {tmdbid-NNN}：免搜索直取详情
-          _scrapeLog('  路径自带 tmdbid=$matchedId，免搜索直取详情');
-          final details = await ScraperService.fetchTmdbDetails(
-            mediaType: isSeriesJob ? 'tv' : 'movie',
-            id: matchedId,
-          );
-          result = details;
-        }
-        if (matchedResult != null && matchedId != null) {
-          _scrapeLog('  拉取详情 tmdbId=$matchedId');
-          final details = await ScraperService.fetchTmdbDetails(
-            mediaType: matchedResult.mediaType ?? 'movie',
-            id: matchedId,
-          );
-          result = details ?? result;
-        }
-
         final scrapedBackdrop = result == null
             ? null
             : await _downloadBackdrop(result);
-        final seasonNumber = seasonOf(job.representative);
-        final episodeInfos = <int, ({String? title, String? stillUrl})>{};
-        if (result?.mediaType == 'tv' && result?.tmdbId != null) {
-          _scrapeLog('  拉取季剧照 season=$seasonNumber');
-          episodeInfos.addAll(
-            await ScraperService.fetchEpisodeStills(
-              tvId: result!.tmdbId!,
-              seasonNumber: seasonNumber,
-            ),
-          );
-        }
         final episodeStillPaths = <int, String>{};
         for (final entry in episodeInfos.entries) {
           final stillUrl = entry.value.stillUrl;
@@ -568,7 +630,7 @@ class MediaLibrary extends ChangeNotifier {
               result.summary != null ||
               result.rating != null) {
             for (final member in job.group) {
-              final episodeNumber = episodeNumberOf(member.title);
+              final episodeNumber = episodeNumberOfVideo(member);
               _updateVideo(
                 member.sourceId,
                 member.path,
@@ -741,7 +803,7 @@ class MediaLibrary extends ChangeNotifier {
       );
     }
     for (final member in group) {
-      final episodeNumber = episodeNumberOf(member.title);
+      final episodeNumber = episodeNumberOfVideo(member);
       _updateVideo(
         member.sourceId,
         member.path,
