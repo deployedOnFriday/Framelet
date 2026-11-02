@@ -1242,9 +1242,10 @@ class _MediaInfoDialogState extends State<_MediaInfoDialog> {
   }
 
   /// mpv 即时码率是 "2498312.000000" 这类浮点字符串，必须 double 解析。
+  /// 不可用时 mpv 会返回 "nan"，必须过滤掉，否则会显示成 "NaN Mbps"。
   String? _formatBitrate(String? raw) {
     final bps = double.tryParse((raw ?? '').trim());
-    if (bps == null || bps <= 0) return null;
+    if (bps == null || !bps.isFinite || bps <= 0) return null;
     return _prettyBitrate(bps);
   }
 
