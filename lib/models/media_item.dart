@@ -13,6 +13,7 @@ class MediaItem {
     this.description = '',
     this.payload,
     this.posterPath,
+    this.backdropPath,
   });
 
   final String title;
@@ -27,6 +28,9 @@ class MediaItem {
 
   /// 刮削得到的本地海报文件路径；为空时使用渐变封面。
   final String? posterPath;
+
+  /// 宽幅背景图（Banner 轮播用），缺失时回退 posterPath。
+  final String? backdropPath;
 
   /// 任意关联数据：真实媒体条目时是 ScannedVideo，播放历史时是 HistoryEntry。
   final Object? payload;

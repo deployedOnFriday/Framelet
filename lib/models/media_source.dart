@@ -249,6 +249,7 @@ MediaItem? toMediaItem(ScannedVideo video) {
     description: video.path,
     payload: video,
     posterPath: video.posterPath,
+    backdropPath: video.backdropPath,
   );
 }
 

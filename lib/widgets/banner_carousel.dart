@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../core/theme/app_theme.dart';
@@ -89,6 +91,8 @@ class _BannerSlide extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final image = item.backdropPath ?? item.posterPath;
+    final hasImage = image != null && File(image).existsSync();
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -100,6 +104,29 @@ class _BannerSlide extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
+          // 真实影视作品：背景大图（backdrop），无图时用渐变兜底
+          if (hasImage) ...[
+            Positioned.fill(
+              child: ClipRect(
+                child: Image.file(
+                  File(image),
+                  fit: BoxFit.cover,
+                  alignment: Alignment.centerRight,
+                ),
+              ),
+            ),
+            const Positioned.fill(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                    colors: [Color(0xF21A1A2E), Color(0x661A1A2E)],
+                  ),
+                ),
+              ),
+            ),
+          ],
           Positioned(
             right: -40,
             top: -100,

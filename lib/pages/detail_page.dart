@@ -166,6 +166,7 @@ class _HeroSection extends StatelessWidget {
                     builder: (_) => PlayerPage(
                       video: currentEpisode,
                       startPosition: resume ? entry.positionSec : null,
+                      episodes: episodes,
                     ),
                   ),
                 );
@@ -608,8 +609,11 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
               scrollDirection: Axis.horizontal,
               itemCount: shown.length,
               separatorBuilder: (_, _) => const SizedBox(width: 16),
-              itemBuilder: (context, index) =>
-                  _EpisodeCard(episode: shown[index], index: index),
+              itemBuilder: (context, index) => _EpisodeCard(
+                episode: shown[index],
+                index: index,
+                playlist: shown,
+              ),
             ),
           ),
           if (extras.isNotEmpty) ...[
@@ -644,6 +648,7 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
                 separatorBuilder: (_, _) => const SizedBox(width: 12),
                 itemBuilder: (context, index) => _ExtraCard(
                   episode: extras[index],
+                  playlist: shown,
                   posterPath: widget.posterPath,
                 ),
               ),
@@ -730,10 +735,17 @@ class _CircleArrow extends StatelessWidget {
 }
 
 class _EpisodeCard extends StatelessWidget {
-  const _EpisodeCard({required this.episode, required this.index});
+  const _EpisodeCard({
+    required this.episode,
+    required this.index,
+    required this.playlist,
+  });
 
   final ScannedVideo episode;
   final int index;
+
+  /// 本季所有正片（播放器内选集用）。
+  final List<ScannedVideo> playlist;
 
   Widget get _placeholder => DecoratedBox(
     decoration: const BoxDecoration(
@@ -837,6 +849,7 @@ class _EpisodeCard extends StatelessWidget {
         builder: (_) => PlayerPage(
           video: episode,
           startPosition: resume ? entry.positionSec : null,
+          episodes: playlist,
         ),
       ),
     );
@@ -979,9 +992,16 @@ class _FileInfo extends StatelessWidget {
 
 /// 花絮/相关视频小卡片（较小，无集号）。
 class _ExtraCard extends StatelessWidget {
-  const _ExtraCard({required this.episode, this.posterPath});
+  const _ExtraCard({
+    required this.episode,
+    required this.playlist,
+    this.posterPath,
+  });
 
   final ScannedVideo episode;
+
+  /// 本季所有正片（播放器内选集用）。
+  final List<ScannedVideo> playlist;
 
   /// 花絮没有独立缩略图，用剧集海报兜底。
   final String? posterPath;
@@ -1001,6 +1021,7 @@ class _ExtraCard extends StatelessWidget {
             builder: (_) => PlayerPage(
               video: episode,
               startPosition: resume ? entry.positionSec : null,
+              episodes: playlist,
             ),
           ),
         );

@@ -53,7 +53,9 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _carouselTimer = Timer.periodic(const Duration(seconds: 7), (_) {
       if (!mounted || !_bannerController.hasClients) return;
-      final next = (_bannerIndex + 1) % DemoData.featured.length;
+      final items = _bannerItems();
+      if (items.isEmpty) return;
+      final next = (_bannerIndex + 1) % items.length;
       _bannerController.animateToPage(
         next,
         duration: const Duration(milliseconds: 450),
@@ -94,7 +96,7 @@ class _HomePageState extends State<HomePage> {
                 ),
                 const SizedBox(height: 22),
                 BannerCarousel(
-                  items: DemoData.featured,
+                  items: _bannerItems(),
                   controller: _bannerController,
                   index: _bannerIndex,
                   onPageChanged: (index) =>
@@ -141,6 +143,23 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 真实扫描数据优先；为空时回退演示内容。
+  /// 首页轮播：优先展示媒体库中评分高的条目，无内容时回退演示数据。
+  List<MediaItem> _bannerItems() {
+    final library = MediaLibrary.instance;
+    if (!library.hasAnyContent) return DemoData.featured;
+    final all = <MediaItem>[];
+    for (final kind in MediaKind.values) {
+      all.addAll(_sectionItems(kind, const []));
+    }
+    all.sort((a, b) {
+      final ra = double.tryParse(a.rating ?? '') ?? 0;
+      final rb = double.tryParse(b.rating ?? '') ?? 0;
+      return rb.compareTo(ra);
+    });
+    if (all.isEmpty) return DemoData.featured;
+    return all.take(6).toList();
+  }
+
   List<MediaItem> _sectionItems(MediaKind kind, List<MediaItem> fallback) {
     final library = MediaLibrary.instance;
     final scanned = library.byKind(kind);

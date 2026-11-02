@@ -12,10 +12,18 @@ import '../services/webdav_service.dart';
 
 /// 沉浸式播放页：media_kit 硬件解码 + WebDAV Basic 认证流。
 class PlayerPage extends StatefulWidget {
-  const PlayerPage({required this.video, this.startPosition, super.key});
+  const PlayerPage({
+    required this.video,
+    this.startPosition,
+    this.episodes,
+    super.key,
+  });
 
   final ScannedVideo video;
   final double? startPosition;
+
+  /// 同一部剧的集列表（含当前集），为空时只播当前这一个。
+  final List<ScannedVideo>? episodes;
 
   @override
   State<PlayerPage> createState() => _PlayerPageState();
@@ -33,6 +41,18 @@ class _PlayerPageState extends State<PlayerPage> {
   double _durationSec = 0;
   String? _errorMessage;
   String? _probeResult;
+
+  /// 当前播放的条目（可切集）
+  late ScannedVideo _current = widget.video;
+  double _speed = 1.0;
+  static const _speedOptions = [0.75, 1.0, 1.25, 1.5, 2.0];
+
+  List<ScannedVideo> get _playlist => widget.episodes ?? const [];
+
+  int get _currentIndex {
+    final index = _playlist.indexWhere((v) => v.path == _current.path);
+    return index < 0 ? 0 : index;
+  }
 
   @override
   void initState() {
@@ -65,10 +85,103 @@ class _PlayerPageState extends State<PlayerPage> {
     _open();
   }
 
+  /// 切换到另一集：重置状态并重新打开。
+  Future<void> _switchTo(ScannedVideo video) async {
+    if (video.path == _current.path) return;
+    await _saveProgress();
+    _saved = false;
+    _seekedToStart = false;
+    setState(() {
+      _current = video;
+      _positionSec = 0;
+      _durationSec = 0;
+      _errorMessage = null;
+      _probeResult = null;
+    });
+    _debugLog('切换剧集: ${video.title}');
+    await _open();
+    await _player.setRate(_speed);
+  }
+
+  /// 循环切换倍速。
+  Future<void> _cycleSpeed() async {
+    final index = _speedOptions.indexOf(_speed);
+    final next = _speedOptions[(index + 1) % _speedOptions.length];
+    setState(() => _speed = next);
+    await _player.setRate(next);
+  }
+
+  /// 选集面板：列出本剧所有集，点击切换。
+  Future<void> _showEpisodePicker() async {
+    final picked = await showModalBottomSheet<ScannedVideo>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      isScrollControlled: true,
+      builder: (context) {
+        return SafeArea(
+          child: SizedBox(
+            height: MediaQuery.of(context).size.height * 0.55,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
+                  child: Text(
+                    '选集（共 ${_playlist.length} 集）',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: ListView.builder(
+                    itemCount: _playlist.length,
+                    itemBuilder: (context, index) {
+                      final episode = _playlist[index];
+                      final selected = episode.path == _current.path;
+                      return ListTile(
+                        dense: true,
+                        onTap: () => Navigator.of(context).pop(episode),
+                        leading: Icon(
+                          selected
+                              ? Icons.play_circle_fill_rounded
+                              : Icons.play_circle_outline_rounded,
+                          size: 20,
+                          color: selected
+                              ? const Color(0xFF2B65FF)
+                              : Colors.white38,
+                        ),
+                        title: Text(
+                          episode.episodeTitle != null &&
+                                  episode.episodeTitle!.isNotEmpty
+                              ? '第 ${index + 1} 集 · ${episode.episodeTitle}'
+                              : '第 ${index + 1} 集',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: selected ? Colors.white : Colors.white70,
+                            fontSize: 13,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (picked != null) await _switchTo(picked);
+  }
+
   Future<void> _open() async {
     final library = MediaLibrary.instance;
-    final source = library.sourceById(widget.video.sourceId);
-    final password = library.passwordOf(widget.video.sourceId);
+    final source = library.sourceById(_current.sourceId);
+    final password = library.passwordOf(_current.sourceId);
     if (source == null || password == null) {
       if (mounted) {
         ScaffoldMessenger.of(context)
@@ -80,11 +193,11 @@ class _PlayerPageState extends State<PlayerPage> {
     }
     final playTarget = await WebDavService.resolvePlayUrl(
       source,
-      widget.video.path,
+      _current.path,
     );
     final url = playTarget.url;
     _debugLog('播放地址: $url');
-    _debugLog('源文件路径: ${widget.video.path}');
+    _debugLog('源文件路径: ${_current.path}');
     final auth = WebDavService.authHeader(source.username, password);
     _probe(url, auth);
 
@@ -172,9 +285,9 @@ class _PlayerPageState extends State<PlayerPage> {
     if (_positionSec <= 1 || _durationSec <= 0) return;
     await PlaybackHistory.instance.record(
       HistoryEntry(
-        sourceId: widget.video.sourceId,
-        path: widget.video.path,
-        title: widget.video.title,
+        sourceId: _current.sourceId,
+        path: _current.path,
+        title: _current.title,
         kind: widget.video.kind,
         positionSec: _positionSec,
         durationSec: _durationSec,
@@ -311,7 +424,7 @@ class _PlayerPageState extends State<PlayerPage> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        widget.video.title,
+                        _current.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -324,6 +437,18 @@ class _PlayerPageState extends State<PlayerPage> {
                         ),
                       ),
                     ),
+                    _TopChip(
+                      label:
+                          '${_speed == _speed.truncateToDouble() ? _speed.toInt() : _speed}x',
+                      onTap: _cycleSpeed,
+                    ),
+                    if (_playlist.length > 1) ...[
+                      const SizedBox(width: 8),
+                      _TopChip(
+                        label: '选集 ${_currentIndex + 1}/${_playlist.length}',
+                        onTap: _showEpisodePicker,
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -369,5 +494,35 @@ void _debugLog(String message) {
     );
   } catch (_) {
     // 日志失败不影响播放
+  }
+}
+
+/// 播放器顶部小胶囊按钮（倍速/选集）。
+class _TopChip extends StatelessWidget {
+  const _TopChip({required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+        decoration: BoxDecoration(
+          color: Colors.white.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
   }
 }
