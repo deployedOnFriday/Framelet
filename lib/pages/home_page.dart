@@ -85,7 +85,13 @@ class _HomePageState extends State<HomePage> {
             padding: const EdgeInsets.fromLTRB(28, 24, 28, 40),
             sliver: SliverList(
               delegate: SliverChildListDelegate([
-                _buildSearch(),
+                Row(
+                  children: [
+                    Expanded(child: _buildSearch()),
+                    const SizedBox(width: 12),
+                    _buildSyncButton(),
+                  ],
+                ),
                 const SizedBox(height: 22),
                 BannerCarousel(
                   items: DemoData.featured,
@@ -170,38 +176,42 @@ class _HomePageState extends State<HomePage> {
             color: AppColors.primary,
           ),
           const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              '媒体库已同步 · 共 ${library.sources.length} 个媒体源、$total 个视频文件',
-              style: const TextStyle(color: AppColors.primary, fontSize: 13),
-            ),
+          Text(
+            '媒体库已同步 · 共 ${library.sources.length} 个媒体源、$total 个视频文件',
+            style: const TextStyle(color: AppColors.primary, fontSize: 13),
           ),
-          if (_syncing)
-            const Padding(
-              padding: EdgeInsets.only(right: 6),
-              child: SizedBox(
-                width: 16,
-                height: 16,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSyncButton() {
+    return SizedBox(
+      height: 46,
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(color: AppColors.border),
+        ),
+        child: IconButton(
+          onPressed: _syncing ? null : _syncNow,
+          tooltip: '同步媒体库并刮削',
+          icon: _syncing
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: AppColors.primary,
+                  ),
+                )
+              : const Icon(
+                  Icons.sync_rounded,
+                  size: 20,
                   color: AppColors.primary,
                 ),
-              ),
-            )
-          else
-            IconButton(
-              onPressed: _syncNow,
-              visualDensity: VisualDensity.compact,
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(),
-              tooltip: '同步媒体库并刮削',
-              icon: const Icon(
-                Icons.sync_rounded,
-                size: 19,
-                color: AppColors.primary,
-              ),
-            ),
-        ],
+        ),
       ),
     );
   }
