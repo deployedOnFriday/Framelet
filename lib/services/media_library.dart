@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
@@ -386,6 +387,18 @@ class MediaLibrary extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 刮削过程文件日志：进程崩溃时也能看到死前最后一步。
+  static void _scrapeLog(String message) {
+    try {
+      File('${Directory.systemTemp.path}/framelet_scrape.log')
+          .writeAsStringSync(
+            '${DateTime.now().toIso8601String().substring(11, 19)} $message\n',
+            mode: FileMode.append,
+            flush: true,
+          );
+    } catch (_) {}
+  }
+
   /// 批量刮削：为所有条目匹配海报、简介与评分。
   ///
   /// 默认跳过已有海报的条目；force 为 true 时重新匹配并覆盖。
@@ -406,6 +419,7 @@ class MediaLibrary extends ChangeNotifier {
         return;
       }
 
+      _scrapeLog('共 $scrapeTotal 个任务开始');
       for (final job in jobs) {
         final target = job.group.firstWhere(
           (v) => v.posterPath != null,
@@ -427,6 +441,9 @@ class MediaLibrary extends ChangeNotifier {
         }
 
         scrapeProgress = '正在匹配「${job.representative.title}」…';
+        _scrapeLog(
+          '任务 $scrapeDone+: ${job.representative.title}（${job.group.length} 集）',
+        );
         notifyListeners();
 
         final parsed = ScraperService.parseTitle(job.representative.title);
@@ -452,6 +469,7 @@ class MediaLibrary extends ChangeNotifier {
         final matchedResult = result;
         final matchedId = matchedResult?.tmdbId;
         if (matchedResult != null && matchedId != null) {
+          _scrapeLog('  拉取详情 tmdbId=$matchedId');
           final details = await ScraperService.fetchTmdbDetails(
             mediaType: matchedResult.mediaType ?? 'movie',
             id: matchedId,
@@ -465,6 +483,7 @@ class MediaLibrary extends ChangeNotifier {
         final seasonNumber = seasonOf(job.representative);
         final episodeInfos = <int, ({String? title, String? stillUrl})>{};
         if (result?.mediaType == 'tv' && result?.tmdbId != null) {
+          _scrapeLog('  拉取季剧照 season=$seasonNumber');
           episodeInfos.addAll(
             await ScraperService.fetchEpisodeStills(
               tvId: result!.tmdbId!,
@@ -518,6 +537,7 @@ class MediaLibrary extends ChangeNotifier {
         }
 
         scrapeDone++;
+        _scrapeLog('  完成 $scrapeDone/$scrapeTotal');
         scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal';
         notifyListeners();
       }
@@ -568,6 +588,35 @@ class MediaLibrary extends ChangeNotifier {
       if (item.path == video.path) return item;
     }
     return video;
+  }
+
+  /// 导入 CLI 后台补刮的结果（path → 各字段），并持久化。
+  Future<int> importScrapeResults(
+    Map<String, Map<String, Object?>> results,
+  ) async {
+    var updated = 0;
+    for (final entry in _videosBySource.entries) {
+      final videos = entry.value;
+      var changed = false;
+      for (var i = 0; i < videos.length; i++) {
+        final data = results[videos[i].path];
+        if (data == null) continue;
+        videos[i] = videos[i].copyWith(
+          posterPath: data['posterPath'] as String?,
+          backdropPath: data['backdropPath'] as String?,
+          summary: data['summary'] as String?,
+          rating: data['rating'] as String?,
+          tmdbId: (data['tmdbId'] as num?)?.toInt(),
+          stillPath: data['stillPath'] as String?,
+          episodeTitle: data['episodeTitle'] as String?,
+        );
+        changed = true;
+        updated++;
+      }
+      if (changed) await _persistVideos(entry.key);
+    }
+    notifyListeners();
+    return updated;
   }
 
   /// 手动匹配：把用户选中的候选应用到这一组（剧集整组共享同一张海报）。

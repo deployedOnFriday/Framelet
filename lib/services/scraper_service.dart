@@ -1,8 +1,8 @@
+import '../models/cast_member.dart';
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-
-import '../models/media_source.dart';
 
 /// 刮削结果：海报地址、简介与评分。
 class ScrapeResult {

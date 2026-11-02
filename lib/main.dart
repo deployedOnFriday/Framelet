@@ -28,6 +28,35 @@ void main() async {
   if (Platform.environment['FRAMELET_DUMP'] == '1') {
     _dumpLibrary();
   }
+  // 诊断：FRAMELET_IMPORT=1 时导入 CLI 后台补刮的结果
+  if (Platform.environment['FRAMELET_IMPORT'] == '1') {
+    Future(() async {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      final file = File(
+        '${Directory.systemTemp.path}/framelet_scrape_result.json',
+      );
+      if (!file.existsSync()) {
+        debugPrint('[Import] 无补刮结果文件');
+        return;
+      }
+      final raw = jsonDecode(file.readAsStringSync()) as Map<String, Object?>;
+      final count = await MediaLibrary.instance.importScrapeResults(
+        raw.map((k, v) => MapEntry(k, v as Map<String, Object?>)),
+      );
+      debugPrint('[Import] 已导入 $count 条');
+      _dumpLibrary();
+    });
+  }
+  // 诊断：FRAMELET_SCRAPE=1 时启动后自动刮削并导出结果（脚本化补刮）
+  if (Platform.environment['FRAMELET_SCRAPE'] == '1') {
+    Future(() async {
+      await Future<void>.delayed(const Duration(seconds: 4));
+      debugPrint('[Scrape] 自动刮削开始');
+      await MediaLibrary.instance.scrapeAll();
+      debugPrint('[Scrape] 自动刮削结束: ${MediaLibrary.instance.scrapeProgress}');
+      _dumpLibrary();
+    });
+  }
   runApp(const FrameletApp());
 }
 

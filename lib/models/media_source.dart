@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+export 'cast_member.dart';
+import 'cast_member.dart';
 import 'media_item.dart';
 
 class MediaSource {
@@ -68,26 +70,6 @@ class MediaSource {
 }
 
 /// 演员信息：TMDB credits 数据的最小化展示模型。
-class CastMember {
-  const CastMember({required this.name, required this.role, this.photoUrl});
-
-  final String name;
-  final String role;
-  final String? photoUrl;
-
-  Map<String, Object?> toJson() => {
-    'name': name,
-    'role': role,
-    'photoUrl': photoUrl,
-  };
-
-  factory CastMember.fromJson(Map<String, Object?> json) => CastMember(
-    name: json['name']! as String,
-    role: json['role'] as String? ?? '',
-    photoUrl: json['photoUrl'] as String?,
-  );
-}
-
 /// 视频文件分类，与左侧导航一一对应。
 enum MediaKind { movie, series, anime, variety }
 
