@@ -915,6 +915,17 @@ class MediaLibrary extends ChangeNotifier {
       'series',
       'anime',
       'film',
+      '夸克网盘',
+      '阿里云盘',
+      '百度网盘',
+      '蓝奏云',
+      '天翼云盘',
+      '123云盘',
+      'dav',
+      'webdav',
+      'media',
+      'videos',
+      'downloads',
     };
     return generic.contains(lower) || lower.length <= 1;
   }
