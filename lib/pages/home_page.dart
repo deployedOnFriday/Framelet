@@ -39,6 +39,9 @@ class _HomePageState extends State<HomePage> {
     try {
       final count = await MediaLibrary.instance.syncAll();
       if (!mounted) return;
+      // 媒体库有变化，下次进入首页重新随机轮播
+      _bannerCache = null;
+      setState(() {});
       _showMessage(count > 0 ? '已同步 $count 个媒体源' : '没有已连接的媒体源');
     } finally {
       if (mounted) setState(() => _syncing = false);
@@ -143,21 +146,24 @@ class _HomePageState extends State<HomePage> {
   }
 
   /// 真实扫描数据优先；为空时回退演示内容。
-  /// 首页轮播：优先展示媒体库中评分高的条目，无内容时回退演示数据。
+  /// 轮播缓存：启动/同步后随机挑选一次，避免每次重建都变。
+  List<MediaItem>? _bannerCache;
+
+  /// 首页轮播：从媒体库随机挑选 6 个条目，无内容时回退演示数据。
   List<MediaItem> _bannerItems() {
+    final cached = _bannerCache;
+    if (cached != null) return cached;
     final library = MediaLibrary.instance;
-    if (!library.hasAnyContent) return DemoData.featured;
+    if (!library.hasAnyContent) {
+      return _bannerCache = DemoData.featured;
+    }
     final all = <MediaItem>[];
     for (final kind in MediaKind.values) {
       all.addAll(_sectionItems(kind, const []));
     }
-    all.sort((a, b) {
-      final ra = double.tryParse(a.rating ?? '') ?? 0;
-      final rb = double.tryParse(b.rating ?? '') ?? 0;
-      return rb.compareTo(ra);
-    });
-    if (all.isEmpty) return DemoData.featured;
-    return all.take(6).toList();
+    if (all.isEmpty) return _bannerCache = DemoData.featured;
+    all.shuffle();
+    return _bannerCache = all.take(6).toList();
   }
 
   List<MediaItem> _sectionItems(MediaKind kind, List<MediaItem> fallback) {
