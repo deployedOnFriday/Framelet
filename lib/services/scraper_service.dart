@@ -618,39 +618,67 @@ class ScraperService {
     bool image = false,
   }) async {
     await _ensureIpPool();
-    final candidates = _candidateIps(host);
-    if (candidates.isEmpty) return null;
     _lastHttpStatus = 0;
+    final candidates = _candidateIps(host);
+    final result = candidates.isEmpty
+        ? null
+        : await _sniTryIps(
+            host,
+            candidates,
+            pathAndQuery,
+            maxBytes: maxBytes,
+            image: image,
+          );
+    if (result != null) return _acceptSniResult(host, result);
 
-    for (var offset = 0; offset < candidates.length; offset += 4) {
-      final end = offset + 4 > candidates.length
-          ? candidates.length
-          : offset + 4;
-      final batch = candidates.sublist(offset, end);
+    // 内置/缓存 IP 全部不可达时，用系统 DNS 解析结果再试一轮。
+    // 不同运营商可达的 CDN 节点不同，部分网络对 CDN 域名并无污染，
+    // 本机解析出的节点往往比过期的内置 IP 更可靠。
+    final dnsIps = (await _resolveDnsIps(host))
+        .where((ip) => !candidates.contains(ip))
+        .take(8)
+        .toList();
+    if (dnsIps.isEmpty) return null;
+    final dnsResult = await _sniTryIps(
+      host,
+      dnsIps,
+      pathAndQuery,
+      maxBytes: maxBytes,
+      image: image,
+    );
+    return dnsResult == null ? null : _acceptSniResult(host, dnsResult);
+  }
+
+  /// 分批竞速尝试一组 IP，命中即返回。
+  static Future<_SniAttempt?> _sniTryIps(
+    String host,
+    List<String> ips,
+    String pathAndQuery, {
+    required int maxBytes,
+    required bool image,
+  }) async {
+    for (var offset = 0; offset < ips.length; offset += 4) {
+      final end = offset + 4 > ips.length ? ips.length : offset + 4;
       final result = await _raceSni(
         host,
-        batch,
+        ips.sublist(offset, end),
         pathAndQuery,
         maxBytes: maxBytes,
         image: image,
       );
       if (result == null) continue;
-      if (result.bytes != null) {
-        _preferredIp[host] = result.ip;
-        _ipCooldown.remove(result.ip);
-        _lastHttpStatus = result.status ?? 200;
-        return result.bytes;
-      }
-      if (result.status != null) {
-        // 收到任何 HTTP 状态码都说明该节点可用；401/403/404 等
-        // 是内容层问题，换 IP 也不会变，直接返回让上层处理。
-        _preferredIp[host] = result.ip;
-        _ipCooldown.remove(result.ip);
-        _lastHttpStatus = result.status!;
-        return null;
-      }
+      if (result.bytes != null || result.status != null) return result;
     }
     return null;
+  }
+
+  /// 记录命中节点并返回响应；收到任何 HTTP 状态码都说明该节点可用，
+  /// 401/403/404 等是内容层问题，换 IP 也不会变，交上层处理。
+  static List<int>? _acceptSniResult(String host, _SniAttempt result) {
+    _preferredIp[host] = result.ip;
+    _ipCooldown.remove(result.ip);
+    _lastHttpStatus = result.status ?? 200;
+    return result.bytes;
   }
 
   static Future<_SniAttempt?> _raceSni(
@@ -1722,23 +1750,27 @@ class ScraperService {
     }
 
     await _throttle();
-    bytes = accept(
-      await _sniGetBytes(_imageCdnHost, path, maxBytes: maxBytes, image: true),
-      'Bunny CDN 直连',
-    );
-    if (bytes != null) return bytes;
-
-    bytes = accept(await _plainHttpImageViaIp(uri), 'HTTP 直连（免 DNS/SNI）');
-    if (bytes != null) return bytes;
-
+    // Bunny 域名的 DNS 解析在国内基本不被污染，普通 HTTPS 直连
+    // 是最快最稳的一条，放最前避免在 IP 竞速上空耗。
     bytes = accept(
       await _httpGetBytes(
         cdnUri,
         timeout: const Duration(seconds: 10),
         retries: 1,
       ),
-      'Bunny CDN HTTPS',
+      'Bunny CDN 直连',
     );
+    if (bytes != null) return bytes;
+
+    // 域名直连失败（DNS 被污染等）再用内置 IP + DNS 解析节点竞速。
+    await _throttle();
+    bytes = accept(
+      await _sniGetBytes(_imageCdnHost, path, maxBytes: maxBytes, image: true),
+      'Bunny CDN 节点直连',
+    );
+    if (bytes != null) return bytes;
+
+    bytes = accept(await _plainHttpImageViaIp(uri), 'HTTP 直连（免 DNS/SNI）');
     if (bytes != null) return bytes;
 
     await _throttle();
