@@ -54,7 +54,7 @@ void main() {
       if (await root.exists()) await root.delete(recursive: true);
     });
 
-    test('扫描电影、剧集和动漫并跳过花絮与隐藏文件', () async {
+    test('扫描电影、剧集和动漫，隐藏文件跳过、花絮保留入库', () async {
       Future<void> create(String relative, [String content = 'x']) async {
         final file = File('${root.path}${Platform.pathSeparator}$relative');
         await file.parent.create(recursive: true);
@@ -78,15 +78,22 @@ void main() {
       );
       final videos = await LocalMediaService.scan(source);
 
-      expect(videos, hasLength(5));
+      // 花絮（trailer.mp4）保留入库，详情页单独分区展示；
+      // 隐藏文件（.hidden.mp4）仍被跳过。
+      expect(videos, hasLength(6));
       expect(videos.every((video) => !video.path.contains(r'\')), isTrue);
+      expect(
+        videos.any((video) => video.path.contains('trailer.mp4')),
+        isTrue,
+      );
+      expect(videos.any((video) => video.path.contains('.hidden')), isFalse);
       expect(
         videos.where((video) => video.kind == MediaKind.movie),
         hasLength(1),
       );
       expect(
         videos.where((video) => video.kind == MediaKind.series),
-        hasLength(2),
+        hasLength(3),
       );
       expect(
         videos.where((video) => video.kind == MediaKind.anime),
