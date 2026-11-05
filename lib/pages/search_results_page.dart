@@ -4,66 +4,114 @@ import '../core/theme/app_theme.dart';
 import '../models/media_item.dart';
 import '../models/media_source.dart';
 import '../services/media_library.dart';
-import '../widgets/poster_card.dart';
+import '../widgets/poster_grid.dart';
 
-/// 全库搜索结果页。
+/// 搜索结果区：只占用右侧内容区域，搜索输入仍在展开的左侧栏里。
 class SearchResultsPage extends StatelessWidget {
   const SearchResultsPage({required this.query, super.key});
 
   final String query;
 
+  List<MediaItem> _results() {
+    final keyword = query.trim().toLowerCase();
+    if (keyword.isEmpty) return const [];
+    final library = MediaLibrary.instance;
+    final results = <MediaItem>[];
+    for (final kind in MediaKind.values) {
+      for (final video in library.byKind(kind)) {
+        if (!video.title.toLowerCase().contains(keyword)) continue;
+        final item = toMediaItem(video);
+        if (item != null) results.add(item);
+      }
+    }
+    return results;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final library = MediaLibrary.instance;
-    final keyword = query.toLowerCase();
-    final results = <MediaItem>[
-      for (final kind in MediaKind.values)
-        for (final video in library.byKind(kind))
-          if (video.title.toLowerCase().contains(keyword)) ?toMediaItem(video),
-    ];
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(30, 28, 30, 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('搜索「$query」', style: Theme.of(context).textTheme.headlineLarge),
-          const SizedBox(height: 6),
-          Text(
-            '找到 ${results.length} 个条目',
-            style: Theme.of(context).textTheme.bodySmall,
-          ),
-          const SizedBox(height: 22),
-          Expanded(
-            child: results.isEmpty
-                ? Center(
-                    child: Text(
-                      '没有找到「$query」\n试试更短的关键词，或先在设置里同步媒体库',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: AppColors.muted),
-                    ),
-                  )
-                : LayoutBuilder(
-                    builder: (context, constraints) {
-                      final count = (constraints.maxWidth / 170).floor().clamp(
-                        2,
-                        8,
-                      );
-                      return GridView.builder(
-                        itemCount: results.length,
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: count,
-                          crossAxisSpacing: 16,
-                          mainAxisSpacing: 18,
-                          mainAxisExtent: 258,
-                        ),
-                        itemBuilder: (context, index) =>
-                            PosterCard(item: results[index]),
-                      );
-                    },
+    final colors = context.colors;
+    final results = _results();
+    return Material(
+      color: colors.background,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(30, 24, 30, 24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text('搜索结果', style: Theme.of(context).textTheme.headlineSmall),
+                const SizedBox(width: 10),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
                   ),
-          ),
-        ],
+                  decoration: BoxDecoration(
+                    color: colors.primarySoft,
+                    borderRadius: BorderRadius.circular(7),
+                  ),
+                  child: Text(
+                    '${results.length}',
+                    style: TextStyle(
+                      color: colors.primary,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '“${query.trim()}”',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: colors.muted, fontSize: 12.5),
+                ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Expanded(
+              child: results.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.search_off_rounded,
+                            size: 30,
+                            color: colors.iconMuted,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            '没有找到「${query.trim()}」',
+                            style: TextStyle(
+                              color: colors.text,
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          Text(
+                            '试试更短的关键词，或先在设置里同步媒体库。',
+                            style: TextStyle(
+                              color: colors.muted,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                  : PosterGrid(
+                      key: const ValueKey('search-results-grid'),
+                      items: results,
+                      targetColumnWidth: 168,
+                      maxColumns: 8,
+                      crossAxisSpacing: 16,
+                      mainAxisSpacing: 24,
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }

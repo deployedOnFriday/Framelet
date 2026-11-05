@@ -9,6 +9,7 @@ class MediaItem {
     required this.icon,
     this.rating,
     this.quality,
+    this.episodeLabel,
     this.progress = 0,
     this.description = '',
     this.payload,
@@ -23,6 +24,7 @@ class MediaItem {
   final IconData icon;
   final String? rating;
   final String? quality;
+  final String? episodeLabel;
   final double progress;
   final String description;
 

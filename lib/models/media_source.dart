@@ -4,12 +4,15 @@ export 'cast_member.dart';
 import 'cast_member.dart';
 import 'media_item.dart';
 
+enum MediaSourceKind { webdav, local }
+
 class MediaSource {
   MediaSource({
     required this.id,
     required this.name,
     required this.address,
     required this.username,
+    this.kind = MediaSourceKind.webdav,
     this.directory = '/',
     this.connected = false,
     this.lastSync = '尚未同步',
@@ -17,15 +20,29 @@ class MediaSource {
 
   final String id;
   final String name;
+  final MediaSourceKind kind;
   final String address;
   final String username;
   final String directory;
   final bool connected;
   final String lastSync;
 
+  bool get isLocal => kind == MediaSourceKind.local;
+
+  String get kindLabel => isLocal ? '本地目录' : 'WebDAV';
+
+  String get location {
+    if (isLocal) return address;
+    final root = address.trim().replaceFirst(RegExp(r'/+$'), '');
+    final folder = directory.trim();
+    if (folder.isEmpty || folder == '/') return root;
+    return '$root${folder.startsWith('/') ? folder : '/$folder'}';
+  }
+
   MediaSource copyWith({
     String? id,
     String? name,
+    MediaSourceKind? kind,
     String? address,
     String? username,
     String? directory,
@@ -35,6 +52,7 @@ class MediaSource {
     return MediaSource(
       id: id ?? this.id,
       name: name ?? this.name,
+      kind: kind ?? this.kind,
       address: address ?? this.address,
       username: username ?? this.username,
       directory: directory ?? this.directory,
@@ -46,6 +64,7 @@ class MediaSource {
   Map<String, Object?> toJson() => {
     'id': id,
     'name': name,
+    'kind': kind.name,
     'address': address,
     'username': username,
     'directory': directory,
@@ -54,9 +73,14 @@ class MediaSource {
   };
 
   factory MediaSource.fromJson(Map<String, Object?> json) {
+    final kindName = json['kind'] as String?;
+    final kind = MediaSourceKind.values
+        .where((item) => item.name == kindName)
+        .firstOrNull;
     return MediaSource(
       id: json['id']! as String,
       name: json['name']! as String,
+      kind: kind ?? MediaSourceKind.webdav,
       address: json['address']! as String,
       username: json['username'] as String? ?? '',
       directory: json['directory'] as String? ?? '/',
@@ -238,6 +262,7 @@ MediaItem? toMediaItem(ScannedVideo video) {
   final subtitle = video.episodeCount > 1
       ? '共 ${video.episodeCount} 集'
       : _formatSize(video.sizeBytes);
+  final summary = video.summary?.trim() ?? '';
   return MediaItem(
     title: video.title,
     subtitle: subtitle,
@@ -246,7 +271,7 @@ MediaItem? toMediaItem(ScannedVideo video) {
     icon: _iconFor(video.kind),
     rating: video.rating,
     quality: video.episodeCount > 1 ? '${video.episodeCount} 集' : null,
-    description: video.path,
+    description: summary.isEmpty ? subtitle : summary,
     payload: video,
     posterPath: video.posterPath,
     backdropPath: video.backdropPath,

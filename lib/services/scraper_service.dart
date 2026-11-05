@@ -522,7 +522,7 @@ class ScraperService {
         rating: vote == null || vote <= 0 ? null : vote.toStringAsFixed(1),
         backdropUrl: backdropPath == null
             ? null
-            : 'https://image.tmdb.org/t/p/original$backdropPath',
+            : 'https://image.tmdb.org/t/p/w1280$backdropPath',
         genres: genres,
         cast: members,
         releaseDate:
@@ -570,11 +570,16 @@ class ScraperService {
     }
   }
 
-  /// 拉取某一季的详情：季海报与季简介（多季剧每季海报/简介不同）。
-  static Future<({String? posterUrl, String? overview})?> fetchSeasonDetails({
-    required int tvId,
-    required int seasonNumber,
-  }) async {
+  /// 拉取某一季的详情：季海报、季简介、首播日期与单集平均时长。
+  static Future<
+    ({
+      String? posterUrl,
+      String? overview,
+      String? airDate,
+      double? runtimeSec,
+    })?
+  >
+  fetchSeasonDetails({required int tvId, required int seasonNumber}) async {
     final key = tmdbApiKey?.trim();
     if (key == null || key.isEmpty) return null;
     final pathAndQuery =
@@ -587,11 +592,24 @@ class ScraperService {
       final data = jsonDecode(body) as Map<String, Object?>;
       final posterPath = data['poster_path'] as String?;
       final overview = (data['overview'] as String?)?.trim();
+      final airDate = (data['air_date'] as String?)?.trim();
+      final episodes = (data['episodes'] as List<Object?>? ?? const [])
+          .whereType<Map<String, Object?>>()
+          .toList();
+      final runtimes = episodes
+          .map((episode) => (episode['runtime'] as num?)?.toDouble() ?? 0)
+          .where((runtime) => runtime > 0)
+          .toList();
+      final averageRuntime = runtimes.isEmpty
+          ? null
+          : runtimes.reduce((a, b) => a + b) / runtimes.length;
       return (
         posterUrl: posterPath == null
             ? null
             : 'https://image.tmdb.org/t/p/w500$posterPath',
         overview: (overview == null || overview.isEmpty) ? null : overview,
+        airDate: (airDate == null || airDate.isEmpty) ? null : airDate,
+        runtimeSec: averageRuntime == null ? null : averageRuntime * 60,
       );
     } catch (_) {
       return null;

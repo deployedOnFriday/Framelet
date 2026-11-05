@@ -1,0 +1,109 @@
+import 'dart:async';
+import 'dart:io';
+
+import '../models/media_source.dart';
+import 'webdav_service.dart';
+
+/// 本地目录扫描。路径在库内统一保存为正斜杠形式，播放时再交给 File。
+class LocalMediaService {
+  LocalMediaService._();
+
+  static const maxScanDepth = 8;
+  static const maxVideoCount = 20000;
+
+  static Future<void> testConnection(MediaSource source) async {
+    final directory = Directory(source.address);
+    if (!await directory.exists()) {
+      throw FileSystemException('目录不存在', source.address);
+    }
+    await directory.list(followLinks: false).take(1).toList();
+  }
+
+  static Future<List<ScannedVideo>> scan(
+    MediaSource source, {
+    void Function(String message)? onProgress,
+  }) async {
+    final root = Directory(source.address);
+    if (!await root.exists()) {
+      throw FileSystemException('目录不存在', source.address);
+    }
+
+    final videos = <ScannedVideo>[];
+    final visited = <String>{};
+    final queue = <({Directory directory, MediaKind? kind, int depth})>[
+      (directory: root, kind: null, depth: 0),
+    ];
+
+    while (queue.isNotEmpty) {
+      final current = queue.removeAt(0);
+      final key = normalizePath(current.directory.path).toLowerCase();
+      if (!visited.add(key)) continue;
+
+      onProgress?.call('正在读取 ${current.directory.path}');
+      final List<FileSystemEntity> entries;
+      try {
+        entries = await current.directory
+            .list(followLinks: false)
+            .toList();
+      } on FileSystemException {
+        onProgress?.call('跳过无法读取的目录 ${current.directory.path}');
+        continue;
+      }
+
+      entries.sort(
+        (a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()),
+      );
+      for (final entry in entries) {
+        if (entry is Link) continue;
+        final name = _basename(entry.path);
+        if (name.startsWith('.')) continue;
+
+        if (entry is Directory) {
+          if (current.depth < maxScanDepth) {
+            queue.add((
+              directory: entry,
+              kind: current.kind ?? WebDavService.matchKind(name),
+              depth: current.depth + 1,
+            ));
+          }
+          continue;
+        }
+        if (entry is! File || !WebDavService.isVideoFile(name)) continue;
+        if (WebDavService.isExtraFile(name)) continue;
+        if (videos.length >= maxVideoCount) {
+          onProgress?.call('已达到扫描上限 $maxVideoCount 个文件，停止深入');
+          return videos;
+        }
+
+        var size = 0;
+        DateTime? modified;
+        try {
+          final stat = await entry.stat();
+          size = stat.size;
+          modified = stat.modified;
+        } catch (_) {
+          // 单个文件元数据失败不影响扫描
+        }
+        videos.add(
+          ScannedVideo(
+            sourceId: source.id,
+            path: normalizePath(entry.path),
+            title: WebDavService.cleanTitle(name),
+            kind: WebDavService.resolveKind(name, current.kind),
+            sizeBytes: size,
+            modified: modified,
+          ),
+        );
+      }
+    }
+    return videos;
+  }
+
+  static String normalizePath(String path) => path.replaceAll('\\', '/');
+
+  static String _basename(String path) {
+    final normalized = normalizePath(path);
+    final index = normalized.lastIndexOf('/');
+    return index >= 0 ? normalized.substring(index + 1) : normalized;
+  }
+}

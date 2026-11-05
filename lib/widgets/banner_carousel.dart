@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import '../core/theme/app_theme.dart';
+import '../core/utils/decode_width.dart';
 import '../models/media_item.dart';
 
 class BannerCarousel extends StatelessWidget {
@@ -11,6 +12,8 @@ class BannerCarousel extends StatelessWidget {
     required this.controller,
     required this.index,
     required this.onPageChanged,
+    this.onPlay,
+    this.onShowDetails,
     super.key,
   });
 
@@ -18,59 +21,75 @@ class BannerCarousel extends StatelessWidget {
   final PageController controller;
   final int index;
   final ValueChanged<int> onPageChanged;
+  final ValueChanged<MediaItem>? onPlay;
+  final ValueChanged<MediaItem>? onShowDetails;
 
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(20),
-      child: SizedBox(
-        height: 244,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            PageView.builder(
-              controller: controller,
-              itemCount: items.length,
-              onPageChanged: onPageChanged,
-              itemBuilder: (context, itemIndex) =>
-                  _BannerSlide(item: items[itemIndex]),
-            ),
-            Positioned(
-              right: 22,
-              bottom: 18,
-              child: Row(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // 宽银幕比例铺满内容区，高度设上限，避免首屏被横幅占满。
+        final width = constraints.maxWidth;
+        final height = (width * 9 / 21).clamp(320.0, 430.0).toDouble();
+        return Align(
+          alignment: Alignment.center,
+          child: SizedBox(
+            width: width,
+            height: height,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(20),
+              child: Stack(
+                fit: StackFit.expand,
                 children: [
-                  _CarouselButton(
-                    icon: Icons.chevron_left_rounded,
-                    tooltip: '上一张',
-                    onTap: () => _goTo(index - 1),
-                  ),
-                  const SizedBox(width: 12),
-                  for (var i = 0; i < items.length; i++)
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 220),
-                      width: i == index ? 22 : 7,
-                      height: 7,
-                      margin: const EdgeInsets.symmetric(horizontal: 3),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(
-                          alpha: i == index ? 0.95 : 0.45,
-                        ),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
+                  PageView.builder(
+                    controller: controller,
+                    itemCount: items.length,
+                    onPageChanged: onPageChanged,
+                    itemBuilder: (context, itemIndex) => _BannerSlide(
+                      item: items[itemIndex],
+                      onPlay: onPlay,
+                      onShowDetails: onShowDetails,
                     ),
-                  const SizedBox(width: 12),
-                  _CarouselButton(
-                    icon: Icons.chevron_right_rounded,
-                    tooltip: '下一张',
-                    onTap: () => _goTo(index + 1),
+                  ),
+                  Positioned(
+                    right: 18,
+                    bottom: 14,
+                    child: Row(
+                      children: [
+                        _CarouselButton(
+                          icon: Icons.chevron_left_rounded,
+                          tooltip: '上一张',
+                          onTap: () => _goTo(index - 1),
+                        ),
+                        const SizedBox(width: 12),
+                        for (var i = 0; i < items.length; i++)
+                          AnimatedContainer(
+                            duration: const Duration(milliseconds: 220),
+                            width: i == index ? 22 : 7,
+                            height: 7,
+                            margin: const EdgeInsets.symmetric(horizontal: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(
+                                alpha: i == index ? 0.95 : 0.45,
+                              ),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                          ),
+                        const SizedBox(width: 12),
+                        _CarouselButton(
+                          icon: Icons.chevron_right_rounded,
+                          tooltip: '下一张',
+                          onTap: () => _goTo(index + 1),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
@@ -85,14 +104,20 @@ class BannerCarousel extends StatelessWidget {
 }
 
 class _BannerSlide extends StatelessWidget {
-  const _BannerSlide({required this.item});
+  const _BannerSlide({required this.item, this.onPlay, this.onShowDetails});
 
   final MediaItem item;
+  final ValueChanged<MediaItem>? onPlay;
+  final ValueChanged<MediaItem>? onShowDetails;
 
   @override
   Widget build(BuildContext context) {
     final image = item.backdropPath ?? item.posterPath;
-    final hasImage = image != null && File(image).existsSync();
+    final meta = [
+      if (item.rating?.isNotEmpty ?? false) '★ ${item.rating}',
+      if (item.year.isNotEmpty) item.year,
+      if (item.quality?.isNotEmpty ?? false) item.quality! else item.subtitle,
+    ].where((value) => value.isNotEmpty).join('  ·  ');
     return DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
@@ -104,66 +129,56 @@ class _BannerSlide extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 真实影视作品：背景大图（backdrop），无图时用渐变兜底
-          if (hasImage) ...[
+          // 背景：铺满横幅，上下做适度裁切。
+          // 不做 existsSync 预检（build 内同步 IO 会掉帧），
+          // 文件缺失时 errorBuilder 透出底层渐变；背景图很大，限宽解码。
+          if (image != null) ...[
             Positioned.fill(
-              child: ClipRect(
-                child: Image.file(
-                  File(image),
-                  fit: BoxFit.cover,
-                  alignment: Alignment.centerRight,
-                ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final dpr =
+                      MediaQuery.maybeDevicePixelRatioOf(context) ?? 1;
+                  // 档位化解码宽度：布局微变（如侧栏展开动画）不触发重新解码
+                  final cacheWidth = decodeCacheWidth(
+                    constraints.maxWidth,
+                    dpr,
+                    step: 96,
+                    min: 192,
+                    max: 2400,
+                  );
+                  return Image.file(
+                    File(image),
+                    fit: BoxFit.cover,
+                    cacheWidth: cacheWidth,
+                    // 略偏上，裁切时优先保留人物面部。
+                    alignment: const Alignment(0, -0.15),
+                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                  );
+                },
               ),
             ),
+            // 左侧文字区域的渐隐保护。
             const Positioned.fill(
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.centerLeft,
-                    end: Alignment.centerRight,
-                    colors: [Color(0xF21A1A2E), Color(0x661A1A2E)],
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      stops: [0, 0.46, 0.68],
+                      colors: [
+                        Color(0xCC000000),
+                        Color(0x66000000),
+                        Color(0x00000000),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
           ],
-          Positioned(
-            right: -40,
-            top: -100,
-            child: Container(
-              width: 390,
-              height: 390,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withValues(alpha: 0.09),
-              ),
-            ),
-          ),
-          Positioned(
-            right: 100,
-            bottom: -110,
-            child: Container(
-              width: 300,
-              height: 300,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withValues(alpha: 0.07),
-              ),
-            ),
-          ),
-          Align(
-            alignment: Alignment.centerRight,
-            child: Padding(
-              padding: const EdgeInsets.only(right: 110),
-              child: Icon(
-                item.icon,
-                size: 150,
-                color: Colors.white.withValues(alpha: 0.3),
-              ),
-            ),
-          ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(34, 26, 34, 24),
+            padding: const EdgeInsets.fromLTRB(32, 24, 32, 22),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -173,8 +188,11 @@ class _BannerSlide extends StatelessWidget {
                     vertical: 4,
                   ),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.14),
+                    color: Colors.black.withValues(alpha: 0.32),
                     borderRadius: BorderRadius.circular(6),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.16),
+                    ),
                   ),
                   child: const Text(
                     '今日推荐',
@@ -193,19 +211,57 @@ class _BannerSlide extends StatelessWidget {
                     fontSize: 32,
                     fontWeight: FontWeight.w700,
                     letterSpacing: 1,
+                    shadows: [
+                      Shadow(
+                        color: Color(0xCC000000),
+                        blurRadius: 18,
+                        offset: Offset(0, 3),
+                      ),
+                      Shadow(
+                        color: Color(0x99000000),
+                        blurRadius: 5,
+                        offset: Offset(0, 1),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 5),
+                if (meta.isNotEmpty) ...[
+                  const SizedBox(height: 7),
+                  Text(
+                    meta,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.92),
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      shadows: const [
+                        Shadow(
+                          color: Color(0x99000000),
+                          blurRadius: 10,
+                          offset: Offset(0, 1),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 520),
+                  constraints: const BoxConstraints(maxWidth: 560),
                   child: Text(
                     item.description,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: Colors.white.withValues(alpha: 0.78),
-                      fontSize: 13,
-                      height: 1.6,
+                      color: Colors.white.withValues(alpha: 0.94),
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                      height: 1.5,
+                      shadows: const [
+                        Shadow(
+                          color: Color(0x99000000),
+                          blurRadius: 10,
+                          offset: Offset(0, 1),
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -214,22 +270,29 @@ class _BannerSlide extends StatelessWidget {
                   children: [
                     FilledButton.icon(
                       key: const ValueKey('featured-play'),
-                      onPressed: () => _showDemoMessage(context),
+                      onPressed: onPlay == null ? null : () => onPlay!(item),
                       icon: const Icon(Icons.play_arrow_rounded),
                       label: const Text('立即播放'),
                       style: FilledButton.styleFrom(
-                        backgroundColor: AppColors.accent,
+                        backgroundColor: context.colors.accent,
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 20,
-                          vertical: 13,
+                          horizontal: 18,
+                          vertical: 11,
                         ),
                       ),
                     ),
                     const SizedBox(width: 10),
                     TextButton(
-                      onPressed: () => _showDemoMessage(context),
+                      onPressed: onShowDetails == null
+                          ? null
+                          : () => onShowDetails!(item),
                       style: TextButton.styleFrom(
                         foregroundColor: Colors.white,
+                        backgroundColor: Colors.black.withValues(alpha: 0.22),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 10,
+                        ),
                       ),
                       child: const Text('查看详情'),
                     ),
@@ -241,12 +304,6 @@ class _BannerSlide extends StatelessWidget {
         ],
       ),
     );
-  }
-
-  void _showDemoMessage(BuildContext context) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('播放与详情将在媒体库接入后开放')));
   }
 }
 

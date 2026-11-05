@@ -24,10 +24,26 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
+  // Renderer backend A/B measured on Intel Iris Xe (2026-11):
+  //   Impeller: raster p50 = 22.9ms (janky, suspected slow path on
+  //             this iGPU/driver), Skia: raster p50 = 3.5ms with a
+  //             one-time ~1.3s shader-compilation spike per launch.
+  // Smoothness wins: default to Skia until Impeller's Windows backend
+  // matures. Run framelet.exe --enable-impeller to A/B test again.
+  bool impeller_enabled = false;
+  for (const auto &arg : GetCommandLineArguments()) {
+    if (arg == "--enable-impeller") impeller_enabled = true;
+  }
+  project.set_impeller_switch(impeller_enabled
+                                  ? flutter::ImpellerSwitch::Enabled
+                                  : flutter::ImpellerSwitch::Disabled);
+
   FlutterWindow window(project);
   Win32Window::Point origin(40, 40);
   Win32Window::Size size(1440, 960);
-  if (!window.Create(L"拾帧 - Framelet", origin, size)) {
+  // Window title is written as Unicode escapes: MSVC parses sources with the
+  // local code page by default, so literal CJK text turns into mojibake.
+  if (!window.Create(L"\u62FE\u5E27 - Framelet", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 
-import '../core/theme/app_theme.dart';
 import '../models/media_item.dart';
-import '../widgets/poster_card.dart';
+import '../widgets/poster_grid.dart';
 
 class LibraryPage extends StatefulWidget {
   const LibraryPage({required this.title, required this.items, super.key});
@@ -14,16 +13,15 @@ class LibraryPage extends StatefulWidget {
   State<LibraryPage> createState() => _LibraryPageState();
 }
 
-class _LibraryPageState extends State<LibraryPage> {
-  String _query = '';
+class _LibraryPageState extends State<LibraryPage>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   Widget build(BuildContext context) {
-    final items = widget.items
-        .where(
-          (item) => item.title.toLowerCase().contains(_query.toLowerCase()),
-        )
-        .toList();
+    super.build(context);
+    final items = widget.items;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(30, 28, 30, 24),
@@ -37,60 +35,22 @@ class _LibraryPageState extends State<LibraryPage> {
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 20),
-          SizedBox(
-            width: 420,
-            height: 44,
-            child: TextField(
-              spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
-              onChanged: (value) => setState(() => _query = value.trim()),
-              decoration: InputDecoration(
-                hintText: '筛选${widget.title}',
-                filled: true,
-                fillColor: AppColors.surface,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: AppColors.border),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: AppColors.border),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(8),
-                  borderSide: const BorderSide(color: AppColors.primary),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 22),
           Expanded(
             child: items.isEmpty
                 ? Center(
                     child: Text(
-                      widget.items.isEmpty
-                          ? '这里还没有内容，去「设置 → 媒体源」添加并同步你的媒体库'
-                          : '没有找到匹配的内容',
+                      '这里还没有内容，去「设置 → 媒体源」添加并同步你的媒体库',
                       textAlign: TextAlign.center,
                     ),
                   )
                 : LayoutBuilder(
-                    builder: (context, constraints) {
-                      final count = (constraints.maxWidth / 170).floor().clamp(
-                        2,
-                        8,
-                      );
-                      return GridView.builder(
-                        itemCount: items.length,
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: count,
-                          crossAxisSpacing: 16,
-                          mainAxisSpacing: 18,
-                          mainAxisExtent: 258,
-                        ),
-                        itemBuilder: (context, index) =>
-                            PosterCard(item: items[index], width: 148),
-                      );
-                    },
+                    builder: (context, constraints) => PosterGrid(
+                      items: items,
+                      targetColumnWidth: 168,
+                      maxColumns: 7,
+                      crossAxisSpacing: 16,
+                      mainAxisSpacing: 24,
+                    ),
                   ),
           ),
         ],

@@ -20,7 +20,7 @@ class SectionHeader extends StatelessWidget {
             iconAlignment: IconAlignment.end,
             icon: const Icon(Icons.arrow_forward_rounded, size: 16),
             label: const Text('查看全部'),
-            style: TextButton.styleFrom(foregroundColor: AppColors.muted),
+            style: TextButton.styleFrom(foregroundColor: context.colors.muted),
           ),
       ],
     );

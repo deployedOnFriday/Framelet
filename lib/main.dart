@@ -5,11 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'app.dart';
+import 'core/theme/shader_warmup.dart';
 import 'models/media_source.dart';
 import 'services/media_library.dart';
 import 'services/playback_history.dart';
+import 'services/playback_preferences.dart';
+import 'services/theme_controller.dart';
 
 void main() async {
+  // 必须在 ensureInitialized 之前赋值：initInstances 会执行预热，
+  // 把高频效果（渐变卡/圆角裁剪/阴影/转场合成）的 shader 编译从
+  // 用户操作的瞬间挪到启动 loading 里。
+  PaintingBinding.shaderWarmUp = const FrameletShaderWarmUp();
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
   // 错误落盘： framework 断言等问题的精确堆栈写入临时目录，便于排障
@@ -24,6 +31,8 @@ void main() async {
   };
   await MediaLibrary.instance.load();
   await PlaybackHistory.instance.load();
+  await PlaybackPreferences.instance.load();
+  await ThemeController.instance.load();
   // 诊断：FRAMELET_DUMP=1 时导出媒体库结构，便于排查聚合/刮削问题
   if (Platform.environment['FRAMELET_DUMP'] == '1') {
     _dumpLibrary();

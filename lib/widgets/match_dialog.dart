@@ -84,9 +84,9 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
           children: [
             Row(
               children: [
-                const Icon(
+                Icon(
                   Icons.manage_search_rounded,
-                  color: AppColors.primary,
+                  color: context.colors.primary,
                 ),
                 const SizedBox(width: 10),
                 Text('手动匹配影片信息', style: Theme.of(context).textTheme.titleLarge),
@@ -101,7 +101,7 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
             const SizedBox(height: 4),
             Text(
               widget.preferTv ? '这是剧集条目，搜索剧名后选择正确的电视剧/动漫' : '搜索片名后选择正确的影片',
-              style: const TextStyle(color: AppColors.muted, fontSize: 12.5),
+              style: TextStyle(color: context.colors.muted, fontSize: 12.5),
             ),
             const SizedBox(height: 16),
             Row(
@@ -120,15 +120,15 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
                         hintText: '输入剧名/片名，例如 三体、Signal、OurTV',
                         prefixIcon: const Icon(Icons.search_rounded, size: 20),
                         filled: true,
-                        fillColor: AppColors.surface,
+                        fillColor: context.colors.surface,
                         contentPadding: const EdgeInsets.symmetric(vertical: 8),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(11),
-                          borderSide: const BorderSide(color: AppColors.border),
+                          borderSide: BorderSide(color: context.colors.border),
                         ),
                         enabledBorder: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(11),
-                          borderSide: const BorderSide(color: AppColors.border),
+                          borderSide: BorderSide(color: context.colors.border),
                         ),
                       ),
                     ),
@@ -170,18 +170,21 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
         child: Text(
           _error!,
           textAlign: TextAlign.center,
-          style: const TextStyle(color: AppColors.muted),
+          style: TextStyle(color: context.colors.muted),
         ),
       );
     }
     if (!_searched) {
-      return const Center(
-        child: Text('输入关键词后按回车搜索', style: TextStyle(color: AppColors.muted)),
+      return Center(
+        child: Text(
+          '输入关键词后按回车搜索',
+          style: TextStyle(color: context.colors.muted),
+        ),
       );
     }
     if (_results.isEmpty) {
-      return const Center(
-        child: Text('没有结果', style: TextStyle(color: AppColors.muted)),
+      return Center(
+        child: Text('没有结果', style: TextStyle(color: context.colors.muted)),
       );
     }
     return GridView.builder(
@@ -224,17 +227,17 @@ class _CandidateCardState extends State<_CandidateCard> {
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 140),
           decoration: BoxDecoration(
-            color: AppColors.surface,
+            color: context.colors.surface,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
               color: _hovered
-                  ? AppColors.primary.withValues(alpha: 0.5)
-                  : AppColors.border,
+                  ? context.colors.primary.withValues(alpha: 0.5)
+                  : context.colors.border,
             ),
             boxShadow: _hovered
                 ? [
                     BoxShadow(
-                      color: AppColors.primary.withValues(alpha: 0.12),
+                      color: context.colors.primary.withValues(alpha: 0.12),
                       blurRadius: 14,
                       offset: const Offset(0, 4),
                     ),
@@ -257,17 +260,17 @@ class _CandidateCardState extends State<_CandidateCard> {
                           candidate.posterUrl!,
                           fit: BoxFit.cover,
                           errorBuilder: (_, _, _) => Container(
-                            color: AppColors.primarySoft,
-                            child: const Icon(
+                            color: context.colors.primarySoft,
+                            child: Icon(
                               Icons.movie_outlined,
-                              color: AppColors.primary,
+                              color: context.colors.primary,
                             ),
                           ),
                           loadingBuilder: (context, child, progress) =>
                               progress == null
                               ? child
                               : Container(
-                                  color: AppColors.primarySoft,
+                                  color: context.colors.primarySoft,
                                   child: const Center(
                                     child: SizedBox(
                                       width: 18,
@@ -281,11 +284,11 @@ class _CandidateCardState extends State<_CandidateCard> {
                         )
                       else
                         Container(
-                          color: AppColors.primarySoft,
-                          child: const Center(
+                          color: context.colors.primarySoft,
+                          child: Center(
                             child: Icon(
                               Icons.movie_outlined,
-                              color: AppColors.primary,
+                              color: context.colors.primary,
                             ),
                           ),
                         ),
@@ -323,10 +326,10 @@ class _CandidateCardState extends State<_CandidateCard> {
                       candidate.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12.5,
                         fontWeight: FontWeight.w600,
-                        color: AppColors.text,
+                        color: context.colors.text,
                       ),
                     ),
                     const SizedBox(height: 3),
@@ -337,9 +340,9 @@ class _CandidateCardState extends State<_CandidateCard> {
                       ].join(' · '),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11,
-                        color: AppColors.muted,
+                        color: context.colors.muted,
                       ),
                     ),
                   ],

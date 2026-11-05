@@ -1,14 +1,13 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../core/theme/app_theme.dart';
-import '../data/demo_data.dart';
 import '../models/media_item.dart';
 import '../models/media_source.dart';
+import '../pages/detail_page.dart';
 import '../pages/player_page.dart';
-import '../pages/search_results_page.dart';
 import '../services/media_library.dart';
 import '../services/playback_history.dart';
 import '../widgets/banner_carousel.dart';
@@ -17,36 +16,23 @@ import '../widgets/recent_playback_card.dart';
 import '../widgets/section_header.dart';
 
 class HomePage extends StatefulWidget {
-  const HomePage({this.onOpenLibrary, super.key});
+  const HomePage({this.onOpenLibrary, this.onOpenSettings, super.key});
 
   final ValueChanged<int>? onOpenLibrary;
+  final VoidCallback? onOpenSettings;
+
+  /// 测试注入用：固定随机源使轮播内容可复现（golden 截图与文本断言）。
+  /// 产品环境为 null，使用系统随机。
+  @visibleForTesting
+  static Random? bannerShuffleRandom;
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage>
+    with AutomaticKeepAliveClientMixin {
   final _bannerController = PageController();
-  final _searchController = TextEditingController();
-  final _searchFocus = FocusNode();
-
-  /// 正在同步（扫描+自动刮削）。
-  bool _syncing = false;
-
-  Future<void> _syncNow() async {
-    if (_syncing) return;
-    setState(() => _syncing = true);
-    try {
-      final count = await MediaLibrary.instance.syncAll();
-      if (!mounted) return;
-      // 媒体库有变化，下次进入首页重新随机轮播
-      _bannerCache = null;
-      setState(() {});
-      _showMessage(count > 0 ? '已同步 $count 个媒体源' : '没有已连接的媒体源');
-    } finally {
-      if (mounted) setState(() => _syncing = false);
-    }
-  }
 
   Timer? _carouselTimer;
   int _bannerIndex = 0;
@@ -71,269 +57,103 @@ class _HomePageState extends State<HomePage> {
   void dispose() {
     _carouselTimer?.cancel();
     _bannerController.dispose();
-    _searchController.dispose();
-    _searchFocus.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyK, control: true):
-            _searchFocus.requestFocus,
-      },
-      child: CustomScrollView(
-        key: const PageStorageKey('home-scroll'),
-        slivers: [
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(28, 24, 28, 40),
-            sliver: SliverList(
-              delegate: SliverChildListDelegate([
-                Row(
-                  children: [
-                    Expanded(child: _buildSearch()),
-                    const SizedBox(width: 12),
-                    _buildSyncButton(),
-                  ],
-                ),
-                const SizedBox(height: 22),
-                BannerCarousel(
-                  items: _bannerItems(),
-                  controller: _bannerController,
-                  index: _bannerIndex,
-                  onPageChanged: (index) =>
-                      setState(() => _bannerIndex = index),
-                ),
-                const SizedBox(height: 24),
-                SectionHeader(
-                  title: '最近播放',
-                  onViewAll: () => _showMessage('最近播放完整记录将在媒体库接入后开放'),
-                ),
-                const SizedBox(height: 12),
-                _buildRecentGrid(),
-                const SizedBox(height: 24),
-                ?_buildSyncNotice(),
-                _buildPosterSection(
-                  '电影',
-                  _sectionItems(MediaKind.movie, DemoData.movies),
-                  1,
-                ),
-                const SizedBox(height: 22),
-                _buildPosterSection(
-                  '电视剧',
-                  _sectionItems(MediaKind.series, DemoData.series),
-                  2,
-                ),
-                const SizedBox(height: 22),
-                _buildPosterSection(
-                  '动漫',
-                  _sectionItems(MediaKind.anime, DemoData.anime),
-                  3,
-                ),
-                const SizedBox(height: 22),
-                _buildPosterSection(
-                  '综艺',
-                  _sectionItems(MediaKind.variety, DemoData.variety),
-                  4,
-                ),
-              ]),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 真实扫描数据优先；为空时回退演示内容。
-  /// 轮播缓存：启动/同步后随机挑选一次，避免每次重建都变。
-  List<MediaItem>? _bannerCache;
-
-  /// 首页轮播：从媒体库随机挑选 6 个条目，无内容时回退演示数据。
-  List<MediaItem> _bannerItems() {
-    final cached = _bannerCache;
-    if (cached != null) return cached;
-    final library = MediaLibrary.instance;
-    if (!library.hasAnyContent) {
-      return _bannerCache = DemoData.featured;
-    }
-    final all = <MediaItem>[];
-    for (final kind in MediaKind.values) {
-      all.addAll(_sectionItems(kind, const []));
-    }
-    if (all.isEmpty) return _bannerCache = DemoData.featured;
-    all.shuffle();
-    return _bannerCache = all.take(6).toList();
-  }
-
-  List<MediaItem> _sectionItems(MediaKind kind, List<MediaItem> fallback) {
-    final library = MediaLibrary.instance;
-    final scanned = library.byKind(kind);
-    if (scanned.isEmpty) return fallback;
-    return [for (final video in scanned) ?toMediaItem(video)];
-  }
-
-  /// 媒体库有同步内容时，显示一条同步状态提示。
-  Widget? _buildSyncNotice() {
-    final library = MediaLibrary.instance;
-    if (!library.hasAnyContent) return null;
-    var total = 0;
-    for (final videos in library.byKind(MediaKind.values.first)) {
-      total += videos.episodeCount;
-    }
-    for (final kind in [MediaKind.series, MediaKind.anime, MediaKind.variety]) {
-      for (final video in library.byKind(kind)) {
-        total += video.episodeCount;
-      }
-    }
-    return Container(
-      margin: const EdgeInsets.only(bottom: 20),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: AppColors.primarySoft,
-        borderRadius: BorderRadius.circular(11),
-      ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.cloud_done_outlined,
-            size: 18,
-            color: AppColors.primary,
-          ),
-          const SizedBox(width: 10),
-          Text(
-            '媒体库已同步 · 共 ${library.sources.length} 个媒体源、$total 个视频文件',
-            style: const TextStyle(color: AppColors.primary, fontSize: 13),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildSyncButton() {
-    return SizedBox(
-      height: 46,
-      child: Material(
-        color: AppColors.primary,
-        borderRadius: BorderRadius.circular(11),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(11),
-          onTap: _syncing ? null : _syncNow,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_syncing)
-                  const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
-                  )
-                else
-                  const Icon(Icons.sync_rounded, size: 19, color: Colors.white),
-                const SizedBox(width: 7),
-                Text(
-                  _syncing ? '同步中' : '同步',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildSearch() {
-    return SizedBox(
-      height: 46,
-      child: TextField(
-        spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
-        controller: _searchController,
-        focusNode: _searchFocus,
-        textInputAction: TextInputAction.search,
-        onSubmitted: (value) {
-          final query = value.trim();
-          if (query.isEmpty) {
-            _showMessage('请输入搜索内容');
-            return;
-          }
-          Navigator.of(context).push(
-            MaterialPageRoute<void>(
-              builder: (_) => SearchResultsPage(query: query),
-            ),
-          );
-        },
-        decoration: InputDecoration(
-          hintText: '搜索影片、剧集或演员',
-          hintStyle: const TextStyle(color: AppColors.muted, fontSize: 14),
-          prefixIcon: const Icon(Icons.search_rounded, color: AppColors.muted),
-          suffixIcon: const Padding(
-            padding: EdgeInsets.only(right: 14, top: 13),
-            child: Text(
-              'Ctrl  K',
-              style: TextStyle(color: AppColors.muted, fontSize: 12),
-            ),
-          ),
-          filled: true,
-          fillColor: AppColors.surface,
-          contentPadding: const EdgeInsets.symmetric(vertical: 12),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: const BorderSide(color: AppColors.border),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: const BorderSide(color: AppColors.border),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(13),
-            borderSide: const BorderSide(color: AppColors.primary, width: 1.4),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildRecentGrid() {
+    super.build(context);
     return AnimatedBuilder(
-      animation: PlaybackHistory.instance,
+      animation: Listenable.merge([
+        MediaLibrary.instance,
+        PlaybackHistory.instance,
+      ]),
       builder: (context, _) {
-        final history = PlaybackHistory.instance.entries
-            .where((entry) => !entry.finished)
-            .take(4)
-            .toList();
-        final hasReal = history.isNotEmpty;
-        final count = hasReal ? history.length : DemoData.recent.length;
+        final banners = _bannerItems();
+        final history = _recentEntries();
+        final sections =
+            [
+                  (kind: MediaKind.movie, title: '电影', page: 1),
+                  (kind: MediaKind.series, title: '电视剧', page: 2),
+                  (kind: MediaKind.anime, title: '动漫', page: 3),
+                  (kind: MediaKind.variety, title: '综艺', page: 4),
+                ]
+                .map(
+                  (section) => (
+                    title: section.title,
+                    page: section.page,
+                    items: _sectionItems(section.kind),
+                  ),
+                )
+                .where((section) => section.items.isNotEmpty)
+                .toList();
+        final empty = banners.isEmpty && history.isEmpty && sections.isEmpty;
+
+        // 分区用原生 SliverGrid 逐卡懒构建，而不是每个分区一个
+        // shrinkWrap GridView——后者在分区进入视口的那一帧要一次性
+        // 构建 14 张卡片，是首页滚动顿挫的根源。
         return LayoutBuilder(
           builder: (context, constraints) {
-            final columns = constraints.maxWidth >= 1000
-                ? 3
-                : (constraints.maxWidth >= 560 ? 2 : 1);
-            return GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              itemCount: count,
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: columns,
-                crossAxisSpacing: 14,
-                mainAxisSpacing: 14,
-                mainAxisExtent: 112,
-              ),
-              itemBuilder: (context, index) => hasReal
-                  ? RecentPlaybackCard(
-                      item: _historyItem(history[index]),
-                      onTap: () => _resume(history[index]),
-                    )
-                  : RecentPlaybackCard(item: DemoData.recent[index]),
+            final rawWidth = constraints.maxWidth.isFinite
+                ? constraints.maxWidth
+                : MediaQuery.sizeOf(context).width;
+            final contentWidth = rawWidth - 56; // 左右各 28 内边距
+            return CustomScrollView(
+              key: const PageStorageKey('home-scroll'),
+              slivers: [
+                if (empty)
+                  SliverPadding(
+                    padding: const EdgeInsets.fromLTRB(28, 20, 28, 40),
+                    sliver: SliverToBoxAdapter(child: _buildEmptyLibrary()),
+                  )
+                else ...[
+                  if (banners.isNotEmpty) ...[
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(28, 20, 28, 0),
+                        child: BannerCarousel(
+                          items: banners,
+                          controller: _bannerController,
+                          index: _bannerIndex,
+                          onPageChanged: (index) =>
+                              setState(() => _bannerIndex = index),
+                          onPlay: _playBanner,
+                          onShowDetails: _showBannerDetails,
+                        ),
+                      ),
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                  ],
+                  if (history.isNotEmpty) ...[
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 28),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SectionHeader(
+                              title: '最近播放',
+                              onViewAll: () => _showMessage(
+                                '最近播放完整记录将在媒体库接入后开放',
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            _buildRecentGrid(history),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SliverToBoxAdapter(child: SizedBox(height: 24)),
+                  ],
+                  for (var i = 0; i < sections.length; i++)
+                    ..._sectionSlivers(
+                      sections[i],
+                      contentWidth,
+                      isLast: i == sections.length - 1,
+                    ),
+                  const SliverToBoxAdapter(child: SizedBox(height: 40)),
+                ],
+              ],
             );
           },
         );
@@ -341,22 +161,239 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  /// 单个分区：标题 + 海报网格，网格用 SliverGrid 按卡懒构建。
+  List<Widget> _sectionSlivers(
+    ({String title, int page, List<MediaItem> items}) section,
+    double contentWidth, {
+    required bool isLast,
+  }) {
+    final columns = ((contentWidth + 16) / (168 + 16)).floor().clamp(
+      1,
+      _wallColumns,
+    );
+    final cardWidth = (contentWidth - 16 * (columns - 1)) / columns;
+    return [
+      SliverPadding(
+        padding: const EdgeInsets.symmetric(horizontal: 28),
+        sliver: SliverMainAxisGroup(
+          slivers: [
+            SliverToBoxAdapter(
+              child: SectionHeader(
+                title: section.title,
+                onViewAll: () => widget.onOpenLibrary?.call(section.page),
+              ),
+            ),
+            const SliverToBoxAdapter(child: SizedBox(height: 12)),
+            SliverGrid(
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: 16,
+                mainAxisSpacing: 22,
+                mainAxisExtent: PosterCard.extentForWidth(cardWidth),
+              ),
+              delegate: SliverChildBuilderDelegate(
+                childCount: section.items.length,
+                (context, index) =>
+                    PosterCard(item: section.items[index], width: cardWidth),
+              ),
+            ),
+            if (!isLast) const SliverToBoxAdapter(child: SizedBox(height: 28)),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  Widget _buildEmptyLibrary() {
+    final hasSources = MediaLibrary.instance.sources.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.all(28),
+      decoration: BoxDecoration(
+        color: context.colors.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            Icons.video_library_outlined,
+            size: 42,
+            color: context.colors.primary,
+          ),
+          const SizedBox(height: 14),
+          Text(
+            hasSources ? '还没有已匹配的影片' : '媒体库还是空的',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            hasSources
+                ? '扫描到的条目需要匹配到海报后才会显示。可到「设置 → 刮削」处理未匹配内容。'
+                : '添加本地目录或 WebDAV 后，扫描到的影片会出现在这里。',
+            style: TextStyle(
+              color: context.colors.muted,
+              fontSize: 13,
+              height: 1.6,
+            ),
+          ),
+          const SizedBox(height: 18),
+          FilledButton.icon(
+            key: const ValueKey('empty-library-settings'),
+            onPressed: widget.onOpenSettings,
+            icon: const Icon(Icons.add_rounded, size: 18),
+            label: Text(hasSources ? '去处理未匹配内容' : '去添加媒体源'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _playBanner(MediaItem item) {
+    final video = item.payload;
+    if (video is! ScannedVideo) return;
+    final library = MediaLibrary.instance;
+    final aggregated = library.resolveAggregated(video);
+    final episodes = library.episodesOf(aggregated);
+    final episode = episodes.first;
+    final entry = PlaybackHistory.instance.entryOf(
+      episode.sourceId,
+      episode.path,
+    );
+    final resume = entry != null && !entry.finished && entry.positionSec > 1;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PlayerPage(
+          video: episode,
+          episodes: episodes,
+          startPosition: resume ? entry.positionSec : null,
+        ),
+      ),
+    );
+  }
+
+  void _showBannerDetails(MediaItem item) {
+    final video = item.payload;
+    if (video is! ScannedVideo) return;
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => DetailPage(video: video)));
+  }
+
+  /// 首页轮播：启动/内容变化后随机挑选一次，避免每次重建都变。
+  List<MediaItem>? _bannerCache;
+  String _bannerSignature = '';
+
+  List<MediaItem> _bannerItems() {
+    final library = MediaLibrary.instance;
+    final all = <ScannedVideo>[];
+    for (final kind in MediaKind.values) {
+      all.addAll(library.byKind(kind));
+    }
+    if (all.isEmpty) {
+      _bannerCache = null;
+      _bannerSignature = '';
+      return const [];
+    }
+    final signature = all
+        .map((video) => '${video.sourceId}|${video.path}|${video.posterPath}')
+        .join('\u0000');
+    final cached = _bannerCache;
+    if (cached != null && signature == _bannerSignature) return cached;
+    final shuffled = [for (final video in all) ?toMediaItem(video)]
+      ..shuffle(HomePage.bannerShuffleRandom);
+    _bannerCache = shuffled.take(6).toList();
+    _bannerSignature = signature;
+    return _bannerCache!;
+  }
+
+  /// 首页每个分区铺两行海报墙，其余进「查看全部」。
+  static const _wallColumns = 7;
+  static const _wallRows = 2;
+
+  List<MediaItem> _sectionItems(MediaKind kind) {
+    final library = MediaLibrary.instance;
+    return [for (final video in library.byKind(kind)) ?toMediaItem(video)]
+        .take(_wallColumns * _wallRows)
+        .toList();
+  }
+
+  List<HistoryEntry> _recentEntries() {
+    return PlaybackHistory.instance.entries
+        .where((entry) => !entry.finished)
+        .take(3)
+        .toList();
+  }
+
+  @override
+  bool get wantKeepAlive => true;
+
+  Widget _buildRecentGrid(List<HistoryEntry> history) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final columns = constraints.maxWidth >= 760
+            ? 3
+            : (constraints.maxWidth >= 520 ? 2 : 1);
+        return GridView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: history.length,
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: columns,
+            crossAxisSpacing: 14,
+            mainAxisSpacing: 14,
+            mainAxisExtent: 92,
+          ),
+          itemBuilder: (context, index) => RecentPlaybackCard(
+            key: ValueKey(
+              'recent-${history[index].sourceId}-${history[index].path}',
+            ),
+            item: _historyItem(history[index]),
+            onTap: () => _resume(history[index]),
+            onDelete: () => _removeRecent(history[index]),
+          ),
+        );
+      },
+    );
+  }
+
   MediaItem _historyItem(HistoryEntry entry) {
+    final library = MediaLibrary.instance;
+    final video = library.findVideo(entry.sourceId, entry.path);
+    var title = entry.title;
+    String? episodeLabel;
+    if (video != null) {
+      final aggregate = library.aggregateOf(video);
+      final officialTitle = aggregate.tmdbTitle?.trim() ?? '';
+      final displayTitle = officialTitle.isNotEmpty
+          ? officialTitle
+          : aggregate.title.trim();
+      if (displayTitle.isNotEmpty) title = displayTitle;
+      if (video.kind != MediaKind.movie) {
+        final normalized = MediaLibrary.normalizeSeriesTitle(
+          MediaLibrary.seriesTitleForDisplay(title),
+        );
+        if (normalized.isNotEmpty) title = normalized;
+      }
+      episodeLabel = MediaLibrary.episodeLabelOf(video);
+    }
     return MediaItem(
-      title: entry.title,
+      title: title,
       subtitle: entry.finished
           ? '已看完'
           : '看到 ${(entry.progress * 100).toStringAsFixed(0)}% · '
                 '剩余 ${((entry.durationSec - entry.positionSec) / 60).ceil()} 分钟',
       year: '',
-      colors: _paletteFor(entry.title),
+      colors: _paletteFor(title),
       icon: switch (entry.kind) {
         MediaKind.movie => Icons.movie_outlined,
         MediaKind.series => Icons.live_tv_outlined,
         MediaKind.anime => Icons.animation_outlined,
         MediaKind.variety => Icons.emoji_events_outlined,
       },
+      episodeLabel: episodeLabel,
       progress: entry.progress,
+      posterPath: entry.thumbnailPath,
       payload: entry,
     );
   }
@@ -376,43 +413,31 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _resume(HistoryEntry entry) {
-    final video = MediaLibrary.instance.findVideo(entry.sourceId, entry.path);
+    final library = MediaLibrary.instance;
+    final video = library.findVideo(entry.sourceId, entry.path);
     if (video == null) {
       _showMessage('该内容所属媒体源未同步或已删除，去设置里重新同步后再试');
       return;
     }
+    final episodes = library.episodesOf(library.resolveAggregated(video));
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            PlayerPage(video: video, startPosition: entry.positionSec),
+        builder: (_) => PlayerPage(
+          video: video,
+          episodes: episodes,
+          startPosition: entry.positionSec,
+        ),
       ),
     );
   }
 
-  Widget _buildPosterSection(
-    String title,
-    List<MediaItem> items,
-    int pageIndex,
-  ) {
-    return Column(
-      children: [
-        SectionHeader(
-          title: title,
-          onViewAll: () => widget.onOpenLibrary?.call(pageIndex),
-        ),
-        const SizedBox(height: 10),
-        SizedBox(
-          height: 254,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: items.length,
-            separatorBuilder: (_, _) => const SizedBox(width: 14),
-            itemBuilder: (context, index) =>
-                PosterCard(item: items[index], width: 142),
-          ),
-        ),
-      ],
-    );
+  Future<void> _removeRecent(HistoryEntry entry) async {
+    final title = _historyItem(entry).title;
+    final removal = PlaybackHistory.instance.remove(entry.sourceId, entry.path);
+    if (mounted) setState(() {});
+    await removal;
+    if (!mounted) return;
+    _showMessage('已从最近播放移除「$title」');
   }
 
   void _showMessage(String message) {

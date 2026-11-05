@@ -54,3 +54,7 @@ app.*.map.json
 
 # Test failure diff artifacts
 test/failures/
+
+# Session debug artifacts
+/.tmp-shots/
+

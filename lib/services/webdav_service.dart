@@ -37,6 +37,15 @@ class WebDavService {
   static const maxScanDepth = 3;
   static const maxVideoCount = 3000;
 
+  static const subtitleExtensions = {
+    '.srt',
+    '.ass',
+    '.ssa',
+    '.vtt',
+    '.sub',
+    '.sup',
+  };
+
   /// 建立客户端。uri 规范化：去掉结尾斜杠。
   static webdav.Client _client(MediaSource source, String password) {
     final client = webdav.newClient(
@@ -137,6 +146,55 @@ class WebDavService {
     final dot = name.lastIndexOf('.');
     if (dot < 0) return false;
     return videoExtensions.contains(name.substring(dot).toLowerCase());
+  }
+
+  static bool isSubtitleFile(String name) {
+    final dot = name.lastIndexOf('.');
+    if (dot < 0) return false;
+    return subtitleExtensions.contains(name.substring(dot).toLowerCase());
+  }
+
+  /// 查找同一目录下与视频同名的外挂字幕。
+  static Future<List<String>> discoverSubtitles(
+    MediaSource source,
+    String password,
+    String videoPath,
+  ) async {
+    final client = _client(source, password);
+    final parent = videoPath.contains('/')
+        ? videoPath.substring(0, videoPath.lastIndexOf('/'))
+        : '/';
+    final List<webdav.File> entries;
+    try {
+      entries = await client.readDir(parent.isEmpty ? '/' : parent);
+    } catch (_) {
+      return const [];
+    }
+    final videoStem = _stemOf(videoPath);
+    final result = <String>[];
+    for (final entry in entries) {
+      if (entry.isDir ?? false) continue;
+      final name = entry.name ?? '';
+      final path = entry.path ?? '';
+      if (path.isEmpty || !isSubtitleFile(name)) continue;
+      if (!_subtitleMatches(videoStem, _stemOf(name))) continue;
+      result.add(path);
+    }
+    result.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return result;
+  }
+
+  static String _stemOf(String path) {
+    final name = path.split('/').last;
+    final dot = name.lastIndexOf('.');
+    return (dot > 0 ? name.substring(0, dot) : name).toLowerCase();
+  }
+
+  static bool _subtitleMatches(String videoStem, String subtitleStem) {
+    if (subtitleStem == videoStem) return true;
+    return subtitleStem.startsWith('$videoStem.') ||
+        subtitleStem.startsWith('${videoStem}_') ||
+        subtitleStem.startsWith('$videoStem-');
   }
 
   /// 文件名/标题是否含集数标记（S01E13、E13、EP13、第13集、1x13）。

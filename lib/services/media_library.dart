@@ -6,6 +6,9 @@ import 'package:flutter/foundation.dart';
 
 import '../models/media_source.dart';
 import 'credential_store.dart';
+import 'danmaku_service.dart';
+import 'framelet_store.dart';
+import 'local_media_service.dart';
 import 'scraper_service.dart';
 import 'webdav_service.dart';
 
@@ -13,7 +16,9 @@ enum ScanStatus { idle, scanning, done, failed }
 
 /// 媒体库全局状态：媒体源配置、扫描结果与分类视图。
 class MediaLibrary extends ChangeNotifier {
-  MediaLibrary({CredentialStore? store}) : _store = store ?? CredentialStore();
+  MediaLibrary({CredentialStore? store, FrameletStore? db})
+    : _store = store ?? CredentialStore(),
+      _db = db ?? FrameletStore.instance;
 
   static MediaLibrary? _instance;
 
@@ -24,6 +29,7 @@ class MediaLibrary extends ChangeNotifier {
   static set instanceForTesting(MediaLibrary library) => _instance = library;
 
   final CredentialStore _store;
+  final FrameletStore _db;
 
   final List<MediaSource> _sources = [];
   final Map<String, String> _passwords = {};
@@ -41,12 +47,39 @@ class MediaLibrary extends ChangeNotifier {
   /// 刮削设置（TMDB 密钥与可选代理），保存于安全存储。
   String? scrapeProxy;
   String? tmdbKey;
+  DanmakuProvider danmakuProvider = DanmakuProvider.dandanplay;
+  String danmakuBaseUrl = DanmakuService.officialBaseUrl;
+  String? danmakuAppId;
+  String? danmakuAppSecret;
 
   bool get hasTmdb => (tmdbKey ?? '').trim().isNotEmpty;
+
+  bool get hasDanmaku => DanmakuService.configured;
 
   String get scraperSourceLabel => hasTmdb ? 'TMDB + TVmaze' : 'TVmaze（免费）';
 
   List<MediaSource> get sources => List.unmodifiable(_sources);
+
+  /// 聚合结果缓存：byKind / aggregate 都是 O(n) 的正则+排序，
+  /// 首页每次重建要调十几次，必须缓存。失效统一走 notifyListeners。
+  final Map<MediaKind, List<ScannedVideo>> _byKindCache = {};
+  final Map<String, List<ScannedVideo>> _aggregateCache = {};
+
+  @override
+  void notifyListeners() {
+    _byKindCache.clear();
+    _aggregateCache.clear();
+    super.notifyListeners();
+  }
+
+  /// 缓存版 aggregate()：按媒体源缓存，notifyListeners 时统一失效。
+  List<ScannedVideo> _aggregated(String sourceId) {
+    final cached = _aggregateCache[sourceId];
+    if (cached != null) return cached;
+    final videos = _videosBySource[sourceId];
+    if (videos == null || videos.isEmpty) return const [];
+    return _aggregateCache[sourceId] = aggregate(videos);
+  }
 
   MediaSource? sourceById(String id) {
     for (final source in _sources) {
@@ -76,11 +109,13 @@ class MediaLibrary extends ChangeNotifier {
   /// 刮削后同一部剧的多季带有相同 TMDB ID，此时合并为一条展示，
   /// 集数取各季之和；详情页通过 seasonsOf 取回每一季。
   List<ScannedVideo> byKind(MediaKind kind) {
+    final cached = _byKindCache[kind];
+    if (cached != null) return cached;
     // 先按文件夹聚合，再按聚合后的分类筛选：
     // 这样「想见你」这类 14 集的剧集不会留在电影分类里。
     final merged = <String, ScannedVideo>{};
     for (final entry in _videosBySource.entries) {
-      final aggregated = aggregate(entry.value);
+      final aggregated = _aggregated(entry.key);
       for (final video in aggregated) {
         if (video.kind != kind) continue;
         // 前端只展示已刮削的条目；未刮的收在设置页处理
@@ -104,7 +139,7 @@ class MediaLibrary extends ChangeNotifier {
         (a, b) =>
             (b.modified ?? DateTime(0)).compareTo(a.modified ?? DateTime(0)),
       );
-    return list;
+    return _byKindCache[kind] = list;
   }
 
   /// 一部剧的每一季（跨文件夹、跨 TMDB ID）。单季剧集返回它自己。
@@ -114,8 +149,8 @@ class MediaLibrary extends ChangeNotifier {
   List<ScannedVideo> seasonsOf(ScannedVideo video) {
     final key = _seriesMergeKey(video);
     final seasons = <ScannedVideo>[];
-    for (final videos in _videosBySource.values) {
-      for (final item in aggregate(videos)) {
+    for (final entry in _videosBySource.entries) {
+      for (final item in _aggregated(entry.key)) {
         if (_seriesMergeKey(item) == key) seasons.add(item);
       }
     }
@@ -164,14 +199,14 @@ class MediaLibrary extends ChangeNotifier {
 
   int countByKind(MediaKind kind) => byKind(kind).length;
 
-  /// 同步所有已连接媒体源（扫描完成后会自动触发刮削）。
+  /// 同步所有媒体源（扫描完成后会自动触发刮削）。
   Future<int> syncAll() async {
-    final targets = _sources.where((source) => source.connected).toList();
+    final targets = List<MediaSource>.of(_sources);
     var done = 0;
     for (final source in targets) {
       try {
         await scan(source.id);
-        done++;
+        if (scanStatus != ScanStatus.failed) done++;
       } catch (_) {
         // 单个源失败不影响其他源
       }
@@ -183,8 +218,8 @@ class MediaLibrary extends ChangeNotifier {
   List<ScannedVideo> unscrapedItems() {
     final result = <ScannedVideo>[];
     final seen = <String>{};
-    for (final videos in _videosBySource.values) {
-      for (final video in aggregate(videos)) {
+    for (final sourceId in _videosBySource.keys) {
+      for (final video in _aggregated(sourceId)) {
         if (video.isScraped) continue;
         if (!seen.add(video.path)) continue;
         result.add(video);
@@ -217,6 +252,75 @@ class MediaLibrary extends ChangeNotifier {
       return _naturalCompare(a.path, b.path);
     });
     return result.isEmpty ? [video] : result;
+  }
+
+  /// 单集文件所属的聚合条目（按同一媒体源 + 同一文件夹查找）。
+  ///
+  /// [resolveAggregated] 只匹配聚合条目的代表文件；播放历史可能来自任意一集，
+  /// 因此这里按文件夹反查，才能拿到正确的剧名、季号和集数。
+  ScannedVideo aggregateOf(ScannedVideo video) {
+    final videos = _videosBySource[video.sourceId];
+    if (videos == null || videos.isEmpty) return video;
+    final parent = parentPathOf(video.path);
+    for (final item in _aggregated(video.sourceId)) {
+      if (parentPathOf(item.path) == parent) return item;
+    }
+    return video;
+  }
+
+  /// 剧集卡片的集数徽标；电影或无法解析集数时返回 null。
+  static String? episodeLabelOf(ScannedVideo video) {
+    if (video.kind == MediaKind.movie) return null;
+    final episode = episodeNumberOfVideo(video);
+    if (episode == null) return null;
+    final season = seasonOf(video);
+    if (season > 1) return 'S${season}E$episode';
+    final unit = video.kind == MediaKind.variety ? '期' : '集';
+    return '第 $episode $unit';
+  }
+
+  /// 集名是否只是占位（第N话/第N集/Episode N/E{N}），这类不展示。
+  static bool isPlaceholderEpisodeTitle(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return true;
+    final pattern = RegExp(
+      r'^(第\s*[0-9一二三四五六七八九十百]+\s*[话話集期回]'
+      r'|episode\s*\d+'
+      r'|e\d{1,3}'
+      r'|第\s*\d+\s*[话話集])$',
+      caseSensitive: false,
+    );
+    return pattern.hasMatch(text);
+  }
+
+  /// 单集展示名：优先「第 N 集 · 单集标题」，没有标题时只显示集号。
+  static String episodeDisplayTitle(ScannedVideo video, {int? fallbackNumber}) {
+    final number = episodeNumberOfVideo(video) ?? fallbackNumber ?? 1;
+    final title = video.episodeTitle?.trim() ?? '';
+    if (title.isNotEmpty && !isPlaceholderEpisodeTitle(title)) {
+      return '第 $number 集 · $title';
+    }
+    return '第 $number 集';
+  }
+
+  /// 从单集标题中剥离集数标记，得到可展示的剧名。
+  static String seriesTitleForDisplay(String title) {
+    var text = title.trim();
+    final patterns = [
+      RegExp(r'\s*[sS]\d{1,2}[eE]\d{1,3}.*$'),
+      RegExp(r'\s*第\s*\d{1,4}\s*[集话期].*$'),
+      RegExp(
+        r'(?:^|[.\s_-])[eE][pP]?\d{1,3}(?:$|[.\s_-]).*$',
+        caseSensitive: false,
+      ),
+    ];
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(text);
+      if (match != null && match.start > 0) {
+        text = text.substring(0, match.start).trim();
+      }
+    }
+    return text.replaceAll(RegExp(r'[.\s_-]+$'), '');
   }
 
   /// 自然排序：让 第2集 排在 第10集 前面。
@@ -285,38 +389,67 @@ class MediaLibrary extends ChangeNotifier {
 
   /// 启动时恢复配置与凭据。
   Future<void> load() async {
+    await _db.open();
     await _loadScrapeSettings();
-    final raw = await _store.readSources();
-    if (raw == null || raw.isEmpty) return;
+    await _migrateLegacyStorage();
+    final sources = await _db.loadSources();
+    if (sources.isEmpty) return;
     try {
-      final list = (jsonDecode(raw) as List<Object?>)
-          .map((item) => MediaSource.fromJson(item! as Map<String, Object?>))
-          .toList();
       _sources
         ..clear()
-        ..addAll(list);
+        ..addAll(sources);
       for (final source in _sources) {
-        final password = await _store.readPassword(source.id);
-        if (password != null) _passwords[source.id] = password;
-        final videosRaw = await _store.read('framelet.videos.${source.id}');
-        if (videosRaw != null && videosRaw.isNotEmpty) {
-          try {
-            _videosBySource[source.id] =
-                (jsonDecode(videosRaw) as List<Object?>)
-                    .map(
-                      (item) =>
-                          ScannedVideo.fromJson(item! as Map<String, Object?>),
-                    )
-                    .toList();
-          } catch (_) {
-            // 扫描缓存损坏时留空，用户手动同步即可。
-          }
+        if (!source.isLocal) {
+          final password = await _store.readPassword(source.id);
+          if (password != null) _passwords[source.id] = password;
         }
       }
+      _videosBySource.addAll(await _db.loadVideos());
       notifyListeners();
       await _migrateKinds();
     } catch (_) {
       // 配置损坏时宁可重新添加，也不让应用崩溃。
+    }
+  }
+
+  /// 一次性把旧版安全存储的媒体源、扫描缓存迁移到 SQLite。
+  Future<void> _migrateLegacyStorage() async {
+    if (await _db.hasCompletedLegacyMigration()) return;
+    try {
+      final raw = await _store.readSources();
+      final existing = await _db.loadSources();
+      var allSaved = true;
+      if (existing.isEmpty && raw != null && raw.isNotEmpty) {
+        final sources = (jsonDecode(raw) as List<Object?>)
+            .map((item) => MediaSource.fromJson(item! as Map<String, Object?>))
+            .toList();
+        await _db.saveSources(sources);
+        for (final source in sources) {
+          final videosRaw = await _store.read('framelet.videos.${source.id}');
+          if (videosRaw == null || videosRaw.isEmpty) continue;
+          try {
+            final videos = (jsonDecode(videosRaw) as List<Object?>)
+                .map(
+                  (item) =>
+                      ScannedVideo.fromJson(item! as Map<String, Object?>),
+                )
+                .toList();
+            await _db.saveVideos(source.id, videos);
+          } catch (_) {
+            // 单源缓存损坏时跳过，保留可恢复的源配置。
+            allSaved = false;
+          }
+        }
+      }
+      if (!allSaved) return;
+      await _db.markLegacyMigrationCompleted();
+      // 仅在成功落库后清理旧副本；密码与其它敏感设置仍留在安全存储。
+      for (final source in await _db.loadSources()) {
+        await _store.delete('framelet.videos.${source.id}');
+      }
+      await _store.delete('framelet.sources');
+    } catch (_) {
+      // 迁移失败不阻塞启动，下次启动继续尝试。
     }
   }
 
@@ -350,6 +483,23 @@ class MediaLibrary extends ChangeNotifier {
     try {
       scrapeProxy = await _store.read('framelet.scrape.proxy');
       tmdbKey = await _store.read('framelet.scrape.tmdbkey');
+      final provider = await _store.read('framelet.danmaku.provider');
+      danmakuProvider =
+          DanmakuProvider.values
+              .where((item) => item.name == provider)
+              .firstOrNull ??
+          DanmakuProvider.dandanplay;
+      danmakuBaseUrl =
+          await _store.read('framelet.danmaku.baseUrl') ??
+          (danmakuProvider == DanmakuProvider.dandanplay
+              ? DanmakuService.officialBaseUrl
+              : '');
+      danmakuAppId =
+          await _store.read('framelet.danmaku.appId') ??
+          await _store.read('framelet.dandanplay.appId');
+      danmakuAppSecret =
+          await _store.read('framelet.danmaku.appSecret') ??
+          await _store.read('framelet.dandanplay.appSecret');
       final auto = await _store.read('framelet.scrape.auto');
       // 未设置过时默认开启
       autoScrapeAfterScan = auto == null ? true : auto == '1';
@@ -359,6 +509,11 @@ class MediaLibrary extends ChangeNotifier {
       ScraperService.tmdbApiKey = (tmdbKey ?? '').trim().isEmpty
           ? null
           : tmdbKey!.trim();
+      DanmakuService.provider = danmakuProvider;
+      DanmakuService.baseUrl = danmakuBaseUrl;
+      DanmakuService.appId = danmakuAppId;
+      DanmakuService.appSecret = danmakuAppSecret;
+      DanmakuService.proxyAddress = ScraperService.proxyAddress;
     } catch (_) {
       // 读取失败不影响使用默认源
     }
@@ -386,24 +541,46 @@ class MediaLibrary extends ChangeNotifier {
     ScraperService.tmdbApiKey = (this.tmdbKey ?? '').trim().isEmpty
         ? null
         : this.tmdbKey!.trim();
+    DanmakuService.proxyAddress = ScraperService.proxyAddress;
+    notifyListeners();
+  }
+
+  Future<void> saveDanmakuSettings({
+    required DanmakuProvider provider,
+    required String baseUrl,
+    required String appId,
+    required String appSecret,
+  }) async {
+    danmakuProvider = provider;
+    danmakuBaseUrl = provider == DanmakuProvider.dandanplay
+        ? DanmakuService.officialBaseUrl
+        : baseUrl.trim();
+    danmakuAppId = appId.trim();
+    danmakuAppSecret = appSecret.trim();
+    await _store.write('framelet.danmaku.provider', danmakuProvider.name);
+    await _store.write('framelet.danmaku.baseUrl', danmakuBaseUrl);
+    await _store.write('framelet.danmaku.appId', danmakuAppId!);
+    await _store.write('framelet.danmaku.appSecret', danmakuAppSecret!);
+    DanmakuService.provider = danmakuProvider;
+    DanmakuService.baseUrl = danmakuBaseUrl;
+    DanmakuService.appId = danmakuAppId;
+    DanmakuService.appSecret = danmakuAppSecret;
+    DanmakuService.proxyAddress = ScraperService.proxyAddress;
+    DanmakuService.clearCache();
     notifyListeners();
   }
 
   Future<void> _persistSources() async {
-    final json = jsonEncode(_sources.map((source) => source.toJson()).toList());
-    await _store.writeSources(json);
+    await _db.saveSources(_sources);
   }
 
   Future<void> _persistVideos(String sourceId) async {
     final videos = _videosBySource[sourceId];
     if (videos == null || videos.isEmpty) {
-      await _store.delete('framelet.videos.$sourceId');
+      await _db.saveVideos(sourceId, const []);
       return;
     }
-    await _store.write(
-      'framelet.videos.$sourceId',
-      jsonEncode(videos.map((video) => video.toJson()).toList()),
-    );
+    await _db.saveVideos(sourceId, videos);
   }
 
   /// 新增或更新媒体源。password 为空表示沿用已保存的密码。
@@ -418,6 +595,10 @@ class MediaLibrary extends ChangeNotifier {
       _passwords[source.id] = password;
       await _store.writePassword(source.id, password);
     }
+    if (source.isLocal) {
+      _passwords.remove(source.id);
+      await _store.deletePassword(source.id);
+    }
     await _persistSources();
     notifyListeners();
   }
@@ -428,15 +609,18 @@ class MediaLibrary extends ChangeNotifier {
     _sourceErrors.remove(id);
     _passwords.remove(id);
     await _store.deletePassword(id);
-    await _store.delete('framelet.videos.$id');
-    await _persistSources();
+    await _db.deleteSourceData(id);
     notifyListeners();
   }
 
   /// 连接测试。返回 null 表示成功，否则为可读错误信息。
   Future<String?> testConnection(MediaSource source, String password) async {
     try {
-      await WebDavService.testConnection(source, password);
+      if (source.isLocal) {
+        await LocalMediaService.testConnection(source);
+      } else {
+        await WebDavService.testConnection(source, password);
+      }
       return null;
     } catch (error) {
       return describeError(error);
@@ -448,7 +632,7 @@ class MediaLibrary extends ChangeNotifier {
     final source = sourceById(sourceId);
     final password = _passwords[sourceId];
     if (source == null) return;
-    if (password == null) {
+    if (!source.isLocal && password == null) {
       _sourceErrors[sourceId] = '未保存密码，请编辑媒体源后重新输入';
       scanStatus = ScanStatus.failed;
       notifyListeners();
@@ -461,14 +645,22 @@ class MediaLibrary extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final videos = await WebDavService.scan(
-        source,
-        password,
-        onProgress: (message) {
-          scanProgress = message;
-          notifyListeners();
-        },
-      );
+      final videos = source.isLocal
+          ? await LocalMediaService.scan(
+              source,
+              onProgress: (message) {
+                scanProgress = message;
+                notifyListeners();
+              },
+            )
+          : await WebDavService.scan(
+              source,
+              password!,
+              onProgress: (message) {
+                scanProgress = message;
+                notifyListeners();
+              },
+            );
       // 重新扫描只更新文件结构：按 path 把之前刮到的数据（海报/剧照/匹配）
       // 合并回新条目，避免一次重扫把整个媒体库的元数据抹掉。
       final previous = _videosBySource[sourceId];
@@ -510,10 +702,7 @@ class MediaLibrary extends ChangeNotifier {
       await _persistSources();
       await _persistVideos(sourceId);
       // 扫描完成后自动刮削：只补没刮过的条目（已有海报的自动跳过）
-      if (autoScrapeAfterScan &&
-          (tmdbKey ?? '').trim().isNotEmpty &&
-          !scraping &&
-          unscrapedItems().isNotEmpty) {
+      if (autoScrapeAfterScan && !scraping && unscrapedItems().isNotEmpty) {
         unawaited(scrapeAll());
       }
     } catch (error) {
@@ -578,7 +767,7 @@ class MediaLibrary extends ChangeNotifier {
             stillComplete) {
           scrapeDone++;
           scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal（跳过已有海报）';
-          notifyListeners();
+          // 不逐条 notify：几百个已刮条目会在一帧内触发几百次全界面重建
           continue;
         }
 
@@ -602,6 +791,9 @@ class MediaLibrary extends ChangeNotifier {
         ScrapeResult? best;
         ScrapeResult? firstUsable;
         var episodeInfos = const <int, ({String? title, String? stillUrl})>{};
+        String? seasonOverview;
+        String? seasonAirDate;
+        double? seasonRuntimeSec;
 
         Future<void> consider(int tmdbId, String mediaType) async {
           _scrapeLog('  拉取详情 tmdbId=$tmdbId');
@@ -619,7 +811,15 @@ class MediaLibrary extends ChangeNotifier {
               seasonNumber: seasonNumber,
             );
             if (isSeriesJob && episodes.isEmpty) return;
+            // 每季简介不同，优先写季简介；拉不到再退回整剧简介。
+            final seasonDetails = await ScraperService.fetchSeasonDetails(
+              tvId: details.tmdbId ?? tmdbId,
+              seasonNumber: seasonNumber,
+            );
             episodeInfos = episodes;
+            seasonOverview = seasonDetails?.overview;
+            seasonAirDate = seasonDetails?.airDate;
+            seasonRuntimeSec = seasonDetails?.runtimeSec;
           }
           best = details;
         }
@@ -653,30 +853,24 @@ class MediaLibrary extends ChangeNotifier {
           }
         }
 
-        final scrapedBackdrop = result == null
-            ? null
-            : await _downloadBackdrop(result);
         final episodeStillPaths = <int, String>{};
-        for (final entry in episodeInfos.entries) {
-          final stillUrl = entry.value.stillUrl;
-          if (stillUrl == null) continue;
-          final path = await ScraperService.downloadPoster(
-            stillUrl,
-            cacheKey: 'still_${result?.tmdbId}_s${seasonNumber}e${entry.key}',
-          );
-          if (path != null) episodeStillPaths[entry.key] = path;
-        }
         if (result != null) {
+          final scraped = result;
+          // 先落海报与详情，让条目立即可见（isScraped 依赖 posterPath
+          // 或 tmdbId）。老流程把全部集剧照下载完才写库，中途关应用/
+          // 断网会让整条进度全丢（龙门镖局事故）。
           String? posterPath;
-          if (result.posterUrl != null) {
+          if (scraped.posterUrl != null) {
             posterPath = await ScraperService.downloadPoster(
-              result.posterUrl!,
-              cacheKey: '${job.representative.kind.name}_${result.name}',
+              scraped.posterUrl!,
+              cacheKey: '${job.representative.kind.name}_${scraped.name}',
             );
           }
+          final scrapedBackdrop = await _downloadBackdrop(scraped);
           if (posterPath != null ||
-              result.summary != null ||
-              result.rating != null) {
+              scraped.summary != null ||
+              scraped.rating != null ||
+              scraped.tmdbId != null) {
             for (final member in job.group) {
               final episodeNumber = episodeNumberOfVideo(member);
               _updateVideo(
@@ -684,21 +878,42 @@ class MediaLibrary extends ChangeNotifier {
                 member.path,
                 (video) => video.copyWith(
                   posterPath: posterPath,
-                  summary: result!.summary,
-                  rating: result.rating,
+                  summary: seasonOverview ?? scraped.summary,
+                  rating: scraped.rating,
                   backdropPath: scrapedBackdrop,
-                  genres: result.genres,
-                  cast: result.cast,
-                  releaseDate: result.releaseDate,
-                  runtimeSec: result.runtimeSec,
-                  stillPath: episodeStillPaths[episodeNumber],
+                  genres: scraped.genres,
+                  cast: scraped.cast,
+                  releaseDate: seasonAirDate ?? scraped.releaseDate,
+                  runtimeSec: seasonRuntimeSec ?? scraped.runtimeSec,
                   episodeTitle: episodeInfos[episodeNumber]?.title,
-                  tmdbId: result.tmdbId,
+                  tmdbId: scraped.tmdbId,
                 ),
               );
             }
             await _persistVideos(job.representative.sourceId);
           }
+        }
+
+        // 剧照逐张下载、逐张落库（断点续传）：中断后重刮时
+        // downloadPoster 的本地缓存会命中已下载的，只补缺失的。
+        for (final entry in episodeInfos.entries) {
+          final stillUrl = entry.value.stillUrl;
+          if (stillUrl == null) continue;
+          final path = await ScraperService.downloadPoster(
+            stillUrl,
+            cacheKey: 'still_${result?.tmdbId}_s${seasonNumber}e${entry.key}',
+          );
+          if (path == null) continue;
+          episodeStillPaths[entry.key] = path;
+          for (final member in job.group) {
+            if (episodeNumberOfVideo(member) != entry.key) continue;
+            _updateVideo(
+              member.sourceId,
+              member.path,
+              (video) => video.copyWith(stillPath: path),
+            );
+          }
+          await _persistVideos(job.representative.sourceId);
         }
 
         scrapeDone++;
@@ -749,7 +964,7 @@ class MediaLibrary extends ChangeNotifier {
   ScannedVideo resolveAggregated(ScannedVideo video) {
     final videos = _videosBySource[video.sourceId];
     if (videos == null || videos.isEmpty) return video;
-    for (final item in aggregate(videos)) {
+    for (final item in _aggregated(video.sourceId)) {
       if (item.path == video.path) return item;
     }
     return video;
@@ -842,6 +1057,13 @@ class MediaLibrary extends ChangeNotifier {
           );
           if (path != null) episodeStillPaths[entry.key] = path;
         }
+        final seasonDetails = await ScraperService.fetchSeasonDetails(
+          tvId: candidate.tmdbId!,
+          seasonNumber: seasonNumber,
+        );
+        summary = seasonDetails?.overview ?? summary;
+        releaseDate = seasonDetails?.airDate ?? releaseDate;
+        runtimeSec = seasonDetails?.runtimeSec ?? runtimeSec;
       }
     }
     if (candidate.posterUrl != null) {
