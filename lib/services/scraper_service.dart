@@ -157,60 +157,110 @@ class ScraperService {
       }
     }
 
+    final body = await _sniGetBytes(domain, pathAndQuery);
+    return body == null ? null : utf8.decode(body, allowMalformed: true);
+  }
+
+  /// 通过「国内可用 IP + 域名 SNI」直连 CDN 并取回响应体（二进制）。
+  ///
+  /// api 与 image 共用 CloudFront 边缘——同一批边缘 IP 按 SNI 分发，
+  /// 因此 image.tmdb.org 的图片也能走这条免代理通道（探针实测可用，
+  /// 4 个 IP 中约 2 个直连可达，靠轮询容错）。
+  static Future<List<int>?> _sniGetBytes(String host, String pathAndQuery) async {
     for (final ip in tmdbIpv4) {
-      Socket? raw;
+      final raw = await _sniConnect(ip, host);
+      if (raw == null) continue;
       try {
-        raw = await Socket.connect(ip, 443).timeout(const Duration(seconds: 6));
-        final secure = await SecureSocket.secure(
+        final bytes = await _sniRequest(
           raw,
-          host: domain,
-        ).timeout(const Duration(seconds: 8));
-        secure.write(
-          'GET $pathAndQuery HTTP/1.1\r\n'
-          'Host: $domain\r\n'
-          'User-Agent: $_userAgent\r\n'
-          'Accept: application/json\r\n'
-          'Connection: close\r\n\r\n',
+          host,
+          pathAndQuery,
+          maxBytes: 16 * 1024 * 1024,
         );
-        final bytes = <int>[];
-        await for (final chunk in secure.timeout(const Duration(seconds: 15))) {
-          bytes.addAll(chunk);
-          if (bytes.length > 2 * 1024 * 1024) break;
-        }
-        await secure.close();
-        final parsed = _parseHttpBody(bytes);
-        if (parsed == null) continue; // 这个 IP 响应不完整，换下一个
-        // 服务器已正常响应：200 取内容，401/403 等直接返回 null（停止轮询）
-        return parsed.status == 200 ? parsed.body : null;
+        if (bytes == null) continue;
+        return bytes;
       } catch (_) {
         // 换下一个 IP
       } finally {
         try {
-          await raw?.close();
+          await raw.close();
         } catch (_) {}
       }
     }
     return null;
   }
 
-  /// 解析手写的 HTTP 响应：返回状态码与（chunked 解码后的）正文。
-  static ({int status, String body})? _parseHttpBody(List<int> bytes) {
-    final headerText = latin1.decode(bytes);
-    final headerEnd = headerText.indexOf('\r\n\r\n');
+  static Future<Socket?> _sniConnect(String ip, String host) async {
+    Socket? raw;
+    try {
+      raw = await Socket.connect(ip, 443).timeout(
+        const Duration(seconds: 6),
+      );
+      return await SecureSocket.secure(raw, host: host).timeout(
+        const Duration(seconds: 8),
+      );
+    } catch (_) {
+      try {
+        await raw?.close();
+      } catch (_) {}
+      return null;
+    }
+  }
+
+  static Future<List<int>?> _sniRequest(
+    Socket secure,
+    String host,
+    String pathAndQuery, {
+    required int maxBytes,
+  }) async {
+    secure.write(
+      'GET $pathAndQuery HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'User-Agent: $_userAgent\r\n'
+      'Accept: */*\r\n'
+      'Connection: close\r\n\r\n',
+    );
+    final bytes = <int>[];
+    await for (final chunk in secure.timeout(const Duration(seconds: 30))) {
+      bytes.addAll(chunk);
+      if (bytes.length > maxBytes) break;
+    }
+    final parsed = _parseHttpBytes(bytes);
+    if (parsed == null) return null;
+    // 200 取内容；401/403 等鉴权问题返回 null（停止轮询）
+    return parsed.status == 200 ? parsed.body : null;
+  }
+
+  /// 解析手写的 HTTP 响应：返回状态码与（chunked 解码后的）原始正文。
+  static ({int status, List<int> body})? _parseHttpBytes(List<int> bytes) {
+    final headerEnd = _findHeaderEnd(bytes);
     if (headerEnd < 0) return null;
-    final headers = headerText.substring(0, headerEnd).toLowerCase();
+    final headerText = latin1.decode(bytes.sublist(0, headerEnd));
+    final headers = headerText.toLowerCase();
     final statusLine = headers.split('\r\n').first;
     final match = RegExp(r'http/1\.[01]\s+(\d{3})').firstMatch(statusLine);
     if (match == null) return null;
     final status = int.tryParse(match.group(1)!) ?? 0;
     final bodyBytes = bytes.sublist(headerEnd + 4);
     final body = headers.contains('transfer-encoding: chunked')
-        ? _decodeChunked(bodyBytes)
-        : utf8.decode(bodyBytes, allowMalformed: true);
+        ? _decodeChunkedBytes(bodyBytes)
+        : bodyBytes;
     return (status: status, body: body);
   }
 
-  static String _decodeChunked(List<int> bytes) {
+  static int _findHeaderEnd(List<int> bytes) {
+    for (var i = 0; i + 3 < bytes.length; i++) {
+      if (bytes[i] == 13 &&
+          bytes[i + 1] == 10 &&
+          bytes[i + 2] == 13 &&
+          bytes[i + 3] == 10) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  static List<int> _decodeChunkedBytes(List<int> bytes) {
     final buffer = <int>[];
     var offset = 0;
     while (offset < bytes.length) {
@@ -230,7 +280,7 @@ class ScraperService {
       buffer.addAll(bytes.sublist(start, end));
       offset = end + 2;
     }
-    return utf8.decode(buffer, allowMalformed: true);
+    return buffer;
   }
 
   /// 海报缓存目录：%APPDATA%/com.framelet/framelet/posters
@@ -708,6 +758,31 @@ class ScraperService {
     final safeKey = _sanitizeFileName(cacheKey);
     final file = File('${dir.path}/$safeKey.jpg');
     if (file.existsSync() && file.lengthSync() > 1024) return file.path;
+
+    final proxyConfigured = (proxyAddress ?? '').trim().isNotEmpty;
+    // 未配刮削代理时，image.tmdb.org 直连被墙，HttpClient 必然失败——
+    // 直接走 SNI 免代理通道（与 API 同一套 CloudFront 边缘 IP）。
+    if (!proxyConfigured && url.contains('image.tmdb.org')) {
+      final uri = Uri.parse(url);
+      try {
+        await _throttle();
+        final bytes = await _sniGetBytes(
+          uri.host,
+          '${uri.path}${uri.query.isEmpty ? '' : '?${uri.query}'}',
+        );
+        if (bytes == null || bytes.length < 1024) {
+          onLog?.call('  下载图片失败 $cacheKey: SNI 直连无可用节点');
+          return null;
+        }
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        await file.writeAsBytes(bytes, flush: true);
+        return file.path;
+      } catch (error) {
+        if (file.existsSync()) file.deleteSync();
+        onLog?.call('  下载图片失败 $cacheKey: $error');
+        return null;
+      }
+    }
 
     final client = _httpClient();
     try {
