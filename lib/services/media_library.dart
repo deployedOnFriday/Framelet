@@ -10,6 +10,7 @@ import 'danmaku_service.dart';
 import 'framelet_store.dart';
 import 'local_media_service.dart';
 import 'scraper_service.dart';
+import 'update_service.dart';
 import 'webdav_service.dart';
 
 enum ScanStatus { idle, scanning, done, failed }
@@ -512,6 +513,7 @@ class MediaLibrary extends ChangeNotifier {
       ScraperService.tmdbApiKey = (tmdbKey ?? '').trim().isEmpty
           ? ScraperService.builtinTmdbApiKey
           : tmdbKey!.trim();
+      UpdateService.proxyAddress = scrapeProxy;
       DanmakuService.provider = danmakuProvider;
       DanmakuService.baseUrl = danmakuBaseUrl;
       DanmakuService.appId = danmakuAppId;
@@ -544,6 +546,7 @@ class MediaLibrary extends ChangeNotifier {
     ScraperService.tmdbApiKey = (this.tmdbKey ?? '').trim().isEmpty
         ? ScraperService.builtinTmdbApiKey
         : this.tmdbKey!.trim();
+    UpdateService.proxyAddress = scrapeProxy;
     DanmakuService.proxyAddress = ScraperService.proxyAddress;
     notifyListeners();
   }

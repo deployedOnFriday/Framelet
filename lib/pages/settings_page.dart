@@ -11,6 +11,7 @@ import '../services/media_library.dart';
 import '../services/playback_preferences.dart';
 import '../services/scraper_service.dart';
 import '../services/theme_controller.dart';
+import '../services/update_service.dart';
 import '../widgets/match_dialog.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -1050,14 +1051,6 @@ class _SettingsPageState extends State<SettingsPage>
                 color: context.colors.primary,
               ),
             ),
-            Text(
-              '拾帧',
-              style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.w700,
-                color: context.colors.primary,
-              ),
-            ),
             // 版本运行时读取构建注入值（CI 按 tag 注入 build-name），
             // 不再硬编码——否则发新版这里永远是旧数字。
             FutureBuilder<PackageInfo>(
@@ -1080,6 +1073,8 @@ class _SettingsPageState extends State<SettingsPage>
             ),
             const SizedBox(height: 18),
             const Text('拾起每一帧，让媒体库重新清晰。', textAlign: TextAlign.center),
+            const SizedBox(height: 20),
+            const _UpdateCard(),
           ],
         ),
       ),
@@ -1924,6 +1919,232 @@ class _ThemePreview extends StatelessWidget {
           color: color,
           borderRadius: BorderRadius.circular(3),
         ),
+      ),
+    );
+  }
+}
+
+/// 「软件更新」卡片：GitHub Releases 比对版本 → 下载安装包 → 启动安装。
+///
+/// Windows 走 Inno Setup 向导（自动处理正在运行的应用）；macOS 挂载
+/// dmg；Android 提示手动安装；iOS 未签名不提供应用内更新。
+class _UpdateCard extends StatefulWidget {
+  const _UpdateCard();
+
+  @override
+  State<_UpdateCard> createState() => _UpdateCardState();
+}
+
+class _UpdateCardState extends State<_UpdateCard> {
+  bool _busy = false;
+  String? _status;
+  String? _error;
+  double? _progress;
+  ReleaseInfo? _latest;
+  String? _downloadedPath;
+  String _current = '';
+
+  @override
+  void initState() {
+    super.initState();
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _current = info.version);
+    });
+  }
+
+  Future<void> _check() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+      _latest = null;
+      _downloadedPath = null;
+      _status = '正在检查更新…';
+    });
+    final latest = await UpdateService.checkLatest();
+    if (!mounted) return;
+    if (latest == null) {
+      setState(() {
+        _busy = false;
+        _error = '检查失败，请确认网络后重试';
+      });
+      return;
+    }
+    if (!UpdateService.isNewer(latest.version, _current)) {
+      setState(() {
+        _busy = false;
+        _status = '已是最新版本 ${_current.isEmpty ? latest.version : _current}';
+      });
+      return;
+    }
+    if (UpdateService.assetForPlatform(latest) == null) {
+      setState(() {
+        _busy = false;
+        _status = '新版本 ${latest.version} 已发布，请到发布页手动下载';
+      });
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _latest = latest;
+      _status = '发现新版本 ${latest.version}';
+    });
+  }
+
+  Future<void> _download() async {
+    final latest = _latest;
+    final asset = latest == null
+        ? null
+        : UpdateService.assetForPlatform(latest);
+    if (asset == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _status = '正在下载 ${asset.name}…';
+      _progress = 0.0;
+    });
+    final path = await UpdateService.download(
+      asset,
+      onProgress: (p) {
+        if (mounted) setState(() => _progress = p);
+      },
+    );
+    if (!mounted) return;
+    if (path == null) {
+      setState(() {
+        _busy = false;
+        _error = '下载失败，请检查网络后重试';
+      });
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _downloadedPath = path;
+      _status = '下载完成';
+    });
+  }
+
+  Future<void> _runInstaller() async {
+    final path = _downloadedPath;
+    if (path == null) return;
+    await UpdateService.launch(path);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(content: Text('安装程序已启动，按向导完成升级即可')),
+      );
+  }
+
+  void _openReleasePage() {
+    final url = _latest?.htmlUrl;
+    if (url == null || url.isEmpty) return;
+    if (Platform.isWindows) {
+      Process.run('cmd', ['/c', 'start', '', url], runInShell: true);
+    } else if (Platform.isMacOS) {
+      Process.run('open', [url]);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    final canDownload = _latest != null && _downloadedPath == null;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: colors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '软件更新',
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w600,
+              color: colors.text,
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (_error != null)
+            Text(
+              _error!,
+              style: TextStyle(fontSize: 12, color: colors.danger),
+            ),
+          if (_status != null)
+            Text(
+              _status!,
+              style: TextStyle(fontSize: 12.5, color: colors.muted),
+            ),
+          if (_busy && _progress != null) ...[
+            const SizedBox(height: 10),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: _progress,
+                minHeight: 4,
+                backgroundColor: colors.border,
+                valueColor: AlwaysStoppedAnimation(colors.primary),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 10,
+            children: [
+              if (_downloadedPath != null)
+                FilledButton.icon(
+                  onPressed: _busy ? null : _runInstaller,
+                  icon: const Icon(Icons.install_desktop_rounded, size: 17),
+                  label: const Text('运行安装程序'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: colors.primary,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                  ),
+                )
+              else if (canDownload)
+                FilledButton.icon(
+                  onPressed: _busy ? null : _download,
+                  icon: const Icon(Icons.download_rounded, size: 17),
+                  label: const Text('下载并安装'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: colors.primary,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                  ),
+                )
+              else
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _check,
+                  icon: _busy
+                      ? SizedBox(
+                          width: 15,
+                          height: 15,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: colors.primary,
+                          ),
+                        )
+                      : const Icon(Icons.refresh_rounded, size: 17),
+                  label: const Text('检查更新'),
+                ),
+              if (_latest != null)
+                TextButton(
+                  onPressed: _openReleasePage,
+                  child: const Text('前往发布页'),
+                ),
+            ],
+          ),
+        ],
       ),
     );
   }
