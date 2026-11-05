@@ -46,6 +46,28 @@ void main() {
       expect(result.first.title, '三体');
     });
 
+    test('TMDB 动画类型会把剧集归到动漫分类', () {
+      final folder =
+          '/dav/夸克网盘/东岛丹三郎想成为假面骑士 (2025) {tmdbid-285788}'
+          '/Season 1（4K）';
+      final episodes = [
+        for (var i = 1; i <= 5; i++)
+          video(
+            '$folder/东岛丹三郎想成为假面骑士.2025.S01E0$i.2160p.WebRip.mkv',
+            '东岛丹三郎想成为假面骑士.2025.S01E0$i WebRip',
+            kind: MediaKind.series,
+          ).copyWith(
+            genres: const ['动画', '动作冒险', '喜剧'],
+            tmdbId: 285788,
+            tmdbTitle: '东岛丹三郎想成为假面骑士',
+          ),
+      ];
+      final result = MediaLibrary.aggregate(episodes);
+      expect(result, hasLength(1));
+      expect(result.single.kind, MediaKind.anime);
+      expect(result.single.title, '东岛丹三郎想成为假面骑士');
+    });
+
     test('单文件电影保持独立', () {
       final result = MediaLibrary.aggregate([
         video('/电影/流浪地球2.2023.2160p', '流浪地球2'),

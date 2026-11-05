@@ -48,6 +48,8 @@ class ScrapeCandidate {
     this.overview,
     this.rating,
     this.tmdbId,
+    this.tvmazeId,
+    this.source = 'tmdb',
   });
 
   final String name;
@@ -61,7 +63,14 @@ class ScrapeCandidate {
   /// TMDB 条目 ID；有 ID 时可继续拉取详情。
   final int? tmdbId;
 
+  /// TVmaze 条目 ID；TMDB 接口不可用时作为免代理兜底。
+  final int? tvmazeId;
+
+  final String source;
+
   String get typeLabel => mediaType == 'tv' ? '剧集' : '电影';
+
+  String get sourceLabel => source == 'tvmaze' ? 'TVmaze' : 'TMDB';
 }
 
 /// 刮削线路自检结果：供设置页「检测线路」按钮展示。
@@ -134,6 +143,7 @@ class ScraperService {
   static String? tmdbApiKey;
 
   static const _apiHost = 'api.themoviedb.org';
+  static const _apiAltHost = 'api.tmdb.org';
   static const _imageHost = 'image.tmdb.org';
 
   /// TMDB 图片实际落在 Bunny CDN。该域名绕开被污染的 image.tmdb.org
@@ -155,6 +165,15 @@ class ScraperService {
       '18.154.132.115',
       '18.154.130.110',
     ],
+    _apiAltHost: [
+      '13.226.38.82',
+      '13.226.38.125',
+      '13.226.38.46',
+      '13.226.38.104',
+      '3.167.212.53',
+      '108.138.246.55',
+      '52.85.151.79',
+    ],
     _imageHost: [
       '143.244.50.214',
       '143.244.50.83',
@@ -165,7 +184,12 @@ class ScraperService {
       '3.164.180.201',
       '3.167.192.127',
     ],
-    _imageCdnHost: ['79.127.134.131', '143.244.50.214', '143.244.50.83'],
+    _imageCdnHost: [
+      '79.127.134.131',
+      '79.127.134.228',
+      '143.244.50.214',
+      '143.244.50.83',
+    ],
   };
 
   /// CheckTMDB 的 hosts 列表。jsDelivr 在国内通常可达，作为首选镜像；
@@ -179,6 +203,7 @@ class ScraperService {
   static final Map<String, List<String>> _dynamicIps = {};
   static final Map<String, String> _preferredIp = {};
   static final Map<String, DateTime> _ipCooldown = {};
+  static final Map<String, ({List<String> ips, DateTime at})> _dnsCache = {};
   static DateTime _ipListRefreshedAt = DateTime.fromMillisecondsSinceEpoch(0);
   static DateTime _ipRefreshAttemptedAt = DateTime.fromMillisecondsSinceEpoch(
     0,
@@ -408,26 +433,93 @@ class ScraperService {
       }
     }
 
+    bool keyRejected() => _lastHttpStatus == 401 || _lastHttpStatus == 403;
+
+    void rejectKey(String channel) {
+      _markTmdbOnline(channel);
+      lastSearchError = 'TMDB API Key 无效或已失效，请到 设置 → 刮削 重新填写';
+    }
+
+    _lastHttpStatus = 0;
     final body = await _sniGetBytes(_apiHost, pathAndQuery);
     if (body != null) {
       _markTmdbOnline('SNI 直连');
       return utf8.decode(body, allowMalformed: true);
     }
-    if (_lastHttpStatus == 401 || _lastHttpStatus == 403) {
+    if (keyRejected()) {
       // 能收到 401 说明线路是通的，问题在密钥而不是网络。
-      _markTmdbOnline('SNI 直连');
-      lastSearchError = 'TMDB API Key 无效或已失效，请到 设置 → 刮削 重新填写';
+      rejectKey('SNI 直连');
+      return null;
+    }
+
+    // api.tmdb.org 是 TMDB 的另一条 CloudFront 线路，域名未被污染时
+    // 可直接 HTTPS 访问；这是实测最有效的免代理备用通道。
+    _lastHttpStatus = 0;
+    var text = await _httpGetText(
+      Uri.parse('https://$_apiAltHost$pathAndQuery'),
+    );
+    if (text != null) {
+      _markTmdbOnline('api.tmdb.org 直连');
+      return text;
+    }
+    if (keyRejected()) {
+      rejectKey('api.tmdb.org 直连');
+      return null;
+    }
+
+    _lastHttpStatus = 0;
+    final altBody = await _sniGetBytes(_apiAltHost, pathAndQuery);
+    if (altBody != null) {
+      _markTmdbOnline('api.tmdb.org SNI');
+      return utf8.decode(altBody, allowMalformed: true);
+    }
+    if (keyRejected()) {
+      rejectKey('api.tmdb.org SNI');
+      return null;
+    }
+
+    // 端口 80 + 内置 IP + Host 头：绕过 SNI 阻断与污染 DNS。
+    _lastHttpStatus = 0;
+    final plain = await _plainHttpGetViaIp(
+      _apiHost,
+      pathAndQuery,
+      acceptAnyStatus: true,
+    );
+    if (plain?.bytes != null) {
+      _markTmdbOnline('HTTP 直连');
+      return utf8.decode(plain!.bytes!, allowMalformed: true);
+    }
+    if (keyRejected()) {
+      rejectKey('HTTP 直连');
+      return null;
+    }
+
+    _lastHttpStatus = 0;
+    final altPlain = await _plainHttpGetViaIp(
+      _apiAltHost,
+      pathAndQuery,
+      acceptAnyStatus: true,
+    );
+    if (altPlain?.bytes != null) {
+      _markTmdbOnline('api.tmdb.org HTTP');
+      return utf8.decode(altPlain!.bytes!, allowMalformed: true);
+    }
+    if (keyRejected()) {
+      rejectKey('api.tmdb.org HTTP');
       return null;
     }
 
     // 部分地区没有 DNS 污染（或用户改了 hosts / 开了系统级 VPN），
     // 普通直连反而最稳，作为最后一条通道。
-    if (proxy == null) {
-      final text = await _httpGetText(uri);
-      if (text != null) {
-        _markTmdbOnline('普通直连');
-        return text;
-      }
+    _lastHttpStatus = 0;
+    text = await _httpGetText(uri);
+    if (text != null) {
+      _markTmdbOnline('普通直连');
+      return text;
+    }
+    if (keyRejected()) {
+      rejectKey('普通直连');
+      return null;
     }
 
     _tmdbOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
@@ -859,6 +951,11 @@ class ScraperService {
       await _throttle();
       final body = await _tmdbGet(pathAndQuery);
       if (body == null) {
+        final fallback = await _searchTvmazeCandidates(query);
+        if (fallback.isNotEmpty) {
+          lastSearchError = null;
+          return fallback;
+        }
         lastSearchError ??= 'TMDB 搜索失败，请检查网络或代理';
         return const [];
       }
@@ -910,10 +1007,86 @@ class ScraperService {
         }
         return 0;
       });
+      if (candidates.isEmpty) {
+        final fallback = await _searchTvmazeCandidates(query);
+        if (fallback.isNotEmpty) {
+          lastSearchError = null;
+          return fallback;
+        }
+      }
       return candidates.take(18).toList();
     } catch (error) {
       lastSearchError = 'TMDB 返回数据异常：$error';
       return const [];
+    }
+  }
+
+  /// TMDB 完全不可达时，用 TVmaze 提供手动匹配候选。
+  /// TVmaze 的 API 与图片 CDN 通常不依赖 TMDB 域名，可继续出图。
+  static Future<List<ScrapeCandidate>> _searchTvmazeCandidates(
+    String query,
+  ) async {
+    if (_tvmazeOfflineUntil != null &&
+        _tvmazeOfflineUntil!.isAfter(DateTime.now())) {
+      return const [];
+    }
+    final url = Uri.parse(
+      'https://api.tvmaze.com/search/shows?q=${Uri.encodeQueryComponent(query)}',
+    );
+    final client = _httpClient();
+    try {
+      await _throttle();
+      final request = await client.getUrl(url);
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      if (response.statusCode != 200) {
+        if (response.statusCode >= 500) {
+          _tvmazeOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
+        }
+        return const [];
+      }
+      final body = await response.transform(utf8.decoder).join();
+      final list = jsonDecode(body) as List<Object?>;
+      final candidates = <ScrapeCandidate>[];
+      for (final item in list) {
+        final show =
+            (item as Map<String, Object?>)['show'] as Map<String, Object?>?;
+        if (show == null) continue;
+        final id = (show['id'] as num?)?.toInt();
+        final name = show['name'] as String? ?? '';
+        if (id == null || name.isEmpty) continue;
+        final premiered = show['premiered'] as String? ?? '';
+        final image = show['image'] as Map<String, Object?>?;
+        final poster =
+            image?['medium'] as String? ?? image?['original'] as String?;
+        final ratingValue =
+            (show['rating'] as Map<String, Object?>?)?['average'];
+        final summary = stripHtml(show['summary'] as String? ?? '');
+        candidates.add(
+          ScrapeCandidate(
+            name: name,
+            mediaType: 'tv',
+            originalName: name,
+            year: int.tryParse(premiered.split('-').first),
+            posterUrl: poster,
+            overview: summary.isEmpty ? null : summary,
+            rating: ratingValue is num && ratingValue > 0
+                ? ratingValue.toStringAsFixed(1)
+                : null,
+            tvmazeId: id,
+            source: 'tvmaze',
+          ),
+        );
+        if (candidates.length >= 18) break;
+      }
+      return candidates;
+    } catch (error) {
+      _tvmazeOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
+      _lastNetworkDetail = error.toString();
+      return const [];
+    } finally {
+      client.close(force: true);
     }
   }
 
@@ -1087,6 +1260,87 @@ class ScraperService {
     }
   }
 
+  /// TVmaze 详情：简介、类型、演员、首播日期与单集时长。
+  static Future<ScrapeResult?> fetchTvmazeDetails(int id) async {
+    if (_tvmazeOfflineUntil != null &&
+        _tvmazeOfflineUntil!.isAfter(DateTime.now())) {
+      return null;
+    }
+    final url = Uri.parse('https://api.tvmaze.com/shows/$id?embed=cast');
+    final client = _httpClient();
+    try {
+      await _throttle();
+      final request = await client.getUrl(url);
+      final response = await request.close().timeout(
+        const Duration(seconds: 12),
+      );
+      if (response.statusCode != 200) {
+        if (response.statusCode >= 500) {
+          _tvmazeOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
+        }
+        return null;
+      }
+      final map = jsonDecode(
+        await response.transform(utf8.decoder).join(),
+      ) as Map<String, Object?>;
+      final image = map['image'] as Map<String, Object?>?;
+      final poster =
+          image?['medium'] as String? ?? image?['original'] as String?;
+      final ratingValue = (map['rating'] as Map<String, Object?>?)?['average'];
+      final genres = (map['genres'] as List<Object?>? ?? const [])
+          .whereType<String>()
+          .where((genre) => genre.isNotEmpty)
+          .take(4)
+          .toList();
+      final cast = <CastMember>[];
+      final embedded = map['_embedded'] as Map<String, Object?>?;
+      final castList = embedded?['cast'] as List<Object?>? ?? const [];
+      for (final item in castList) {
+        if (item is! Map<String, Object?>) continue;
+        final person = item['person'] as Map<String, Object?>?;
+        final name = person?['name'] as String? ?? '';
+        if (name.isEmpty) continue;
+        final personImage = person?['image'] as Map<String, Object?>?;
+        final photo =
+            personImage?['medium'] as String? ??
+            personImage?['original'] as String?;
+        final character = item['character'] as Map<String, Object?>?;
+        cast.add(
+          CastMember(
+            name: name,
+            role: character?['name'] as String? ?? '',
+            photoUrl: photo,
+          ),
+        );
+        if (cast.length >= 12) break;
+      }
+      final runtime =
+          (map['averageRuntime'] as num?)?.toDouble() ??
+          (map['runtime'] as num?)?.toDouble();
+      final summary = stripHtml(map['summary'] as String? ?? '');
+      return ScrapeResult(
+        name: map['name'] as String? ?? '',
+        posterUrl: poster,
+        summary: summary.isEmpty ? null : summary,
+        rating: ratingValue is num && ratingValue > 0
+            ? ratingValue.toStringAsFixed(1)
+            : null,
+        genres: genres,
+        cast: cast,
+        releaseDate: map['premiered'] as String?,
+        runtimeSec: runtime == null ? null : runtime * 60,
+        mediaType: 'tv',
+        tmdbId: null,
+      );
+    } catch (error) {
+      _tvmazeOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
+      _lastNetworkDetail = error.toString();
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// 读取一季的单集信息：缩略图 URL 与标题。
   static Future<Map<int, ({String? title, String? stillUrl})>>
   fetchEpisodeStills({required int tvId, required int seasonNumber}) async {
@@ -1201,7 +1455,7 @@ class ScraperService {
         final showYear = int.tryParse(premiered.split('-').first);
         final image = show['image'] as Map<String, Object?>?;
         final poster =
-            image?['original'] as String? ?? image?['medium'] as String?;
+            image?['medium'] as String? ?? image?['original'] as String?;
         final ratingValue =
             (show['rating'] as Map<String, Object?>?)?['average'];
         final summaryRaw = show['summary'] as String?;
@@ -1264,11 +1518,10 @@ class ScraperService {
 
   static String _lastImageChannel = '';
 
-  static String _tmdbImageProxyUrl(Uri uri) {
-    final path = _pathAndQuery(uri);
-    final width = RegExp(r'/t/p/(w\d+)/').firstMatch(path)?.group(1);
+  static String _imageProxyUrl(Uri uri) {
+    final width = RegExp(r'/t/p/(w\d+)/').firstMatch(uri.path)?.group(1);
     final query = <String>[
-      'url=${Uri.encodeQueryComponent('https://$_imageHost$path')}',
+      'url=${Uri.encodeQueryComponent(uri.toString())}',
       'output=jpg',
       'q=88',
       if (width != null) 'w=${width.substring(1)}',
@@ -1277,41 +1530,85 @@ class ScraperService {
   }
 
   /// 用内置 IP + Host 头发起纯 HTTP 请求。部分运营商只阻断
-  /// image.tmdb.org 的 TLS SNI，但 HTTP 仍可到达 Bunny CDN；
-  /// 同时绕过污染 DNS，作为完全无代理的兜底。
-  static Future<List<int>?> _plainHttpImageViaIp(Uri uri) async {
+  /// TMDB 域名的 TLS SNI，但 HTTP 仍可到达 CDN；同时绕过污染
+  /// DNS，作为完全无代理的兜底。
+  static Future<_SniAttempt?> _plainHttpGetViaIp(
+    String host,
+    String pathAndQuery, {
+    int maxBytes = 8 * 1024 * 1024,
+    bool image = false,
+    bool acceptAnyStatus = false,
+  }) async {
     await _ensureIpPool();
-    final candidates = _candidateIps(_imageHost).take(8).toList();
+    var candidates = _candidateIps(host).take(8).toList();
+    if (candidates.isEmpty) {
+      candidates = (await _resolveDnsIps(host)).take(8).toList();
+    }
     if (candidates.isEmpty) return null;
 
     for (var offset = 0; offset < candidates.length; offset += 4) {
       final end = offset + 4 > candidates.length
           ? candidates.length
           : offset + 4;
-      final attempt = await _racePlainImage(
-        _imageHost,
+      final attempt = await _racePlainHttp(
+        host,
         candidates.sublist(offset, end),
-        _pathAndQuery(uri),
+        pathAndQuery,
+        maxBytes: maxBytes,
+        image: image,
+        acceptAnyStatus: acceptAnyStatus,
       );
       if (attempt?.bytes != null) {
-        _preferredIp[_imageHost] = attempt!.ip;
-        return attempt.bytes;
+        _preferredIp[host] = attempt!.ip;
+        _lastHttpStatus = attempt.status ?? 200;
+        return attempt;
+      }
+      if (acceptAnyStatus && attempt?.status != null) {
+        _preferredIp[host] = attempt!.ip;
+        _lastHttpStatus = attempt.status!;
+        return attempt;
       }
     }
     return null;
   }
 
-  static Future<_SniAttempt?> _racePlainImage(
+  /// 未知图片域名回退到系统 DNS 解析出的 IPv4，仍由 Host 头指定域名。
+  static Future<List<String>> _resolveDnsIps(String host) async {
+    final cached = _dnsCache[host];
+    if (cached != null &&
+        DateTime.now().difference(cached.at) < const Duration(minutes: 10)) {
+      return cached.ips;
+    }
+    try {
+      final addresses = await InternetAddress.lookup(host)
+          .timeout(const Duration(seconds: 5));
+      final ips = addresses
+          .where((address) => address.type == InternetAddressType.IPv4)
+          .map((address) => address.address)
+          .toSet()
+          .toList();
+      _dnsCache[host] = (ips: ips, at: DateTime.now());
+      return ips;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  static Future<_SniAttempt?> _racePlainHttp(
     String host,
     List<String> ips,
-    String pathAndQuery,
-  ) {
+    String pathAndQuery, {
+    required int maxBytes,
+    required bool image,
+    required bool acceptAnyStatus,
+  }) {
     final completer = Completer<_SniAttempt?>();
     var pending = ips.length;
 
     void finish(_SniAttempt? attempt) {
       if (completer.isCompleted) return;
-      if (attempt?.bytes != null) {
+      if (attempt?.bytes != null ||
+          (acceptAnyStatus && attempt?.status != null)) {
         completer.complete(attempt);
         return;
       }
@@ -1320,18 +1617,26 @@ class ScraperService {
     }
 
     for (final ip in ips) {
-      _attemptPlainImage(ip, host, pathAndQuery).then(finish).catchError((_) {
+      _attemptPlainHttp(
+        ip,
+        host,
+        pathAndQuery,
+        maxBytes: maxBytes,
+        image: image,
+      ).then(finish).catchError((_) {
         finish(null);
       });
     }
     return completer.future;
   }
 
-  static Future<_SniAttempt> _attemptPlainImage(
+  static Future<_SniAttempt> _attemptPlainHttp(
     String ip,
     String host,
-    String pathAndQuery,
-  ) async {
+    String pathAndQuery, {
+    required int maxBytes,
+    required bool image,
+  }) async {
     Socket? socket;
     try {
       socket = await Socket.connect(ip, 80).timeout(const Duration(seconds: 4));
@@ -1339,20 +1644,21 @@ class ScraperService {
         'GET $pathAndQuery HTTP/1.1\r\n'
         'Host: $host\r\n'
         'User-Agent: $_userAgent\r\n'
-        'Accept: image/avif,image/webp,image/*,*/*;q=0.8\r\n'
+        'Accept: ${image ? 'image/avif,image/webp,image/*,*/*;q=0.8' : 'application/json,*/*'}\r\n'
         'Accept-Encoding: identity\r\n'
         'Connection: close\r\n\r\n',
       );
       final bytes = <int>[];
       await for (final chunk in socket.timeout(const Duration(seconds: 15))) {
         bytes.addAll(chunk);
-        if (bytes.length > 20 * 1024 * 1024) break;
+        if (bytes.length > maxBytes) break;
       }
       final response = _parseHttpBytes(bytes);
       if (response == null) {
         return _SniAttempt(ip: ip, error: 'empty response');
       }
-      if (response.status == 200 && _looksLikeImage(response.body)) {
+      if (response.status == 200 &&
+          (!image || _looksLikeImage(response.body))) {
         return _SniAttempt(ip: ip, status: 200, bytes: response.body);
       }
       return _SniAttempt(ip: ip, status: response.status);
@@ -1363,6 +1669,16 @@ class ScraperService {
         await socket?.close();
       } catch (_) {}
     }
+  }
+
+  static Future<List<int>?> _plainHttpImageViaIp(Uri uri) async {
+    final attempt = await _plainHttpGetViaIp(
+      uri.host,
+      _pathAndQuery(uri),
+      maxBytes: 20 * 1024 * 1024,
+      image: true,
+    );
+    return attempt?.bytes;
   }
 
   /// 按「Bunny CDN 域名 → 内置 IP HTTPS → 内置 IP HTTP → 原域名
@@ -1454,11 +1770,56 @@ class ScraperService {
 
     bytes = accept(
       await _httpGetBytes(
-        Uri.parse(_tmdbImageProxyUrl(uri)),
+        Uri.parse(_imageProxyUrl(uri)),
         timeout: const Duration(seconds: 15),
         retries: 1,
       ),
       '图片加速节点',
+    );
+    if (bytes != null) return bytes;
+    return null;
+  }
+
+  /// 非 TMDB 图片（如 TVmaze）的免代理通道：HTTP/IP 直连、
+  /// 普通 HTTPS、HTTP 以及图片加速节点逐级兜底。
+  static Future<List<int>?> _fetchOtherImage(Uri uri, {String? proxy}) async {
+    List<int>? accept(List<int>? bytes) {
+      if (bytes == null || bytes.length < 1024 || !_looksLikeImage(bytes)) {
+        return null;
+      }
+      return bytes;
+    }
+
+    List<int>? bytes;
+    if (uri.host.endsWith('tvmaze.com')) {
+      bytes = accept(await _plainHttpImageViaIp(uri));
+      if (bytes != null) return bytes;
+    }
+    bytes = accept(
+      await _httpGetBytes(
+        uri,
+        proxy: proxy,
+        timeout: const Duration(seconds: 10),
+        retries: 1,
+      ),
+    );
+    if (bytes != null) return bytes;
+    bytes = accept(await _plainHttpImageViaIp(uri));
+    if (bytes != null) return bytes;
+    bytes = accept(
+      await _httpGetBytes(
+        uri.replace(scheme: 'http'),
+        timeout: const Duration(seconds: 12),
+        retries: 1,
+      ),
+    );
+    if (bytes != null) return bytes;
+    bytes = accept(
+      await _httpGetBytes(
+        Uri.parse(_imageProxyUrl(uri)),
+        timeout: const Duration(seconds: 15),
+        retries: 1,
+      ),
     );
     if (bytes != null) return bytes;
     return null;
@@ -1485,7 +1846,7 @@ class ScraperService {
       if (isTmdbImage) {
         bytes = await _fetchTmdbImage(uri, proxy: proxy);
       } else {
-        bytes = await _httpGetBytes(uri, proxy: proxy);
+        bytes = await _fetchOtherImage(uri, proxy: proxy);
       }
     } catch (error) {
       _lastNetworkDetail = error.toString();

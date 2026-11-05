@@ -193,7 +193,7 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
         child: Text('没有结果', style: TextStyle(color: context.colors.muted)),
       );
     }
-    return GridView.builder(
+    final grid = GridView.builder(
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 4,
         crossAxisSpacing: 12,
@@ -205,6 +205,28 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
         candidate: _results[index],
         onTap: () => Navigator.pop(context, _results[index]),
       ),
+    );
+    if (!_results.any((candidate) => candidate.source == 'tvmaze')) {
+      return grid;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: context.colors.primarySoft,
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Text(
+            'TMDB 当前不可达，已自动使用 TVmaze 结果；海报仍可下载。',
+            style: TextStyle(color: context.colors.primary, fontSize: 12),
+          ),
+        ),
+        const SizedBox(height: 10),
+        Expanded(child: grid),
+      ],
     );
   }
 }

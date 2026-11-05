@@ -464,9 +464,14 @@ class MediaLibrary extends ChangeNotifier {
       var changed = false;
       for (var i = 0; i < videos.length; i++) {
         final video = videos[i];
+        var kind = video.kind;
         if (video.kind == MediaKind.movie &&
             WebDavService.looksLikeEpisode(video.title)) {
-          videos[i] = video.copyWith(kind: MediaKind.series);
+          kind = MediaKind.series;
+        }
+        kind = kindForGenres(kind, video.genres);
+        if (kind != video.kind) {
+          videos[i] = video.copyWith(kind: kind);
           changed = true;
         }
       }
@@ -700,6 +705,7 @@ class MediaLibrary extends ChangeNotifier {
           if (old == null) continue;
           if (old.tmdbId == null && old.posterPath == null) continue;
           videos[i] = videos[i].copyWith(
+            kind: kindForGenres(videos[i].kind, old.genres),
             posterPath: old.posterPath,
             backdropPath: old.backdropPath,
             summary: old.summary,
@@ -922,6 +928,7 @@ class MediaLibrary extends ChangeNotifier {
                   runtimeSec: seasonRuntimeSec ?? scraped.runtimeSec,
                   episodeTitle: episodeInfos[episodeNumber]?.title,
                   tmdbId: scraped.tmdbId,
+                  kind: kindForGenres(video.kind, scraped.genres),
                 ),
               );
             }
@@ -1111,6 +1118,18 @@ class MediaLibrary extends ChangeNotifier {
         releaseDate = seasonDetails?.airDate ?? releaseDate;
         runtimeSec = seasonDetails?.runtimeSec ?? runtimeSec;
       }
+    } else if (candidate.tvmazeId != null) {
+      final details = await ScraperService.fetchTvmazeDetails(
+        candidate.tvmazeId!,
+      );
+      if (details != null) {
+        summary = details.summary ?? summary;
+        rating = details.rating ?? rating;
+        genres = details.genres;
+        cast = details.cast;
+        releaseDate = details.releaseDate;
+        runtimeSec = details.runtimeSec;
+      }
     }
     if (candidate.posterUrl != null) {
       poster = await ScraperService.downloadPoster(
@@ -1135,6 +1154,7 @@ class MediaLibrary extends ChangeNotifier {
           stillPath: episodeStillPaths[episodeNumber],
           episodeTitle: episodeTitles[episodeNumber],
           tmdbId: candidate.tmdbId,
+          kind: kindForGenres(video.kind, genres),
         ),
       );
     }
@@ -1189,6 +1209,18 @@ class MediaLibrary extends ChangeNotifier {
     }
   }
 
+  /// TMDB 类型 → 应用分类：动画归动漫，真人秀/脱口秀归综艺。
+  /// 电影不参与归类，避免动画电影从「电影」里消失。
+  static MediaKind kindForGenres(MediaKind current, List<String> genres) {
+    if (current == MediaKind.movie || genres.isEmpty) return current;
+    final text = genres.join(' ');
+    if (text.contains('动画')) return MediaKind.anime;
+    if (text.contains('真人秀') || text.contains('脱口秀')) {
+      return MediaKind.variety;
+    }
+    return current;
+  }
+
   static List<ScannedVideo> aggregate(List<ScannedVideo> videos) {
     final byFolder = <String, List<ScannedVideo>>{};
     for (final video in videos) {
@@ -1241,12 +1273,7 @@ class MediaLibrary extends ChangeNotifier {
           (video) => video.genres.isNotEmpty,
           orElse: () => group.first,
         );
-        final genreText = genreSource.genres.join(' ');
-        if (genreText.contains('动画')) {
-          kind = MediaKind.anime;
-        } else if (genreText.contains('真人秀') || genreText.contains('脱口秀')) {
-          kind = MediaKind.variety;
-        }
+        kind = kindForGenres(kind, genreSource.genres);
         result.add(
           group.first.copyWith(
             title: (tmdbTitle != null && tmdbTitle.isNotEmpty)
