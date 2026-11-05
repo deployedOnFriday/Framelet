@@ -1709,9 +1709,107 @@ class ScraperService {
     return attempt?.bytes;
   }
 
-  /// 按「Bunny CDN 域名 → 内置 IP HTTPS → 内置 IP HTTP → 原域名
-  /// SNI → 普通直连 → 图片加速节点」顺序取图。代理可用时先走代理，
-  /// 但代理不通也不会挡住后续免代理线路。
+  /// 免代理直连线路名（与探测排序、诊断展示共用）。
+  static const _chBunnyHttps = 'Bunny CDN 直连';
+  static const _chBunnySni = 'Bunny CDN 节点直连';
+  static const _chPlainHttp = 'HTTP 直连（免 DNS/SNI）';
+  static const _chSni = 'SNI 直连';
+  static const _chHttps = 'HTTPS 直连';
+  static const _chHttp = 'HTTP 直连';
+  static const _chWsrv = '图片加速节点';
+
+  /// 默认线路顺序（测速前的兜底顺序）。
+  static const _defaultImageChannels = [
+    _chBunnyHttps,
+    _chBunnySni,
+    _chPlainHttp,
+    _chSni,
+    _chHttps,
+    _chHttp,
+    _chWsrv,
+  ];
+
+  /// 本次运行实测的线路顺序（快→慢），会话内缓存；null 表示尚未测速。
+  static List<String>? _imageChannelOrder;
+  static bool _imageChannelProbeDone = false;
+
+  /// 执行指定取图线路（不校验内容，校验由调用方 accept 负责）。
+  static Future<List<int>?> _runImageChannel(
+    String channel, {
+    required Uri uri,
+    required String path,
+    required int maxBytes,
+  }) async {
+    switch (channel) {
+      case _chBunnyHttps:
+        // Bunny 域名的 DNS 解析在国内基本不被污染，普通 HTTPS 直连优先。
+        return _httpGetBytes(
+          Uri.parse('https://$_imageCdnHost$path'),
+          timeout: const Duration(seconds: 10),
+          retries: 1,
+        );
+      case _chBunnySni:
+        return _sniGetBytes(_imageCdnHost, path, maxBytes: maxBytes, image: true);
+      case _chPlainHttp:
+        return _plainHttpImageViaIp(uri);
+      case _chSni:
+        return _sniGetBytes(_imageHost, path, maxBytes: maxBytes, image: true);
+      case _chHttps:
+        return _httpGetBytes(uri, timeout: const Duration(seconds: 10), retries: 1);
+      case _chHttp:
+        return _httpGetBytes(
+          uri.replace(scheme: 'http'),
+          timeout: const Duration(seconds: 10),
+          retries: 1,
+        );
+      case _chWsrv:
+        return _httpGetBytes(
+          Uri.parse(_imageProxyUrl(uri)),
+          timeout: const Duration(seconds: 15),
+          retries: 1,
+        );
+    }
+    return null;
+  }
+
+  /// 首次取图前并行探测各线路（同一张 w92 小图，~3KB），按实测耗时
+  /// 排序缓存；失败的线路排到最后。并行跑总耗时≈最慢线路，
+  /// 每次运行只测一次。全部失败时保持默认顺序。
+  static Future<void> _probeImageChannels() async {
+    if (_imageChannelProbeDone) return;
+    _imageChannelProbeDone = true;
+    const sample = '/t/p/w92/zxfBtHz5UmSTfIEC4O4GngyjHwa.jpg';
+    final sampleUri = Uri.parse('https://$_imageHost$sample');
+    final timings = <String, int>{};
+    await Future.wait(
+      _defaultImageChannels.map((channel) async {
+        final watch = Stopwatch()..start();
+        try {
+          final bytes = await _runImageChannel(
+            channel,
+            uri: sampleUri,
+            path: sample,
+            maxBytes: 1 << 20,
+          ).timeout(const Duration(seconds: 6));
+          if (bytes != null && bytes.length >= 1024) {
+            timings[channel] = watch.elapsedMilliseconds;
+          }
+        } catch (_) {
+          // 探测失败：该线路排到最后
+        }
+      }),
+    );
+    if (timings.isEmpty) return;
+    final failed = _defaultImageChannels
+        .where((channel) => !timings.containsKey(channel))
+        .toList();
+    final sorted = timings.keys.toList()
+      ..sort((a, b) => timings[a]!.compareTo(timings[b]!));
+    _imageChannelOrder = [...sorted, ...failed];
+  }
+
+  /// 免代理取图：首次先并行测速各线路选最快的，随后按实测顺序
+  /// 逐条尝试；代理可用时先走代理，但代理不通也不会挡住直连线路。
   static Future<List<int>?> _fetchTmdbImage(
     Uri uri, {
     String? proxy,
@@ -1721,7 +1819,6 @@ class ScraperService {
     final path = _pathAndQuery(uri);
     final usingSystemProxy =
         (proxyAddress ?? '').trim().isEmpty && proxy != null;
-    final cdnUri = Uri.parse('https://$_imageCdnHost$path');
 
     List<int>? accept(List<int>? bytes, String channel) {
       if (bytes == null || bytes.length < 1024 || !_looksLikeImage(bytes)) {
@@ -1732,9 +1829,8 @@ class ScraperService {
       return bytes;
     }
 
-    List<int>? bytes;
     if (proxy != null) {
-      bytes = await _httpGetBytes(
+      final bytes = await _httpGetBytes(
         uri,
         proxy: proxy,
         timeout: const Duration(seconds: 12),
@@ -1749,66 +1845,19 @@ class ScraperService {
       }
     }
 
-    await _throttle();
-    // Bunny 域名的 DNS 解析在国内基本不被污染，普通 HTTPS 直连
-    // 是最快最稳的一条，放最前避免在 IP 竞速上空耗。
-    bytes = accept(
-      await _httpGetBytes(
-        cdnUri,
-        timeout: const Duration(seconds: 10),
-        retries: 1,
-      ),
-      'Bunny CDN 直连',
-    );
-    if (bytes != null) return bytes;
+    // 代理没走通才需要直连线路：先测速选最快的（仅首次，~6 秒内）。
+    await _probeImageChannels();
+    final order = _imageChannelOrder ?? _defaultImageChannels;
 
-    // 域名直连失败（DNS 被污染等）再用内置 IP + DNS 解析节点竞速。
-    await _throttle();
-    bytes = accept(
-      await _sniGetBytes(_imageCdnHost, path, maxBytes: maxBytes, image: true),
-      'Bunny CDN 节点直连',
-    );
-    if (bytes != null) return bytes;
-
-    bytes = accept(await _plainHttpImageViaIp(uri), 'HTTP 直连（免 DNS/SNI）');
-    if (bytes != null) return bytes;
-
-    await _throttle();
-    bytes = accept(
-      await _sniGetBytes(_imageHost, path, maxBytes: maxBytes, image: true),
-      'SNI 直连',
-    );
-    if (bytes != null) return bytes;
-
-    bytes = accept(
-      await _httpGetBytes(
-        uri,
-        timeout: const Duration(seconds: 10),
-        retries: 1,
-      ),
-      'HTTPS 直连',
-    );
-    if (bytes != null) return bytes;
-
-    bytes = accept(
-      await _httpGetBytes(
-        uri.replace(scheme: 'http'),
-        timeout: const Duration(seconds: 10),
-        retries: 1,
-      ),
-      'HTTP 直连',
-    );
-    if (bytes != null) return bytes;
-
-    bytes = accept(
-      await _httpGetBytes(
-        Uri.parse(_imageProxyUrl(uri)),
-        timeout: const Duration(seconds: 15),
-        retries: 1,
-      ),
-      '图片加速节点',
-    );
-    if (bytes != null) return bytes;
+    List<int>? bytes;
+    for (final channel in order) {
+      await _throttle();
+      bytes = accept(
+        await _runImageChannel(channel, uri: uri, path: path, maxBytes: maxBytes),
+        channel,
+      );
+      if (bytes != null) return bytes;
+    }
     return null;
   }
 

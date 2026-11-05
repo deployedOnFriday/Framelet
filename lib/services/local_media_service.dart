@@ -69,7 +69,7 @@ class LocalMediaService {
           continue;
         }
         if (entry is! File || !WebDavService.isVideoFile(name)) continue;
-        if (WebDavService.isExtraFile(name)) continue;
+        // 花絮/预告保留：详情页单独分区展示，海报墙不计入正片集数
         if (videos.length >= maxVideoCount) {
           onProgress?.call('已达到扫描上限 $maxVideoCount 个文件，停止深入');
           return videos;

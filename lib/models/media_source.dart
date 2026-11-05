@@ -283,8 +283,11 @@ MediaItem? toMediaItem(ScannedVideo video) {
       ? '共 ${video.episodeCount} 集'
       : _formatSize(video.sizeBytes);
   final summary = video.summary?.trim() ?? '';
+  final tmdbTitle = video.tmdbTitle?.trim() ?? '';
   return MediaItem(
-    title: video.title,
+    // 已刮削成功的条目用 TMDB 官方名，避免目录名/清洗文件名上墙；
+    // 未刮削的保持原名。
+    title: tmdbTitle.isNotEmpty ? tmdbTitle : video.title,
     subtitle: subtitle,
     // 与详情页 _yearOf 同优先级：TMDB 上映/首播年份优先，
     // 未刮削成功才回退文件修改时间（那只是入库时间，不是影片时间）。

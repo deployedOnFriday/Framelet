@@ -121,8 +121,8 @@ class WebDavService {
           continue;
         }
         if (!isVideoFile(name)) continue;
-        // 片头片尾、预告花絮等不算正片
-        if (isExtraFile(name)) continue;
+        // 花絮/预告不在此处丢弃：聚合与详情页会把它们单独分区展示
+        // （集数只统计正片，海报墙不会混入花絮）
         if (videos.length >= maxVideoCount) {
           onProgress?.call('已达到扫描上限 $maxVideoCount 个文件，停止深入');
           return videos;
