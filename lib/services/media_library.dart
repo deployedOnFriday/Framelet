@@ -43,6 +43,7 @@ class MediaLibrary extends ChangeNotifier {
   bool scraping = false;
   String scrapeProgress = '';
   int scrapeDone = 0;
+  int scrapeMatched = 0;
   int scrapeTotal = 0;
 
   /// 刮削设置（TMDB 密钥与可选代理），保存于安全存储。
@@ -122,8 +123,6 @@ class MediaLibrary extends ChangeNotifier {
       final aggregated = _aggregated(entry.key);
       for (final video in aggregated) {
         if (video.kind != kind) continue;
-        // 前端只展示已刮削的条目；未刮的收在设置页处理
-        if (!video.isScraped) continue;
         final key = _seriesMergeKey(video);
         final existing = merged[key];
         if (existing == null) {
@@ -546,6 +545,7 @@ class MediaLibrary extends ChangeNotifier {
     ScraperService.tmdbApiKey = (this.tmdbKey ?? '').trim().isEmpty
         ? ScraperService.builtinTmdbApiKey
         : this.tmdbKey!.trim();
+    ScraperService.resetNetworkSettings();
     UpdateService.proxyAddress = scrapeProxy;
     DanmakuService.proxyAddress = ScraperService.proxyAddress;
     notifyListeners();
@@ -574,6 +574,29 @@ class MediaLibrary extends ChangeNotifier {
     DanmakuService.proxyAddress = ScraperService.proxyAddress;
     DanmakuService.clearCache();
     notifyListeners();
+  }
+
+  /// 清除所有已下载的刮削图片，并清空数据库里的图片路径。
+  /// TMDB 匹配结果、简介、评分等元数据保留，下次刮削会重新下载图片。
+  Future<({int files, int bytes})> clearImageCache() async {
+    final stats = ScraperService.clearImageCache();
+    for (final entry in _videosBySource.entries) {
+      final videos = entry.value;
+      var changed = false;
+      for (var i = 0; i < videos.length; i++) {
+        final video = videos[i];
+        if (video.posterPath == null &&
+            video.backdropPath == null &&
+            video.stillPath == null) {
+          continue;
+        }
+        videos[i] = video.withoutImages();
+        changed = true;
+      }
+      if (changed) await _persistVideos(entry.key);
+    }
+    notifyListeners();
+    return stats;
   }
 
   Future<void> _persistSources() async {
@@ -745,6 +768,7 @@ class MediaLibrary extends ChangeNotifier {
     ScraperService.onLog = _scrapeLog;
     scraping = true;
     scrapeDone = 0;
+    scrapeMatched = 0;
     scrapeTotal = 0;
     scrapeProgress = '准备刮削…';
     notifyListeners();
@@ -765,15 +789,15 @@ class MediaLibrary extends ChangeNotifier {
           orElse: () => job.representative,
         );
         final isSeriesJob = job.group.length > 1;
+        final hasPoster = _imageExists(target.posterPath);
+        final hasBackdrop = _imageExists(target.backdropPath);
         final stillComplete =
             !isSeriesJob ||
-            job.group.where((v) => v.stillPath != null).length >=
+            job.group.where((v) => _imageExists(v.stillPath)).length >=
                 ((job.group.length + 1) ~/ 2);
-        if (!force &&
-            target.posterPath != null &&
-            target.backdropPath != null &&
-            stillComplete) {
+        if (!force && hasPoster && hasBackdrop && stillComplete) {
           scrapeDone++;
+          scrapeMatched++;
           scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal（跳过已有海报）';
           // 不逐条 notify：几百个已刮条目会在一帧内触发几百次全界面重建
           continue;
@@ -879,6 +903,9 @@ class MediaLibrary extends ChangeNotifier {
               scraped.summary != null ||
               scraped.rating != null ||
               scraped.tmdbId != null) {
+            if (posterPath != null || scraped.tmdbId != null) {
+              scrapeMatched++;
+            }
             for (final member in job.group) {
               final episodeNumber = episodeNumberOfVideo(member);
               _updateVideo(
@@ -924,13 +951,24 @@ class MediaLibrary extends ChangeNotifier {
           await _persistVideos(job.representative.sourceId);
         }
 
+        if (result == null) {
+          _scrapeLog(
+            '  未匹配：${job.representative.title}'
+            '${ScraperService.lastError.isEmpty ? '' : '（${ScraperService.lastError}）'}',
+          );
+        }
+
         scrapeDone++;
         _scrapeLog('  完成 $scrapeDone/$scrapeTotal');
         scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal';
         notifyListeners();
       }
 
-      scrapeProgress = '刮削完成，共处理 $scrapeTotal 个条目';
+      final unmatched = scrapeTotal - scrapeMatched;
+      scrapeProgress = unmatched <= 0
+          ? '刮削完成，共匹配 $scrapeMatched 个条目'
+          : '刮削完成：已匹配 $scrapeMatched / $scrapeTotal，'
+                '$unmatched 个未匹配（可在下方手动匹配，或先检测刮削线路）';
     } finally {
       scraping = false;
       notifyListeners();
@@ -1140,6 +1178,15 @@ class MediaLibrary extends ChangeNotifier {
       return '连接超时，服务器无响应';
     }
     return '连接失败：$text';
+  }
+
+  static bool _imageExists(String? path) {
+    if (path == null || path.isEmpty) return false;
+    try {
+      return File(path).existsSync();
+    } catch (_) {
+      return false;
+    }
   }
 
   static List<ScannedVideo> aggregate(List<ScannedVideo> videos) {

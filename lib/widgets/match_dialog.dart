@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../core/theme/app_theme.dart';
@@ -63,9 +65,13 @@ class _MatchSearchDialogState extends State<MatchSearchDialog> {
       _searching = false;
       _results = results;
       if (results.isEmpty) {
-        _error = _hasTmdbKey
-            ? '没有找到「$query」，换个名字试试（可用英文原名）'
-            : '未配置 TMDB 密钥，无法搜索。请到 设置 → 刮削 填写。';
+        if (!_hasTmdbKey) {
+          _error = '未配置 TMDB 密钥，无法搜索。请到 设置 → 刮削 填写。';
+        } else if (ScraperService.lastError.isNotEmpty) {
+          _error = '搜索失败：${ScraperService.lastError}';
+        } else {
+          _error = '没有找到「$query」，换个名字试试（可用英文原名）';
+        }
       }
     });
   }
@@ -215,6 +221,23 @@ class _CandidateCard extends StatefulWidget {
 
 class _CandidateCardState extends State<_CandidateCard> {
   bool _hovered = false;
+  Future<String?>? _posterFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    final url = widget.candidate.posterUrl;
+    if (url != null) {
+      // 不用 Image.network：国内网络下 image.tmdb.org 直连会被墙，
+      // 候选列表会全变占位图。走刮削服务同一套下载/缓存通道。
+      _posterFuture = ScraperService.downloadPoster(
+        url,
+        cacheKey:
+            'candidate_${widget.candidate.tmdbId ?? widget.candidate.name}'
+            '_${widget.candidate.year ?? ''}',
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -255,43 +278,7 @@ class _CandidateCardState extends State<_CandidateCard> {
                   child: Stack(
                     fit: StackFit.expand,
                     children: [
-                      if (candidate.posterUrl != null)
-                        Image.network(
-                          candidate.posterUrl!,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => Container(
-                            color: context.colors.primarySoft,
-                            child: Icon(
-                              Icons.movie_outlined,
-                              color: context.colors.primary,
-                            ),
-                          ),
-                          loadingBuilder: (context, child, progress) =>
-                              progress == null
-                              ? child
-                              : Container(
-                                  color: context.colors.primarySoft,
-                                  child: const Center(
-                                    child: SizedBox(
-                                      width: 18,
-                                      height: 18,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                        )
-                      else
-                        Container(
-                          color: context.colors.primarySoft,
-                          child: Center(
-                            child: Icon(
-                              Icons.movie_outlined,
-                              color: context.colors.primary,
-                            ),
-                          ),
-                        ),
+                      _buildPoster(context),
                       Positioned(
                         right: 6,
                         top: 6,
@@ -351,6 +338,46 @@ class _CandidateCardState extends State<_CandidateCard> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildPoster(BuildContext context) {
+    final future = _posterFuture;
+    if (future == null) return _posterPlaceholder(context);
+    return FutureBuilder<String?>(
+      future: future,
+      builder: (context, snapshot) {
+        final path = snapshot.data;
+        if (path != null) {
+          return Image.file(
+            File(path),
+            fit: BoxFit.cover,
+            errorBuilder: (_, _, _) => _posterPlaceholder(context),
+          );
+        }
+        if (snapshot.connectionState != ConnectionState.done) {
+          return Container(
+            color: context.colors.primarySoft,
+            child: const Center(
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          );
+        }
+        return _posterPlaceholder(context);
+      },
+    );
+  }
+
+  Widget _posterPlaceholder(BuildContext context) {
+    return Container(
+      color: context.colors.primarySoft,
+      child: Center(
+        child: Icon(Icons.movie_outlined, color: context.colors.primary),
       ),
     );
   }

@@ -126,7 +126,7 @@ void main() {
       expect(subtitles.map((item) => item.language), containsAll(['中文', '英语']));
     });
 
-    test('同步会扫描未连接的本地源，未刮削条目仍不进入前端', () async {
+    test('同步会扫描未连接的本地源，未刮削条目用渐变封面展示', () async {
       final video = File('${root.path}${Platform.pathSeparator}电影.mp4');
       await video.writeAsString('video');
 
@@ -154,7 +154,9 @@ void main() {
         ),
         isNotNull,
       );
-      expect(library.byKind(MediaKind.movie), isEmpty);
+      final movies = library.byKind(MediaKind.movie);
+      expect(movies, hasLength(1));
+      expect(movies.single.posterPath, isNull);
     });
 
     test('播放历史能按文件夹找回剧名与集数', () async {

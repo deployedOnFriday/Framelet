@@ -34,6 +34,8 @@ class _SettingsPageState extends State<SettingsPage>
   bool _scrapeFieldsFilled = false;
   bool _danmakuFieldsFilled = false;
   bool _obscureDanmakuSecret = true;
+  bool _diagnosing = false;
+  bool _clearingCache = false;
   DanmakuProvider _danmakuProvider = DanmakuProvider.dandanplay;
 
   @override
@@ -705,18 +707,239 @@ class _SettingsPageState extends State<SettingsPage>
                 },
                 child: const Text('保存数据源设置'),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Text(
-                  '密钥保存在系统安全存储中。TMDB 走内置直连线路，海报由图片 CDN 直连下载。',
-                  style: TextStyle(color: context.colors.muted, fontSize: 11.5),
-                ),
+              const SizedBox(width: 10),
+              OutlinedButton.icon(
+                key: const ValueKey('test-scrape-connection'),
+                onPressed: _diagnosing ? null : _runScrapeDiagnostics,
+                icon: _diagnosing
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.wifi_tethering_rounded, size: 18),
+                label: Text(_diagnosing ? '检测中…' : '检测刮削线路'),
+              ),
+              const SizedBox(width: 4),
+              TextButton(onPressed: _showScrapeLog, child: const Text('查看日志')),
+              const SizedBox(width: 4),
+              TextButton.icon(
+                key: const ValueKey('clear-image-cache'),
+                onPressed: _clearingCache || library.scraping
+                    ? null
+                    : _clearImageCache,
+                icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+                label: Text(_clearingCache ? '清理中…' : '清除缓存'),
               ),
             ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '密钥保存在系统安全存储中。默认自动选择可用直连节点；'
+            '若检测失败，请填写本机代理（如 Clash 的 127.0.0.1:7890）。',
+            style: TextStyle(
+              color: context.colors.muted,
+              fontSize: 11.5,
+              height: 1.5,
+            ),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _runScrapeDiagnostics() async {
+    setState(() => _diagnosing = true);
+    final result = await ScraperService.diagnose();
+    if (!mounted) return;
+    setState(() => _diagnosing = false);
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('刮削线路检测'),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _diagnosticRow(
+                dialogContext,
+                ok: result.apiOk,
+                title: 'TMDB 接口',
+                detail: result.apiDetail,
+              ),
+              const SizedBox(height: 14),
+              _diagnosticRow(
+                dialogContext,
+                ok: result.imageOk,
+                title: '图片 CDN',
+                detail: result.imageDetail,
+              ),
+              const SizedBox(height: 16),
+              Text(
+                '当前线路：${result.mode}',
+                style: TextStyle(
+                  color: dialogContext.colors.muted,
+                  fontSize: 12,
+                ),
+              ),
+              if (!result.apiOk || !result.imageOk) ...[
+                const SizedBox(height: 8),
+                Text(
+                  '提示：换网络后重新检测；仍失败时，在本页填写可用的 HTTP 代理，'
+                  '保存后再点「开始刮削」。',
+                  style: TextStyle(
+                    color: dialogContext.colors.muted,
+                    fontSize: 12,
+                    height: 1.6,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _diagnosticRow(
+    BuildContext context, {
+    required bool ok,
+    required String title,
+    required String detail,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          ok ? Icons.check_circle_rounded : Icons.error_outline_rounded,
+          size: 20,
+          color: ok ? context.colors.primary : const Color(0xFFE08A3C),
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  color: context.colors.text,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                detail,
+                style: TextStyle(
+                  color: context.colors.muted,
+                  fontSize: 12,
+                  height: 1.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showScrapeLog() async {
+    var text = '日志为空。';
+    try {
+      final file = File(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}'
+        'framelet_scrape.log',
+      );
+      if (file.existsSync()) {
+        final lines = await file.readAsLines();
+        final tail = lines.length > 240
+            ? lines.sublist(lines.length - 240)
+            : lines;
+        if (tail.isNotEmpty) text = tail.join('\n');
+      }
+    } catch (error) {
+      text = '读取日志失败：$error';
+    }
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('刮削日志（最近 240 行）'),
+        content: SizedBox(
+          width: 640,
+          height: 460,
+          child: SingleChildScrollView(
+            child: SelectableText(
+              text,
+              style: const TextStyle(fontSize: 11.5, height: 1.5),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _clearImageCache() async {
+    if (MediaLibrary.instance.scraping) {
+      _showMessage('刮削进行中，完成后再清除缓存');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('清除缓存'),
+        content: const Text(
+          '将删除已下载的海报、背景图、剧照和演员头像，并清空直连 IP 缓存。\n\n'
+          '媒体库条目、TMDB 匹配结果、简介与评分会保留；之后点「开始刮削」会重新下载图片。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('清除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() => _clearingCache = true);
+    final stats = await MediaLibrary.instance.clearImageCache();
+    if (!mounted) return;
+    setState(() => _clearingCache = false);
+    _showMessage(
+      '已清除 ${stats.files} 个图片文件，释放 ${_formatCacheSize(stats.bytes)}；'
+      '重新刮削会再次下载',
+    );
+  }
+
+  String _formatCacheSize(int bytes) {
+    if (bytes >= 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    }
+    if (bytes >= 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    if (bytes >= 1024) return '${(bytes / 1024).toStringAsFixed(0)} KB';
+    return '$bytes B';
   }
 
   Widget _scrapeStat(String value, String label) {
@@ -1144,7 +1367,7 @@ class _SettingsPageState extends State<SettingsPage>
   }
 }
 
-/// 未匹配内容区：列出没刮出来的条目，逐条手动匹配后才进入前端。
+/// 未匹配内容区：列出没刮出来的条目，可逐条手动补全海报与元数据。
 class _UnmatchedSection extends StatelessWidget {
   const _UnmatchedSection({required this.items});
 
@@ -1191,7 +1414,8 @@ class _UnmatchedSection extends StatelessWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            '这些没能自动匹配到 TMDB，暂不显示在前端。点「匹配」手动搜索选一下，匹配成功就会出现在海报墙上。',
+            '这些没能自动匹配到 TMDB，首页会先用渐变封面占位。'
+            '点「匹配」手动搜索选一下，匹配成功后就会换上正式海报。',
             style: TextStyle(
               color: context.colors.muted,
               fontSize: 12,

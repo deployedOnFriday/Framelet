@@ -1069,18 +1069,7 @@ class _CastSection extends StatelessWidget {
                   width: 90,
                   child: Column(
                     children: [
-                      CircleAvatar(
-                        radius: 42,
-                        backgroundColor: context.colors.hover,
-                        backgroundImage: _photo(member),
-                        child: _photo(member) == null
-                            ? Icon(
-                                Icons.person,
-                                size: 48,
-                                color: context.colors.iconMuted,
-                              )
-                            : null,
-                      ),
+                      _CastAvatar(member: member),
                       const SizedBox(height: 8),
                       Text(
                         member.name,
@@ -1111,9 +1100,50 @@ class _CastSection extends StatelessWidget {
       ),
     );
   }
+}
 
-  NetworkImage? _photo(CastMember member) =>
-      member.photoUrl == null ? null : NetworkImage(member.photoUrl!);
+/// 演员头像走刮削服务的下载/缓存通道，避免 NetworkImage 在受限网络下全空。
+class _CastAvatar extends StatefulWidget {
+  const _CastAvatar({required this.member});
+
+  final CastMember member;
+
+  @override
+  State<_CastAvatar> createState() => _CastAvatarState();
+}
+
+class _CastAvatarState extends State<_CastAvatar> {
+  Future<String?>? _photoFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    final url = widget.member.photoUrl;
+    if (url != null) {
+      _photoFuture = ScraperService.downloadPoster(
+        url,
+        cacheKey: 'cast_${widget.member.name}',
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<String?>(
+      future: _photoFuture,
+      builder: (context, snapshot) {
+        final path = snapshot.data;
+        return CircleAvatar(
+          radius: 42,
+          backgroundColor: context.colors.hover,
+          backgroundImage: path == null ? null : FileImage(File(path)),
+          child: path == null
+              ? Icon(Icons.person, size: 48, color: context.colors.iconMuted)
+              : null,
+        );
+      },
+    );
+  }
 }
 
 class _FileInfo extends StatelessWidget {

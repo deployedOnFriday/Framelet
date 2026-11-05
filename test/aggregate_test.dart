@@ -243,4 +243,32 @@ void main() {
       );
     });
   });
+
+  group('清除缓存', () {
+    test('withoutImages 清空图片路径但保留 TMDB 元数据', () {
+      const original = ScannedVideo(
+        sourceId: 's1',
+        path: '/剧/某剧/01.mp4',
+        title: '某剧',
+        kind: MediaKind.series,
+        posterPath: '/cache/poster.jpg',
+        backdropPath: '/cache/backdrop.jpg',
+        stillPath: '/cache/still.jpg',
+        summary: '简介',
+        rating: '8.6',
+        tmdbId: 123,
+        tmdbTitle: '某剧',
+      );
+
+      final cleared = original.withoutImages();
+
+      expect(cleared.posterPath, isNull);
+      expect(cleared.backdropPath, isNull);
+      expect(cleared.stillPath, isNull);
+      expect(cleared.summary, '简介');
+      expect(cleared.rating, '8.6');
+      expect(cleared.tmdbId, 123);
+      expect(cleared.tmdbTitle, '某剧');
+    });
+  });
 }

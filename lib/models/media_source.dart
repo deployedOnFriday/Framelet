@@ -164,7 +164,7 @@ class ScannedVideo {
   /// TMDB 官方剧名（聚合展示优先用它）。
   final String? tmdbTitle;
 
-  /// 是否已刮削（有海报或已匹配 TMDB）——未刮的不进入前端展示。
+  /// 是否已刮削（有海报或已匹配 TMDB）。未刮条目仍会以渐变封面展示。
   bool get isScraped => posterPath != null || tmdbId != null;
 
   Map<String, Object?> toJson() => {
@@ -254,6 +254,26 @@ class ScannedVideo {
     episodeTitle: episodeTitle ?? this.episodeTitle,
     tmdbId: tmdbId ?? this.tmdbId,
     tmdbTitle: tmdbTitle ?? this.tmdbTitle,
+  );
+
+  /// 清空所有图片文件路径，保留 TMDB 元数据，供「清除缓存」使用。
+  ScannedVideo withoutImages() => ScannedVideo(
+    sourceId: sourceId,
+    path: path,
+    title: title,
+    kind: kind,
+    episodeCount: episodeCount,
+    sizeBytes: sizeBytes,
+    modified: modified,
+    summary: summary,
+    rating: rating,
+    genres: genres,
+    cast: cast,
+    releaseDate: releaseDate,
+    runtimeSec: runtimeSec,
+    episodeTitle: episodeTitle,
+    tmdbId: tmdbId,
+    tmdbTitle: tmdbTitle,
   );
 }
 

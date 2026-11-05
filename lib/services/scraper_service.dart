@@ -62,6 +62,32 @@ class ScrapeCandidate {
   String get typeLabel => mediaType == 'tv' ? '剧集' : '电影';
 }
 
+/// 刮削线路自检结果：供设置页「检测线路」按钮展示。
+class ScrapeDiagnostics {
+  const ScrapeDiagnostics({
+    required this.apiOk,
+    required this.imageOk,
+    required this.mode,
+    required this.apiDetail,
+    required this.imageDetail,
+  });
+
+  final bool apiOk;
+  final bool imageOk;
+  final String mode;
+  final String apiDetail;
+  final String imageDetail;
+}
+
+class _SniAttempt {
+  const _SniAttempt({required this.ip, this.status, this.bytes, this.error});
+
+  final String ip;
+  final int? status;
+  final List<int>? bytes;
+  final String? error;
+}
+
 /// 海报与元数据刮削：
 /// - 主源 TVmaze（免费、无需密钥，覆盖剧集/动漫/部分电影）
 /// - 图片本地缓存，避免重复下载
@@ -105,130 +131,609 @@ class ScraperService {
   /// 可选 TMDB API Key（v3）：配置后优先用 TMDB，中文与电影覆盖最好。
   static String? tmdbApiKey;
 
-  /// TMDB API 域名在国内被 DNS 污染，直连超时；
-  /// 改用可访问的 CloudFront 节点 IP 直连（TLS 仍按域名校验，安全不受影响）。
-  /// IP 来源：CheckTMDB 项目每日更新的国内可用地址。
-  static const tmdbIpv4 = <String>[
-    '3.167.212.53',
-    '3.167.192.35',
-    '3.167.194.87',
-    '3.164.180.201',
-    '3.167.212.89',
-    '18.154.132.115',
-    '18.154.130.110',
-    '3.167.192.127',
+  static const _apiHost = 'api.themoviedb.org';
+  static const _imageHost = 'image.tmdb.org';
+
+  /// 内置兜底 IP。来源为 CheckTMDB 每日列表与实测可用的 CloudFront
+  /// 边缘节点；不同省份/运营商可达的节点不同，因此同时保留多组。
+  static const Map<String, List<String>> _builtinIpv4 = {
+    _apiHost: [
+      '108.138.246.55',
+      '52.85.151.79',
+      '3.167.212.53',
+      '3.167.192.35',
+      '3.167.194.87',
+      '3.164.180.201',
+      '3.167.212.89',
+      '3.167.192.127',
+      '18.154.132.115',
+      '18.154.130.110',
+    ],
+    _imageHost: [
+      '143.244.50.214',
+      '143.244.50.83',
+      '3.167.212.53',
+      '3.167.194.87',
+      '3.167.212.89',
+      '3.167.192.35',
+      '3.164.180.201',
+      '3.167.192.127',
+    ],
+  };
+
+  /// CheckTMDB 的 hosts 列表。jsDelivr 在国内通常可达，作为首选镜像；
+  /// 其余两个用于镜像故障时兜底。
+  static const _ipListMirrors = <String>[
+    'https://cdn.jsdelivr.net/gh/cnwikee/CheckTMDB@main/Tmdb_host_ipv4',
+    'https://ghproxy.net/https://raw.githubusercontent.com/cnwikee/CheckTMDB/main/Tmdb_host_ipv4',
+    'https://raw.githubusercontent.com/cnwikee/CheckTMDB/main/Tmdb_host_ipv4',
   ];
 
-  static HttpClient _httpClient() {
+  static final Map<String, List<String>> _dynamicIps = {};
+  static final Map<String, String> _preferredIp = {};
+  static final Map<String, DateTime> _ipCooldown = {};
+  static DateTime _ipListRefreshedAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static DateTime _ipRefreshAttemptedAt = DateTime.fromMillisecondsSinceEpoch(
+    0,
+  );
+  static Future<void>? _ipRefreshTask;
+  static bool _ipCacheLoaded = false;
+  static bool _systemProxyChecked = false;
+  static String? _systemProxy;
+
+  static String? _lastNetworkDetail;
+  static int _lastHttpStatus = 0;
+  static String _lastChannel = '';
+  static DateTime? _tmdbOfflineUntil;
+  static DateTime? _tvmazeOfflineUntil;
+
+  /// 最近一次刮削网络失败原因；UI 用它区分「真没搜到」与「网络不通」。
+  static String? lastSearchError;
+
+  static String get lastError => lastSearchError ?? '';
+
+  static String get lastChannel => _lastChannel;
+
+  /// 设置变更后清掉探测缓存，下一次请求按新代理/网络重新选择线路。
+  static void resetNetworkSettings() {
+    _systemProxyChecked = false;
+    _systemProxy = null;
+    _tmdbOfflineUntil = null;
+    _tvmazeOfflineUntil = null;
+    _preferredIp.clear();
+    _ipCooldown.clear();
+    lastSearchError = null;
+  }
+
+  static HttpClient _httpClient({String? proxy}) {
     final client = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 10)
+      ..connectionTimeout = const Duration(seconds: 8)
       ..userAgent = _userAgent;
-    final proxy = proxyAddress?.trim();
-    if (proxy != null && proxy.isNotEmpty) {
-      client.findProxy = (_) => 'PROXY $proxy';
+    final effective = _normalizeProxy(proxy ?? proxyAddress ?? '');
+    if (effective.isNotEmpty) {
+      client.findProxy = (_) => 'PROXY $effective';
     }
     return client;
   }
 
+  static String _normalizeProxy(String raw) {
+    var value = raw.trim();
+    final scheme = value.indexOf('://');
+    if (scheme >= 0) value = value.substring(scheme + 3);
+    final slash = value.indexOf('/');
+    if (slash >= 0) value = value.substring(0, slash);
+    return value.trim();
+  }
+
+  /// 用户显式配置的代理优先；未配置时尝试系统/环境代理（Clash、v2ray
+  /// 等开启「系统代理」后无需再手填），最后才走免代理直连线路。
+  static Future<String?> _activeProxy() async {
+    final explicit = (proxyAddress ?? '').trim();
+    if (explicit.isNotEmpty) return explicit;
+    return _detectSystemProxy();
+  }
+
+  static Future<String?> _detectSystemProxy() async {
+    if (_systemProxyChecked) return _systemProxy;
+    _systemProxyChecked = true;
+
+    final env =
+        (Platform.environment['HTTPS_PROXY'] ??
+                Platform.environment['https_proxy'] ??
+                Platform.environment['ALL_PROXY'] ??
+                Platform.environment['all_proxy'] ??
+                '')
+            .trim();
+    if (env.isNotEmpty) {
+      _systemProxy = _normalizeProxy(env);
+      return _systemProxy;
+    }
+    if (!Platform.isWindows) return null;
+
+    try {
+      const key =
+          r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings';
+      final enabled = await Process.run('reg', [
+        'query',
+        key,
+        '/v',
+        'ProxyEnable',
+      ]).timeout(const Duration(seconds: 2));
+      if (enabled.exitCode != 0 ||
+          !RegExp(
+            r'ProxyEnable\s+REG_DWORD\s+0x1',
+            caseSensitive: false,
+          ).hasMatch('${enabled.stdout}')) {
+        return null;
+      }
+      final server = await Process.run('reg', [
+        'query',
+        key,
+        '/v',
+        'ProxyServer',
+      ]).timeout(const Duration(seconds: 2));
+      final text = '${server.stdout}';
+      final match = RegExp(
+        r'ProxyServer\s+REG_SZ\s+(.+)$',
+        multiLine: true,
+      ).firstMatch(text);
+      var value = match?.group(1)?.trim() ?? '';
+      if (value.contains('=')) {
+        final entries = <String, String>{};
+        for (final part in value.split(';')) {
+          final index = part.indexOf('=');
+          if (index <= 0) continue;
+          entries[part.substring(0, index).toLowerCase()] = part
+              .substring(index + 1)
+              .trim();
+        }
+        value = entries['https'] ?? entries['http'] ?? '';
+      }
+      if (value.isNotEmpty && !value.toLowerCase().startsWith('socks')) {
+        _systemProxy = value;
+      }
+    } catch (_) {
+      // 读注册表失败不影响直连
+    }
+    return _systemProxy;
+  }
+
+  static Future<void> _ensureIpPool() async {
+    final now = DateTime.now();
+    if (_ipCacheLoaded &&
+        now.difference(_ipListRefreshedAt) < const Duration(hours: 12)) {
+      return;
+    }
+    // 拉取失败后 10 分钟内不重复尝试，避免每个请求都等镜像超时。
+    if (_ipCacheLoaded &&
+        now.difference(_ipRefreshAttemptedAt) < const Duration(minutes: 10)) {
+      return;
+    }
+    if (_ipRefreshTask != null) return _ipRefreshTask!;
+    _ipCacheLoaded = true;
+    _ipRefreshAttemptedAt = now;
+    final task = _refreshIpPoolSafely();
+    _ipRefreshTask = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_ipRefreshTask, task)) _ipRefreshTask = null;
+    }
+  }
+
+  static Future<void> _refreshIpPoolSafely() async {
+    try {
+      _loadIpCache();
+      if (DateTime.now().difference(_ipListRefreshedAt) <
+          const Duration(hours: 12)) {
+        return;
+      }
+      for (final url in _ipListMirrors) {
+        final text = await _fetchSmallText(url);
+        if (text == null) continue;
+        final parsed = _parseHosts(text);
+        if (parsed[_apiHost]?.isNotEmpty != true) continue;
+        _dynamicIps
+          ..clear()
+          ..addAll(parsed);
+        _ipListRefreshedAt = DateTime.now();
+        _writeIpCache(text);
+        onLog?.call(
+          '  TMDB 直连 IP 已更新：${parsed[_apiHost]!.first}'
+          '${parsed[_imageHost]?.isNotEmpty == true ? ' / ${parsed[_imageHost]!.first}' : ''}',
+        );
+        return;
+      }
+      onLog?.call('  TMDB 直连 IP 列表更新失败，使用内置节点');
+    } catch (_) {
+      // 使用内置节点即可
+    }
+  }
+
+  static Future<String?> _fetchSmallText(String url) async {
+    final client = _httpClient(proxy: await _activeProxy());
+    try {
+      final request = await client
+          .getUrl(Uri.parse(url))
+          .timeout(const Duration(seconds: 4));
+      final response = await request.close().timeout(
+        const Duration(seconds: 4),
+      );
+      if (response.statusCode != 200) return null;
+      final bytes = await _readLimited(
+        response,
+        256 * 1024,
+        const Duration(seconds: 4),
+      );
+      return utf8.decode(bytes, allowMalformed: true);
+    } catch (_) {
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static File _ipCacheFile() =>
+      File('${posterDir().parent.path}${Platform.pathSeparator}tmdb_hosts.txt');
+
+  static void _loadIpCache() {
+    try {
+      final file = _ipCacheFile();
+      if (!file.existsSync()) return;
+      final parsed = _parseHosts(file.readAsStringSync());
+      if (parsed[_apiHost]?.isNotEmpty != true) return;
+      _dynamicIps
+        ..clear()
+        ..addAll(parsed);
+      _ipListRefreshedAt = file.lastModifiedSync();
+    } catch (_) {
+      // 缓存损坏时忽略
+    }
+  }
+
+  static void _writeIpCache(String text) {
+    try {
+      final file = _ipCacheFile();
+      if (!file.parent.existsSync()) file.parent.createSync(recursive: true);
+      file.writeAsStringSync(text, flush: true);
+    } catch (_) {
+      // 缓存写入失败不影响本次刮削
+    }
+  }
+
+  static Map<String, List<String>> _parseHosts(String text) {
+    final result = <String, List<String>>{};
+    for (final line in const LineSplitter().convert(text)) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
+      final parts = trimmed.split(RegExp(r'\s+'));
+      if (parts.length < 2) continue;
+      final ip = parts.first;
+      final host = parts[1].toLowerCase();
+      if (host != _apiHost && host != _imageHost) continue;
+      if (!RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(ip)) continue;
+      final list = result.putIfAbsent(host, () => []);
+      if (!list.contains(ip)) list.add(ip);
+    }
+    return result;
+  }
+
+  static List<String> _candidateIps(String host) {
+    final now = DateTime.now();
+    final result = <String>[];
+
+    void add(String ip) {
+      final until = _ipCooldown[ip];
+      if (until != null && until.isAfter(now)) return;
+      if (!result.contains(ip)) result.add(ip);
+    }
+
+    final preferred = _preferredIp[host];
+    if (preferred != null) add(preferred);
+    for (final ip in _dynamicIps[host] ?? const <String>[]) {
+      add(ip);
+    }
+    for (final ip in _builtinIpv4[host] ?? const <String>[]) {
+      add(ip);
+    }
+    if (host == _imageHost) {
+      for (final ip in _builtinIpv4[_apiHost] ?? const <String>[]) {
+        add(ip);
+      }
+    }
+    return result.take(16).toList();
+  }
+
   /// 通过「国内可用 IP + 域名 SNI」直连 TMDB API。
   ///
-  /// TMDB 在国内被 DNS 污染，直接解析域名会超时；
-  /// 这里用 SecureSocket 手工完成 TLS（host 参数保证 SNI 与证书校验仍按域名），
-  /// 再由 IP 建立 TCP 连接，从而绕过污染。
+  /// TMDB 在国内被 DNS 污染，直接解析域名常会超时；这里用 SecureSocket
+  /// 手工完成 TLS（host 参数保证 SNI 与证书校验仍按域名），再由 IP
+  /// 建立 TCP 连接，从而绕过污染。
   static Future<String?> _tmdbGet(String pathAndQuery) async {
-    const domain = 'api.themoviedb.org';
-    final proxy = (proxyAddress ?? '').trim();
-    if (proxy.isNotEmpty) {
-      // 配了代理时走标准通道
-      final client = _httpClient();
-      try {
-        final request = await client.getUrl(
-          Uri.parse('https://$domain$pathAndQuery'),
-        );
-        final response = await request.close().timeout(
-          const Duration(seconds: 15),
-        );
-        if (response.statusCode != 200) return null;
-        return await response.transform(utf8.decoder).join();
-      } catch (_) {
+    if (_tmdbOfflineUntil != null &&
+        _tmdbOfflineUntil!.isAfter(DateTime.now())) {
+      return null;
+    }
+
+    var proxy = await _activeProxy();
+    final usingSystemProxy =
+        (proxyAddress ?? '').trim().isEmpty && proxy != null;
+    final uri = Uri.parse('https://$_apiHost$pathAndQuery');
+    _lastNetworkDetail = null;
+    _lastHttpStatus = 0;
+
+    if (proxy != null) {
+      final text = await _httpGetText(uri, proxy: proxy);
+      if (text != null) {
+        _markTmdbOnline('代理');
+        return text;
+      }
+      if (_lastHttpStatus == 401 || _lastHttpStatus == 403) {
+        _markTmdbOnline('代理');
+        lastSearchError = 'TMDB API Key 无效或已失效，请到 设置 → 刮削 重新填写';
         return null;
-      } finally {
-        client.close(force: true);
+      }
+      // 系统代理存在但实际上不通（代理软件已退出等）：本次运行不再尝试，
+      // 直接走直连线路，避免每个条目都先等一次代理超时。
+      if (usingSystemProxy && _lastHttpStatus == 0) {
+        _systemProxy = null;
+        proxy = null;
       }
     }
 
-    final body = await _sniGetBytes(domain, pathAndQuery);
-    return body == null ? null : utf8.decode(body, allowMalformed: true);
+    final body = await _sniGetBytes(_apiHost, pathAndQuery);
+    if (body != null) {
+      _markTmdbOnline('SNI 直连');
+      return utf8.decode(body, allowMalformed: true);
+    }
+    if (_lastHttpStatus == 401 || _lastHttpStatus == 403) {
+      // 能收到 401 说明线路是通的，问题在密钥而不是网络。
+      _markTmdbOnline('SNI 直连');
+      lastSearchError = 'TMDB API Key 无效或已失效，请到 设置 → 刮削 重新填写';
+      return null;
+    }
+
+    // 部分地区没有 DNS 污染（或用户改了 hosts / 开了系统级 VPN），
+    // 普通直连反而最稳，作为最后一条通道。
+    if (proxy == null) {
+      final text = await _httpGetText(uri);
+      if (text != null) {
+        _markTmdbOnline('普通直连');
+        return text;
+      }
+    }
+
+    _tmdbOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
+    lastSearchError = 'TMDB 接口不可达：${_networkHint()}';
+    onLog?.call('  TMDB 请求失败：$lastSearchError');
+    return null;
   }
 
-  /// 通过「国内可用 IP + 域名 SNI」直连 CDN 并取回响应体（二进制）。
-  ///
-  /// api 与 image 共用 CloudFront 边缘——同一批边缘 IP 按 SNI 分发，
-  /// 因此 image.tmdb.org 的图片也能走这条免代理通道（探针实测可用，
-  /// 4 个 IP 中约 2 个直连可达，靠轮询容错）。
-  static Future<List<int>?> _sniGetBytes(String host, String pathAndQuery) async {
-    for (final ip in tmdbIpv4) {
-      final raw = await _sniConnect(ip, host);
-      if (raw == null) continue;
-      try {
-        final bytes = await _sniRequest(
-          raw,
-          host,
-          pathAndQuery,
-          maxBytes: 16 * 1024 * 1024,
-        );
-        if (bytes == null) continue;
-        return bytes;
-      } catch (_) {
-        // 换下一个 IP
-      } finally {
+  static void _markTmdbOnline(String channel) {
+    _tmdbOfflineUntil = null;
+    _lastChannel = channel;
+    lastSearchError = null;
+  }
+
+  static Future<String?> _httpGetText(
+    Uri uri, {
+    String? proxy,
+    Duration timeout = const Duration(seconds: 10),
+  }) async {
+    final client = _httpClient(proxy: proxy);
+    try {
+      final request = await client.getUrl(uri).timeout(timeout);
+      final response = await request.close().timeout(timeout);
+      _lastHttpStatus = response.statusCode;
+      if (response.statusCode != 200) {
         try {
-          await raw.close();
+          await response.drain<void>();
         } catch (_) {}
+        return null;
+      }
+      final bytes = await _readLimited(response, 8 * 1024 * 1024, timeout);
+      return utf8.decode(bytes, allowMalformed: true);
+    } catch (error) {
+      _lastNetworkDetail = error.toString();
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static Future<List<int>?> _httpGetBytes(
+    Uri uri, {
+    String? proxy,
+    Duration timeout = const Duration(seconds: 15),
+    int retries = 2,
+  }) async {
+    for (var attempt = 0; attempt < retries; attempt++) {
+      if (attempt > 0) await _throttle();
+      final client = _httpClient(proxy: proxy);
+      try {
+        final request = await client.getUrl(uri).timeout(timeout);
+        final response = await request.close().timeout(timeout);
+        _lastHttpStatus = response.statusCode;
+        if (response.statusCode != 200) {
+          try {
+            await response.drain<void>();
+          } catch (_) {}
+          if (response.statusCode == 401 ||
+              response.statusCode == 403 ||
+              response.statusCode == 404) {
+            return null;
+          }
+          continue;
+        }
+        final bytes = await _readLimited(response, 20 * 1024 * 1024, timeout);
+        if (bytes.length >= 1024) return bytes;
+      } catch (error) {
+        _lastNetworkDetail = error.toString();
+      } finally {
+        client.close(force: true);
       }
     }
     return null;
   }
 
-  static Future<Socket?> _sniConnect(String ip, String host) async {
+  static Future<List<int>> _readLimited(
+    Stream<List<int>> stream,
+    int maxBytes,
+    Duration timeout,
+  ) async {
+    final bytes = <int>[];
+    await for (final chunk in stream.timeout(timeout)) {
+      bytes.addAll(chunk);
+      if (bytes.length > maxBytes) break;
+    }
+    return bytes;
+  }
+
+  /// 通过「可用 IP + 域名 SNI」直连 CDN 并取回响应体（二进制）。
+  /// 同一批候选 IP 并发探测，先返回可用者；失败节点短暂冷却，
+  /// 避免每次请求都在死节点上串行等 6 秒。
+  static Future<List<int>?> _sniGetBytes(
+    String host,
+    String pathAndQuery, {
+    int maxBytes = 16 * 1024 * 1024,
+    bool image = false,
+  }) async {
+    await _ensureIpPool();
+    final candidates = _candidateIps(host);
+    if (candidates.isEmpty) return null;
+    _lastHttpStatus = 0;
+
+    for (var offset = 0; offset < candidates.length; offset += 4) {
+      final end = offset + 4 > candidates.length
+          ? candidates.length
+          : offset + 4;
+      final batch = candidates.sublist(offset, end);
+      final result = await _raceSni(
+        host,
+        batch,
+        pathAndQuery,
+        maxBytes: maxBytes,
+        image: image,
+      );
+      if (result == null) continue;
+      if (result.bytes != null) {
+        _preferredIp[host] = result.ip;
+        _ipCooldown.remove(result.ip);
+        _lastHttpStatus = result.status ?? 200;
+        return result.bytes;
+      }
+      if (result.status != null) {
+        // 收到任何 HTTP 状态码都说明该节点可用；401/403/404 等
+        // 是内容层问题，换 IP 也不会变，直接返回让上层处理。
+        _preferredIp[host] = result.ip;
+        _ipCooldown.remove(result.ip);
+        _lastHttpStatus = result.status!;
+        return null;
+      }
+    }
+    return null;
+  }
+
+  static Future<_SniAttempt?> _raceSni(
+    String host,
+    List<String> ips,
+    String pathAndQuery, {
+    required int maxBytes,
+    required bool image,
+  }) {
+    final completer = Completer<_SniAttempt?>();
+    var pending = ips.length;
+
+    void finish(_SniAttempt? attempt) {
+      if (completer.isCompleted) return;
+      if (attempt != null &&
+          (attempt.bytes != null || attempt.status != null)) {
+        completer.complete(attempt);
+        return;
+      }
+      pending--;
+      if (pending == 0) completer.complete(null);
+    }
+
+    for (final ip in ips) {
+      _attemptSni(
+        ip,
+        host,
+        pathAndQuery,
+        maxBytes: maxBytes,
+        image: image,
+      ).then(finish).catchError((_) {
+        finish(null);
+      });
+    }
+    return completer.future;
+  }
+
+  static Future<_SniAttempt> _attemptSni(
+    String ip,
+    String host,
+    String pathAndQuery, {
+    required int maxBytes,
+    required bool image,
+  }) async {
     Socket? raw;
+    Socket? secure;
     try {
-      raw = await Socket.connect(ip, 443).timeout(
-        const Duration(seconds: 6),
+      raw = await Socket.connect(ip, 443).timeout(const Duration(seconds: 5));
+      secure = await SecureSocket.secure(
+        raw,
+        host: host,
+      ).timeout(const Duration(seconds: 6));
+      final response = await _sniRequest(
+        secure,
+        host,
+        pathAndQuery,
+        maxBytes: maxBytes,
+        image: image,
       );
-      return await SecureSocket.secure(raw, host: host).timeout(
-        const Duration(seconds: 8),
+      if (response == null) {
+        _ipCooldown[ip] = DateTime.now().add(const Duration(minutes: 3));
+        return _SniAttempt(ip: ip, error: 'empty response');
+      }
+      return _SniAttempt(
+        ip: ip,
+        status: response.status,
+        bytes: response.status == 200 ? response.body : null,
       );
-    } catch (_) {
+    } catch (error) {
+      _ipCooldown[ip] = DateTime.now().add(const Duration(minutes: 2));
+      return _SniAttempt(ip: ip, error: error.toString());
+    } finally {
+      try {
+        await secure?.close();
+      } catch (_) {}
       try {
         await raw?.close();
       } catch (_) {}
-      return null;
     }
   }
 
-  static Future<List<int>?> _sniRequest(
+  static Future<({int status, List<int> body})?> _sniRequest(
     Socket secure,
     String host,
     String pathAndQuery, {
     required int maxBytes,
+    required bool image,
   }) async {
     secure.write(
       'GET $pathAndQuery HTTP/1.1\r\n'
       'Host: $host\r\n'
       'User-Agent: $_userAgent\r\n'
-      'Accept: */*\r\n'
+      'Accept: ${image ? 'image/avif,image/webp,image/*,*/*;q=0.8' : 'application/json,*/*'}\r\n'
+      'Accept-Encoding: identity\r\n'
       'Connection: close\r\n\r\n',
     );
     final bytes = <int>[];
-    await for (final chunk in secure.timeout(const Duration(seconds: 30))) {
+    await for (final chunk in secure.timeout(const Duration(seconds: 20))) {
       bytes.addAll(chunk);
       if (bytes.length > maxBytes) break;
     }
-    final parsed = _parseHttpBytes(bytes);
-    if (parsed == null) return null;
-    // 200 取内容；401/403 等鉴权问题返回 null（停止轮询）
-    return parsed.status == 200 ? parsed.body : null;
+    return _parseHttpBytes(bytes);
   }
 
   /// 解析手写的 HTTP 响应：返回状态码与（chunked 解码后的）原始正文。
@@ -283,12 +788,45 @@ class ScraperService {
     return buffer;
   }
 
-  /// 海报缓存目录：%APPDATA%/com.framelet/framelet/posters
+  static String _networkHint() {
+    if (_lastHttpStatus >= 500) {
+      return 'TMDB 服务暂时异常（HTTP $_lastHttpStatus）';
+    }
+    if (_lastHttpStatus != 0) return 'HTTP $_lastHttpStatus';
+    final detail = _lastNetworkDetail;
+    if (detail != null && detail.isNotEmpty) {
+      return '无法连接（$detail）';
+    }
+    return '无法连接 api.themoviedb.org，可在 设置 → 刮削 填写代理';
+  }
+
+  static String _pathAndQuery(Uri uri) =>
+      '${uri.path}${uri.query.isEmpty ? '' : '?${uri.query}'}';
+
+  /// 海报缓存目录：Windows 为 %APPDATA%/com.framelet/framelet/posters，
+  /// macOS/Linux 使用各自的应用数据目录。
   static Directory posterDir() {
-    final appData =
-        Platform.environment['APPDATA'] ??
-        '${Platform.environment['USERPROFILE']}/AppData/Roaming';
-    return Directory('$appData/com.framelet/framelet/posters');
+    if (Platform.isWindows) {
+      final appData =
+          Platform.environment['APPDATA'] ??
+          '${Platform.environment['USERPROFILE'] ?? '.'}'
+              '\\AppData\\Roaming';
+      return Directory('$appData\\com.framelet\\framelet\\posters');
+    }
+    final home = Platform.environment['HOME'] ?? Directory.systemTemp.path;
+    if (Platform.isMacOS) {
+      return Directory(
+        '$home/Library/Application Support/com.framelet/framelet/posters',
+      );
+    }
+    if (Platform.isLinux) {
+      final data =
+          Platform.environment['XDG_DATA_HOME'] ?? '$home/.local/share';
+      return Directory('$data/com.framelet/framelet/posters');
+    }
+    return Directory(
+      '${Directory.systemTemp.path}/com.framelet/framelet/posters',
+    );
   }
 
   /// 从文件名/系列名推导查询词与年份。
@@ -380,7 +918,12 @@ class ScraperService {
     bool preferTv = false,
   }) async {
     final key = tmdbApiKey?.trim();
-    if (key == null || key.isEmpty || query.trim().isEmpty) return const [];
+    if (key == null || key.isEmpty) {
+      lastSearchError = '未配置 TMDB API Key';
+      return const [];
+    }
+    if (query.trim().isEmpty) return const [];
+    lastSearchError = null;
     final pathAndQuery =
         '/3/search/multi'
         '?api_key=$key&language=zh-CN&include_adult=false'
@@ -388,7 +931,10 @@ class ScraperService {
     try {
       await _throttle();
       final body = await _tmdbGet(pathAndQuery);
-      if (body == null) return const [];
+      if (body == null) {
+        lastSearchError ??= 'TMDB 搜索失败，请检查网络或代理';
+        return const [];
+      }
       final data = jsonDecode(body) as Map<String, Object?>;
       final results = data['results'] as List<Object?>? ?? const [];
       final candidates = <ScrapeCandidate>[];
@@ -438,7 +984,8 @@ class ScraperService {
         return 0;
       });
       return candidates.take(18).toList();
-    } catch (_) {
+    } catch (error) {
+      lastSearchError = 'TMDB 返回数据异常：$error';
       return const [];
     }
   }
@@ -695,6 +1242,10 @@ class ScraperService {
   /// 在 TVmaze 搜索并挑选最匹配的剧集/影片。
   static Future<ScrapeResult?> search(String query, {int? year}) async {
     if (query.trim().isEmpty) return null;
+    if (_tvmazeOfflineUntil != null &&
+        _tvmazeOfflineUntil!.isAfter(DateTime.now())) {
+      return null;
+    }
     final url = Uri.parse(
       'https://api.tvmaze.com/search/shows?q=${Uri.encodeQueryComponent(query)}',
     );
@@ -705,7 +1256,12 @@ class ScraperService {
       final response = await request.close().timeout(
         const Duration(seconds: 12),
       );
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) {
+        if (response.statusCode >= 500) {
+          _tvmazeOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
+        }
+        return null;
+      }
       final body = await response.transform(utf8.decoder).join();
       final list = jsonDecode(body) as List<Object?>;
       ScrapeResult? best;
@@ -742,7 +1298,9 @@ class ScraperService {
         }
       }
       return bestScore >= 0.35 ? best : null;
-    } catch (_) {
+    } catch (error) {
+      _tvmazeOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
+      _lastNetworkDetail = error.toString();
       return null;
     } finally {
       client.close(force: true);
@@ -759,65 +1317,185 @@ class ScraperService {
     final file = File('${dir.path}/$safeKey.jpg');
     if (file.existsSync() && file.lengthSync() > 1024) return file.path;
 
-    final proxyConfigured = (proxyAddress ?? '').trim().isNotEmpty;
-    // 未配刮削代理时，image.tmdb.org 直连被墙，HttpClient 必然失败——
-    // 直接走 SNI 免代理通道（与 API 同一套 CloudFront 边缘 IP）。
-    if (!proxyConfigured && url.contains('image.tmdb.org')) {
-      final uri = Uri.parse(url);
-      try {
+    final uri = Uri.parse(url);
+    final isTmdbImage = uri.host.endsWith('tmdb.org');
+    final proxy = await _activeProxy();
+    final usingSystemProxy =
+        (proxyAddress ?? '').trim().isEmpty && proxy != null;
+    List<int>? bytes;
+    _lastNetworkDetail = null;
+    _lastHttpStatus = 0;
+
+    try {
+      if (isTmdbImage && proxy == null) {
+        // 未配代理时优先走 SNI 免代理通道；图片与 API 共用一批
+        // 边缘节点，但 image.tmdb.org 也会使用 BunnyCDN，因此
+        // 失败后仍会用普通通道兜底。
         await _throttle();
-        final bytes = await _sniGetBytes(
+        bytes = await _sniGetBytes(
           uri.host,
-          '${uri.path}${uri.query.isEmpty ? '' : '?${uri.query}'}',
+          _pathAndQuery(uri),
+          maxBytes: 20 * 1024 * 1024,
+          image: true,
         );
-        if (bytes == null || bytes.length < 1024) {
-          onLog?.call('  下载图片失败 $cacheKey: SNI 直连无可用节点');
-          return null;
-        }
-        if (!dir.existsSync()) dir.createSync(recursive: true);
-        await file.writeAsBytes(bytes, flush: true);
-        return file.path;
-      } catch (error) {
+      }
+
+      bytes ??= await _httpGetBytes(uri, proxy: proxy);
+      if (bytes == null && usingSystemProxy && _lastHttpStatus == 0) {
+        _systemProxy = null;
+      }
+
+      // 代理或普通通道失败时，再试一次 SNI（有的机器代理只放行
+      // API 域名，图片域名需要直连）。
+      if (bytes == null && isTmdbImage && proxy != null) {
+        await _throttle();
+        bytes = await _sniGetBytes(
+          uri.host,
+          _pathAndQuery(uri),
+          maxBytes: 20 * 1024 * 1024,
+          image: true,
+        );
+      }
+    } catch (error) {
+      _lastNetworkDetail = error.toString();
+      bytes = null;
+    }
+
+    if (bytes == null || bytes.length < 1024) {
+      onLog?.call('  下载图片失败 $cacheKey：${_networkHint()}');
+      return null;
+    }
+
+    try {
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      await file.writeAsBytes(bytes, flush: true);
+      return file.path;
+    } catch (error) {
+      try {
         if (file.existsSync()) file.deleteSync();
-        onLog?.call('  下载图片失败 $cacheKey: $error');
-        return null;
+      } catch (_) {}
+      onLog?.call('  下载图片失败 $cacheKey：$error');
+      return null;
+    }
+  }
+
+  /// 刮削线路自检：设置页按钮调用，快速判断 API 与图片 CDN 是否可达。
+  static Future<ScrapeDiagnostics> diagnose() async {
+    _tmdbOfflineUntil = null;
+    _tvmazeOfflineUntil = null;
+    lastSearchError = null;
+    _lastNetworkDetail = null;
+    _lastHttpStatus = 0;
+
+    final proxy = await _activeProxy();
+    final explicitProxy = (proxyAddress ?? '').trim();
+    final mode = explicitProxy.isNotEmpty
+        ? '手动代理 $explicitProxy'
+        : proxy != null
+        ? '系统/环境代理 $proxy'
+        : '直连（自动测速节点）';
+
+    final key = (tmdbApiKey ?? '').trim();
+    var apiOk = false;
+    var apiDetail = '未配置 TMDB API Key';
+    String? probeUrl;
+    if (key.isNotEmpty) {
+      final watch = Stopwatch()..start();
+      final hit = await searchTmdb('三体', preferTv: true);
+      apiOk = hit != null;
+      probeUrl = hit?.posterUrl;
+      apiDetail = apiOk
+          ? '成功：${hit.name}'
+                '（${watch.elapsedMilliseconds} ms，'
+                '${_lastChannel.isEmpty ? '未知' : _lastChannel}）'
+          : '失败：${lastSearchError ?? '未返回结果'}'
+                '（${watch.elapsedMilliseconds} ms）';
+    }
+
+    final watch = Stopwatch()..start();
+    final probeUri = Uri.parse(
+      probeUrl ?? 'https://$_imageHost/t/p/w92/zxfBtHz5UmSTfIEC4O4GngyjHwa.jpg',
+    );
+    var imageOk = false;
+    var imageDetail = '';
+    var bytes = await _sniGetBytes(
+      probeUri.host,
+      _pathAndQuery(probeUri),
+      maxBytes: 2 * 1024 * 1024,
+      image: true,
+    );
+    if (bytes != null && bytes.length > 1024) {
+      imageOk = true;
+      imageDetail =
+          '成功：${bytes.length ~/ 1024} KB'
+          '（${watch.elapsedMilliseconds} ms，SNI/直连）';
+    } else {
+      bytes = await _httpGetBytes(
+        probeUri,
+        proxy: proxy,
+        timeout: const Duration(seconds: 12),
+        retries: 1,
+      );
+      if (bytes != null && bytes.length > 1024) {
+        imageOk = true;
+        imageDetail =
+            '成功：${bytes.length ~/ 1024} KB'
+            '（${watch.elapsedMilliseconds} ms，备用通道）';
+      } else {
+        imageDetail =
+            '失败：${_networkHint()}'
+            '（${watch.elapsedMilliseconds} ms）';
       }
     }
 
-    final client = _httpClient();
-    try {
-      // 网络抖动容错：失败自动重试一次（image.tmdb.org 国内直连
-      // 常见间歇性失败，重试能救回相当一部分）。
-      for (var attempt = 1; attempt <= 2; attempt++) {
-        await _throttle();
-        final request = await client.getUrl(Uri.parse(url));
-        final response = await request.close().timeout(
-          const Duration(seconds: 20),
-        );
-        if (response.statusCode != 200) {
-          onLog?.call('  下载图片失败 $cacheKey: HTTP ${response.statusCode}');
-          continue;
+    return ScrapeDiagnostics(
+      apiOk: apiOk,
+      imageOk: imageOk,
+      mode: mode,
+      apiDetail: apiDetail,
+      imageDetail: imageDetail,
+    );
+  }
+
+  /// 删除海报/背景/剧照/演员头像缓存，并清掉直连 IP 缓存。
+  /// 返回删除的文件数与释放的字节数。
+  static ({int files, int bytes}) clearImageCache() {
+    var files = 0;
+    var bytes = 0;
+    final dir = posterDir();
+    if (dir.existsSync()) {
+      try {
+        for (final entity in dir.listSync(
+          recursive: true,
+          followLinks: false,
+        )) {
+          if (entity is! File) continue;
+          try {
+            bytes += entity.lengthSync();
+            entity.deleteSync();
+            files++;
+          } catch (_) {
+            // 文件被占用时跳过，下次再删
+          }
         }
-        if (!dir.existsSync()) dir.createSync(recursive: true);
-        final sink = file.openWrite();
-        await response.pipe(sink);
-        if (file.lengthSync() < 1024) {
-          file.deleteSync();
-          onLog?.call('  下载图片失败 $cacheKey: 文件过小');
-          continue;
-        }
-        return file.path;
+      } catch (_) {
+        // 目录不可读时返回已统计的部分
       }
-      return null;
-    } catch (error) {
-      if (file.existsSync()) file.deleteSync();
-      onLog?.call('  下载图片失败 $cacheKey: $error');
-      onLog?.call('  （未配置刮削代理时图片域名直连，国内网络下会失败——'
-          '请到 设置→刮削 填写刮削代理）');
-      return null;
-    } finally {
-      client.close(force: true);
     }
+
+    try {
+      final cache = _ipCacheFile();
+      if (cache.existsSync()) cache.deleteSync();
+    } catch (_) {}
+    _dynamicIps.clear();
+    _preferredIp.clear();
+    _ipCooldown.clear();
+    _ipListRefreshedAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _ipRefreshAttemptedAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _ipRefreshTask = null;
+    lastSearchError = null;
+
+    return (files: files, bytes: bytes);
   }
 
   static Future<void> _throttle() async {
