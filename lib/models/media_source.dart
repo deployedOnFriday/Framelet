@@ -286,7 +286,9 @@ MediaItem? toMediaItem(ScannedVideo video) {
   return MediaItem(
     title: video.title,
     subtitle: subtitle,
-    year: video.modified == null ? '' : video.modified!.year.toString(),
+    // 与详情页 _yearOf 同优先级：TMDB 上映/首播年份优先，
+    // 未刮削成功才回退文件修改时间（那只是入库时间，不是影片时间）。
+    year: _yearOf(video),
     colors: _paletteFor(video.title),
     icon: _iconFor(video.kind),
     rating: video.rating,
@@ -296,6 +298,16 @@ MediaItem? toMediaItem(ScannedVideo video) {
     posterPath: video.posterPath,
     backdropPath: video.backdropPath,
   );
+}
+
+/// 影片年份：优先 TMDB 上映/首播年份，刮削失败回退文件修改时间。
+String _yearOf(ScannedVideo video) {
+  final release = video.releaseDate;
+  if (release != null && release.trim().length >= 4) {
+    return release.trim().substring(0, 4);
+  }
+  final modified = video.modified;
+  return modified == null ? '' : modified.year.toString();
 }
 
 String _formatSize(int bytes) {
