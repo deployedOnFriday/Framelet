@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../core/theme/app_theme.dart';
 import '../models/media_source.dart';
@@ -1050,8 +1051,32 @@ class _SettingsPageState extends State<SettingsPage>
               ),
             ),
             Text(
-              'Framelet 0.1.0 · Windows',
-              style: TextStyle(color: context.colors.muted),
+              '拾帧',
+              style: TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.w700,
+                color: context.colors.primary,
+              ),
+            ),
+            // 版本运行时读取构建注入值（CI 按 tag 注入 build-name），
+            // 不再硬编码——否则发新版这里永远是旧数字。
+            FutureBuilder<PackageInfo>(
+              future: PackageInfo.fromPlatform(),
+              builder: (context, snapshot) {
+                final info = snapshot.data;
+                final platform = switch (Platform.operatingSystem) {
+                  'windows' => 'Windows',
+                  'macos' => 'macOS',
+                  'android' => 'Android',
+                  'ios' => 'iOS',
+                  'linux' => 'Linux',
+                  _ => Platform.operatingSystem,
+                };
+                return Text(
+                  'Framelet ${info?.version ?? ''} · $platform',
+                  style: TextStyle(color: context.colors.muted),
+                );
+              },
             ),
             const SizedBox(height: 18),
             const Text('拾起每一帧，让媒体库重新清晰。', textAlign: TextAlign.center),

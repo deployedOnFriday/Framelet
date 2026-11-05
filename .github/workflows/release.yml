@@ -8,25 +8,50 @@ on:
 permissions:
   contents: write
 
+env:
+  FLUTTER_VERSION: '3.47.8'
+
 jobs:
+  # 版本号来自 tag（vX.Y.Z → X.Y.Z），四个平台构建统一注入
+  # --build-name/--build-number，应用内「关于」页与系统信息保持一致。
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      build: ${{ steps.ver.outputs.build }}
+    steps:
+      - id: ver
+        shell: bash
+        run: |
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          echo "build=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
   windows:
+    needs: resolve
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.8'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - run: flutter pub get
       - run: flutter test
-      - run: flutter build windows --release
+      - name: Build
+        env:
+          APP_VERSION: ${{ needs.resolve.outputs.version }}
+          APP_BUILD: ${{ needs.resolve.outputs.build }}
+        shell: bash
+        run: |
+          flutter build windows --release \
+            --build-name="$APP_VERSION" --build-number="$APP_BUILD"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
       - name: Build installer
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}" -replace '^v',''
+          $version = "${{ needs.resolve.outputs.version }}"
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$version windows/installer/framelet.iss
           Move-Item windows/installer/Output/FrameletSetup-$version-x64.exe FrameletSetup-$version-x64.exe
       - name: Package portable zip
@@ -42,6 +67,7 @@ jobs:
             framelet-windows-x64-portable.zip
 
   android:
+    needs: resolve
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,11 +77,18 @@ jobs:
           java-version: '17'
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.8'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --release
+      - name: Build
+        env:
+          APP_VERSION: ${{ needs.resolve.outputs.version }}
+          APP_BUILD: ${{ needs.resolve.outputs.build }}
+        shell: bash
+        run: |
+          flutter build apk --release \
+            --build-name="$APP_VERSION" --build-number="$APP_BUILD"
       - name: Package
         run: |
           cp build/app/outputs/flutter-apk/app-release.apk framelet-android.apk
@@ -65,16 +98,24 @@ jobs:
           path: framelet-android.apk
 
   macos:
+    needs: resolve
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.8'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter build macos --release
+      - name: Build
+        env:
+          APP_VERSION: ${{ needs.resolve.outputs.version }}
+          APP_BUILD: ${{ needs.resolve.outputs.build }}
+        shell: bash
+        run: |
+          flutter build macos --release \
+            --build-name="$APP_VERSION" --build-number="$APP_BUILD"
       - name: Package dmg
         run: |
           hdiutil create -volname "Framelet" \
@@ -86,17 +127,25 @@ jobs:
           path: framelet-macos.dmg
 
   ios:
+    needs: resolve
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.8'
+          flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
       - run: flutter pub get
       # 未签名构建：无开发者账号无法安装，仅作工程验证产物
-      - run: flutter build ios --release --no-codesign
+      - name: Build
+        env:
+          APP_VERSION: ${{ needs.resolve.outputs.version }}
+          APP_BUILD: ${{ needs.resolve.outputs.build }}
+        shell: bash
+        run: |
+          flutter build ios --release --no-codesign \
+            --build-name="$APP_VERSION" --build-number="$APP_BUILD"
       - name: Package
         run: |
           mkdir -p Payload
