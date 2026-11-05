@@ -73,6 +73,10 @@ class ScraperService {
   static const _requestGap = Duration(milliseconds: 260);
   static DateTime _lastRequest = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// 刮削过程日志回调（由 MediaLibrary 注入，写入临时目录日志）。
+  /// 关键失败（图片下载等）必须经由这里显性化，避免静默丢图。
+  static void Function(String message)? onLog;
+
   /// 可选 HTTP 代理（如 127.0.0.1:7890）。
   static String? proxyAddress;
 
@@ -685,22 +689,34 @@ class ScraperService {
 
     final client = _httpClient();
     try {
-      await _throttle();
-      final request = await client.getUrl(Uri.parse(url));
-      final response = await request.close().timeout(
-        const Duration(seconds: 20),
-      );
-      if (response.statusCode != 200) return null;
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      final sink = file.openWrite();
-      await response.pipe(sink);
-      if (file.lengthSync() < 1024) {
-        file.deleteSync();
-        return null;
+      // 网络抖动容错：失败自动重试一次（image.tmdb.org 国内直连
+      // 常见间歇性失败，重试能救回相当一部分）。
+      for (var attempt = 1; attempt <= 2; attempt++) {
+        await _throttle();
+        final request = await client.getUrl(Uri.parse(url));
+        final response = await request.close().timeout(
+          const Duration(seconds: 20),
+        );
+        if (response.statusCode != 200) {
+          onLog?.call('  下载图片失败 $cacheKey: HTTP ${response.statusCode}');
+          continue;
+        }
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        final sink = file.openWrite();
+        await response.pipe(sink);
+        if (file.lengthSync() < 1024) {
+          file.deleteSync();
+          onLog?.call('  下载图片失败 $cacheKey: 文件过小');
+          continue;
+        }
+        return file.path;
       }
-      return file.path;
-    } catch (_) {
+      return null;
+    } catch (error) {
       if (file.existsSync()) file.deleteSync();
+      onLog?.call('  下载图片失败 $cacheKey: $error');
+      onLog?.call('  （未配置刮削代理时图片域名直连，国内网络下会失败——'
+          '请到 设置→刮削 填写刮削代理）');
       return null;
     } finally {
       client.close(force: true);

@@ -735,6 +735,8 @@ class MediaLibrary extends ChangeNotifier {
   /// 默认跳过已有海报的条目；force 为 true 时重新匹配并覆盖。
   Future<void> scrapeAll({bool force = false}) async {
     if (scraping) return;
+    // 注入刮削日志回调：图片下载等失败必须显性化，否则无从排查
+    ScraperService.onLog = _scrapeLog;
     scraping = true;
     scrapeDone = 0;
     scrapeTotal = 0;
