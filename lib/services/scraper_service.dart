@@ -4,6 +4,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'proxy_resolver.dart';
+
 /// 刮削结果：海报地址、简介与评分。
 class ScrapeResult {
   const ScrapeResult({
@@ -134,6 +136,10 @@ class ScraperService {
   static const _apiHost = 'api.themoviedb.org';
   static const _imageHost = 'image.tmdb.org';
 
+  /// TMDB 图片实际落在 Bunny CDN。该域名绕开被污染的 image.tmdb.org
+  /// 域名，同时仍走 HTTPS 与证书校验。
+  static const _imageCdnHost = 'tmdb-image-prod.b-cdn.net';
+
   /// 内置兜底 IP。来源为 CheckTMDB 每日列表与实测可用的 CloudFront
   /// 边缘节点；不同省份/运营商可达的节点不同，因此同时保留多组。
   static const Map<String, List<String>> _builtinIpv4 = {
@@ -159,6 +165,7 @@ class ScraperService {
       '3.164.180.201',
       '3.167.192.127',
     ],
+    _imageCdnHost: ['79.127.134.131', '143.244.50.214', '143.244.50.83'],
   };
 
   /// CheckTMDB 的 hosts 列表。jsDelivr 在国内通常可达，作为首选镜像；
@@ -178,8 +185,6 @@ class ScraperService {
   );
   static Future<void>? _ipRefreshTask;
   static bool _ipCacheLoaded = false;
-  static bool _systemProxyChecked = false;
-  static String? _systemProxy;
 
   static String? _lastNetworkDetail;
   static int _lastHttpStatus = 0;
@@ -196,8 +201,7 @@ class ScraperService {
 
   /// 设置变更后清掉探测缓存，下一次请求按新代理/网络重新选择线路。
   static void resetNetworkSettings() {
-    _systemProxyChecked = false;
-    _systemProxy = null;
+    ProxyResolver.reset();
     _tmdbOfflineUntil = null;
     _tvmazeOfflineUntil = null;
     _preferredIp.clear();
@@ -209,94 +213,17 @@ class ScraperService {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 8)
       ..userAgent = _userAgent;
-    final effective = _normalizeProxy(proxy ?? proxyAddress ?? '');
+    final effective = ProxyResolver.normalize(proxy ?? proxyAddress ?? '');
     if (effective.isNotEmpty) {
       client.findProxy = (_) => 'PROXY $effective';
     }
     return client;
   }
 
-  static String _normalizeProxy(String raw) {
-    var value = raw.trim();
-    final scheme = value.indexOf('://');
-    if (scheme >= 0) value = value.substring(scheme + 3);
-    final slash = value.indexOf('/');
-    if (slash >= 0) value = value.substring(0, slash);
-    return value.trim();
-  }
-
   /// 用户显式配置的代理优先；未配置时尝试系统/环境代理（Clash、v2ray
   /// 等开启「系统代理」后无需再手填），最后才走免代理直连线路。
-  static Future<String?> _activeProxy() async {
-    final explicit = (proxyAddress ?? '').trim();
-    if (explicit.isNotEmpty) return explicit;
-    return _detectSystemProxy();
-  }
-
-  static Future<String?> _detectSystemProxy() async {
-    if (_systemProxyChecked) return _systemProxy;
-    _systemProxyChecked = true;
-
-    final env =
-        (Platform.environment['HTTPS_PROXY'] ??
-                Platform.environment['https_proxy'] ??
-                Platform.environment['ALL_PROXY'] ??
-                Platform.environment['all_proxy'] ??
-                '')
-            .trim();
-    if (env.isNotEmpty) {
-      _systemProxy = _normalizeProxy(env);
-      return _systemProxy;
-    }
-    if (!Platform.isWindows) return null;
-
-    try {
-      const key =
-          r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings';
-      final enabled = await Process.run('reg', [
-        'query',
-        key,
-        '/v',
-        'ProxyEnable',
-      ]).timeout(const Duration(seconds: 2));
-      if (enabled.exitCode != 0 ||
-          !RegExp(
-            r'ProxyEnable\s+REG_DWORD\s+0x1',
-            caseSensitive: false,
-          ).hasMatch('${enabled.stdout}')) {
-        return null;
-      }
-      final server = await Process.run('reg', [
-        'query',
-        key,
-        '/v',
-        'ProxyServer',
-      ]).timeout(const Duration(seconds: 2));
-      final text = '${server.stdout}';
-      final match = RegExp(
-        r'ProxyServer\s+REG_SZ\s+(.+)$',
-        multiLine: true,
-      ).firstMatch(text);
-      var value = match?.group(1)?.trim() ?? '';
-      if (value.contains('=')) {
-        final entries = <String, String>{};
-        for (final part in value.split(';')) {
-          final index = part.indexOf('=');
-          if (index <= 0) continue;
-          entries[part.substring(0, index).toLowerCase()] = part
-              .substring(index + 1)
-              .trim();
-        }
-        value = entries['https'] ?? entries['http'] ?? '';
-      }
-      if (value.isNotEmpty && !value.toLowerCase().startsWith('socks')) {
-        _systemProxy = value;
-      }
-    } catch (_) {
-      // 读注册表失败不影响直连
-    }
-    return _systemProxy;
-  }
+  static Future<String?> _activeProxy() =>
+      ProxyResolver.resolve(explicit: proxyAddress);
 
   static Future<void> _ensureIpPool() async {
     final now = DateTime.now();
@@ -476,7 +403,7 @@ class ScraperService {
       // 系统代理存在但实际上不通（代理软件已退出等）：本次运行不再尝试，
       // 直接走直连线路，避免每个条目都先等一次代理超时。
       if (usingSystemProxy && _lastHttpStatus == 0) {
-        _systemProxy = null;
+        ProxyResolver.disableSystemProxy();
         proxy = null;
       }
     }
@@ -1307,6 +1234,236 @@ class ScraperService {
     }
   }
 
+  static bool _looksLikeImage(List<int> bytes) {
+    if (bytes.length < 12) return false;
+    if (bytes[0] == 0xFF && bytes[1] == 0xD8) return true; // JPEG
+    if (bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
+      return true; // PNG
+    }
+    if (bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46) {
+      return true; // GIF
+    }
+    if (bytes[0] == 0x52 &&
+        bytes[1] == 0x49 &&
+        bytes[2] == 0x46 &&
+        bytes[3] == 0x46) {
+      return true; // WebP / RIFF
+    }
+    // AVIF / HEIC: ....ftyp
+    if (bytes[4] == 0x66 &&
+        bytes[5] == 0x74 &&
+        bytes[6] == 0x79 &&
+        bytes[7] == 0x70) {
+      return true;
+    }
+    return false;
+  }
+
+  static String _lastImageChannel = '';
+
+  static String _tmdbImageProxyUrl(Uri uri) {
+    final path = _pathAndQuery(uri);
+    final width = RegExp(r'/t/p/(w\d+)/').firstMatch(path)?.group(1);
+    final query = <String>[
+      'url=${Uri.encodeQueryComponent('https://$_imageHost$path')}',
+      'output=jpg',
+      'q=88',
+      if (width != null) 'w=${width.substring(1)}',
+    ];
+    return 'https://wsrv.nl/?${query.join('&')}';
+  }
+
+  /// 用内置 IP + Host 头发起纯 HTTP 请求。部分运营商只阻断
+  /// image.tmdb.org 的 TLS SNI，但 HTTP 仍可到达 Bunny CDN；
+  /// 同时绕过污染 DNS，作为完全无代理的兜底。
+  static Future<List<int>?> _plainHttpImageViaIp(Uri uri) async {
+    await _ensureIpPool();
+    final candidates = _candidateIps(_imageHost).take(8).toList();
+    if (candidates.isEmpty) return null;
+
+    for (var offset = 0; offset < candidates.length; offset += 4) {
+      final end = offset + 4 > candidates.length
+          ? candidates.length
+          : offset + 4;
+      final attempt = await _racePlainImage(
+        _imageHost,
+        candidates.sublist(offset, end),
+        _pathAndQuery(uri),
+      );
+      if (attempt?.bytes != null) {
+        _preferredIp[_imageHost] = attempt!.ip;
+        return attempt.bytes;
+      }
+    }
+    return null;
+  }
+
+  static Future<_SniAttempt?> _racePlainImage(
+    String host,
+    List<String> ips,
+    String pathAndQuery,
+  ) {
+    final completer = Completer<_SniAttempt?>();
+    var pending = ips.length;
+
+    void finish(_SniAttempt? attempt) {
+      if (completer.isCompleted) return;
+      if (attempt?.bytes != null) {
+        completer.complete(attempt);
+        return;
+      }
+      pending--;
+      if (pending == 0) completer.complete(null);
+    }
+
+    for (final ip in ips) {
+      _attemptPlainImage(ip, host, pathAndQuery).then(finish).catchError((_) {
+        finish(null);
+      });
+    }
+    return completer.future;
+  }
+
+  static Future<_SniAttempt> _attemptPlainImage(
+    String ip,
+    String host,
+    String pathAndQuery,
+  ) async {
+    Socket? socket;
+    try {
+      socket = await Socket.connect(ip, 80).timeout(const Duration(seconds: 4));
+      socket.write(
+        'GET $pathAndQuery HTTP/1.1\r\n'
+        'Host: $host\r\n'
+        'User-Agent: $_userAgent\r\n'
+        'Accept: image/avif,image/webp,image/*,*/*;q=0.8\r\n'
+        'Accept-Encoding: identity\r\n'
+        'Connection: close\r\n\r\n',
+      );
+      final bytes = <int>[];
+      await for (final chunk in socket.timeout(const Duration(seconds: 15))) {
+        bytes.addAll(chunk);
+        if (bytes.length > 20 * 1024 * 1024) break;
+      }
+      final response = _parseHttpBytes(bytes);
+      if (response == null) {
+        return _SniAttempt(ip: ip, error: 'empty response');
+      }
+      if (response.status == 200 && _looksLikeImage(response.body)) {
+        return _SniAttempt(ip: ip, status: 200, bytes: response.body);
+      }
+      return _SniAttempt(ip: ip, status: response.status);
+    } catch (error) {
+      return _SniAttempt(ip: ip, error: error.toString());
+    } finally {
+      try {
+        await socket?.close();
+      } catch (_) {}
+    }
+  }
+
+  /// 按「Bunny CDN 域名 → 内置 IP HTTPS → 内置 IP HTTP → 原域名
+  /// SNI → 普通直连 → 图片加速节点」顺序取图。代理可用时先走代理，
+  /// 但代理不通也不会挡住后续免代理线路。
+  static Future<List<int>?> _fetchTmdbImage(
+    Uri uri, {
+    String? proxy,
+    int maxBytes = 20 * 1024 * 1024,
+  }) async {
+    _lastImageChannel = '';
+    final path = _pathAndQuery(uri);
+    final usingSystemProxy =
+        (proxyAddress ?? '').trim().isEmpty && proxy != null;
+    final cdnUri = Uri.parse('https://$_imageCdnHost$path');
+
+    List<int>? accept(List<int>? bytes, String channel) {
+      if (bytes == null || bytes.length < 1024 || !_looksLikeImage(bytes)) {
+        return null;
+      }
+      _lastImageChannel = channel;
+      _lastHttpStatus = 200;
+      return bytes;
+    }
+
+    List<int>? bytes;
+    if (proxy != null) {
+      bytes = await _httpGetBytes(
+        uri,
+        proxy: proxy,
+        timeout: const Duration(seconds: 12),
+        retries: 1,
+      );
+      if (bytes != null && _looksLikeImage(bytes)) {
+        _lastImageChannel = '代理';
+        return bytes;
+      }
+      if (usingSystemProxy && _lastHttpStatus == 0) {
+        ProxyResolver.disableSystemProxy();
+      }
+    }
+
+    await _throttle();
+    bytes = accept(
+      await _sniGetBytes(_imageCdnHost, path, maxBytes: maxBytes, image: true),
+      'Bunny CDN 直连',
+    );
+    if (bytes != null) return bytes;
+
+    bytes = accept(await _plainHttpImageViaIp(uri), 'HTTP 直连（免 DNS/SNI）');
+    if (bytes != null) return bytes;
+
+    bytes = accept(
+      await _httpGetBytes(
+        cdnUri,
+        timeout: const Duration(seconds: 10),
+        retries: 1,
+      ),
+      'Bunny CDN HTTPS',
+    );
+    if (bytes != null) return bytes;
+
+    await _throttle();
+    bytes = accept(
+      await _sniGetBytes(_imageHost, path, maxBytes: maxBytes, image: true),
+      'SNI 直连',
+    );
+    if (bytes != null) return bytes;
+
+    bytes = accept(
+      await _httpGetBytes(
+        uri,
+        timeout: const Duration(seconds: 10),
+        retries: 1,
+      ),
+      'HTTPS 直连',
+    );
+    if (bytes != null) return bytes;
+
+    bytes = accept(
+      await _httpGetBytes(
+        uri.replace(scheme: 'http'),
+        timeout: const Duration(seconds: 10),
+        retries: 1,
+      ),
+      'HTTP 直连',
+    );
+    if (bytes != null) return bytes;
+
+    bytes = accept(
+      await _httpGetBytes(
+        Uri.parse(_tmdbImageProxyUrl(uri)),
+        timeout: const Duration(seconds: 15),
+        retries: 1,
+      ),
+      '图片加速节点',
+    );
+    if (bytes != null) return bytes;
+    return null;
+  }
+
   /// 下载海报到本地缓存，返回文件路径；失败返回 null。
   static Future<String?> downloadPoster(
     String url, {
@@ -1318,50 +1475,24 @@ class ScraperService {
     if (file.existsSync() && file.lengthSync() > 1024) return file.path;
 
     final uri = Uri.parse(url);
-    final isTmdbImage = uri.host.endsWith('tmdb.org');
+    final isTmdbImage = uri.host == _imageHost || uri.host == _imageCdnHost;
     final proxy = await _activeProxy();
-    final usingSystemProxy =
-        (proxyAddress ?? '').trim().isEmpty && proxy != null;
     List<int>? bytes;
     _lastNetworkDetail = null;
     _lastHttpStatus = 0;
 
     try {
-      if (isTmdbImage && proxy == null) {
-        // 未配代理时优先走 SNI 免代理通道；图片与 API 共用一批
-        // 边缘节点，但 image.tmdb.org 也会使用 BunnyCDN，因此
-        // 失败后仍会用普通通道兜底。
-        await _throttle();
-        bytes = await _sniGetBytes(
-          uri.host,
-          _pathAndQuery(uri),
-          maxBytes: 20 * 1024 * 1024,
-          image: true,
-        );
-      }
-
-      bytes ??= await _httpGetBytes(uri, proxy: proxy);
-      if (bytes == null && usingSystemProxy && _lastHttpStatus == 0) {
-        _systemProxy = null;
-      }
-
-      // 代理或普通通道失败时，再试一次 SNI（有的机器代理只放行
-      // API 域名，图片域名需要直连）。
-      if (bytes == null && isTmdbImage && proxy != null) {
-        await _throttle();
-        bytes = await _sniGetBytes(
-          uri.host,
-          _pathAndQuery(uri),
-          maxBytes: 20 * 1024 * 1024,
-          image: true,
-        );
+      if (isTmdbImage) {
+        bytes = await _fetchTmdbImage(uri, proxy: proxy);
+      } else {
+        bytes = await _httpGetBytes(uri, proxy: proxy);
       }
     } catch (error) {
       _lastNetworkDetail = error.toString();
       bytes = null;
     }
 
-    if (bytes == null || bytes.length < 1024) {
+    if (bytes == null || bytes.length < 1024 || !_looksLikeImage(bytes)) {
       onLog?.call('  下载图片失败 $cacheKey：${_networkHint()}');
       return null;
     }
@@ -1416,37 +1547,18 @@ class ScraperService {
     final probeUri = Uri.parse(
       probeUrl ?? 'https://$_imageHost/t/p/w92/zxfBtHz5UmSTfIEC4O4GngyjHwa.jpg',
     );
-    var imageOk = false;
-    var imageDetail = '';
-    var bytes = await _sniGetBytes(
-      probeUri.host,
-      _pathAndQuery(probeUri),
+    final imageBytes = await _fetchTmdbImage(
+      probeUri,
+      proxy: proxy,
       maxBytes: 2 * 1024 * 1024,
-      image: true,
     );
-    if (bytes != null && bytes.length > 1024) {
-      imageOk = true;
-      imageDetail =
-          '成功：${bytes.length ~/ 1024} KB'
-          '（${watch.elapsedMilliseconds} ms，SNI/直连）';
-    } else {
-      bytes = await _httpGetBytes(
-        probeUri,
-        proxy: proxy,
-        timeout: const Duration(seconds: 12),
-        retries: 1,
-      );
-      if (bytes != null && bytes.length > 1024) {
-        imageOk = true;
-        imageDetail =
-            '成功：${bytes.length ~/ 1024} KB'
-            '（${watch.elapsedMilliseconds} ms，备用通道）';
-      } else {
-        imageDetail =
-            '失败：${_networkHint()}'
-            '（${watch.elapsedMilliseconds} ms）';
-      }
-    }
+    final imageOk = imageBytes != null;
+    final imageDetail = imageOk
+        ? '成功：${imageBytes.length ~/ 1024} KB'
+              '（${watch.elapsedMilliseconds} ms，'
+              '${_lastImageChannel.isEmpty ? '未知' : _lastImageChannel}）'
+        : '失败：${_networkHint()}'
+              '（${watch.elapsedMilliseconds} ms）';
 
     return ScrapeDiagnostics(
       apiOk: apiOk,

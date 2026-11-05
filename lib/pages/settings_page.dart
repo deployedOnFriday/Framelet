@@ -565,37 +565,6 @@ class _SettingsPageState extends State<SettingsPage>
             ),
             const SizedBox(height: 18),
             _buildScrapeSourceSettings(context, library),
-            const SizedBox(height: 18),
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: context.colors.primarySoft,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Icon(
-                    Icons.lightbulb_outline_rounded,
-                    size: 19,
-                    color: context.colors.primary,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      '匹配依据文件名中的片名与年份，如「Apocalypse.Hotel.2025.S01E01」可正确识别。'
-                      '若文件名过于随意（如「新建文件夹」）可能匹配不到，会保留渐变封面。'
-                      '海报下载后缓存到本地，重复刮削不会重复下载。',
-                      style: TextStyle(
-                        color: context.colors.primary,
-                        fontSize: 12.5,
-                        height: 1.6,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           ],
         );
       },
@@ -2230,6 +2199,9 @@ class _UpdateCardState extends State<_UpdateCard> {
       asset,
       onProgress: (p) {
         if (mounted) setState(() => _progress = p);
+      },
+      onStatus: (status) {
+        if (mounted) setState(() => _status = status);
       },
     );
     if (!mounted) return;

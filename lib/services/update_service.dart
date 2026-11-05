@@ -1,39 +1,68 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
+
+import 'proxy_resolver.dart';
 
 /// 应用内检查更新（GitHub Releases）。
 ///
-/// 检查走 api.github.com（国内直连一般可达）；安装包下载走 Release
-/// 资产的 302 链接。可选复用刮削代理（MediaLibrary.load 时注入）。
+/// 检查走 api.github.com；安装包下载会先并发测速 GitHub 直连与
+/// 国内常用镜像，再用多连接分段下载，避免单连接被限速。
 class UpdateService {
   UpdateService._();
 
   static const _repo = 'deployedOnFriday/Framelet';
   static const _userAgent = 'Framelet/0.1 (updater)';
 
-  /// 可选代理（与刮削代理共用配置；空则直连）。
+  /// 可选代理（与刮削代理共用配置；空则自动探测系统代理）。
   static String? proxyAddress;
 
-  static HttpClient _httpClient() {
+  /// GitHub Release 资产加速前缀。只拼接 GitHub 官方下载地址，
+  /// 不经过任何账号信息。
+  static const _mirrors = <String>[
+    'https://ghfast.top/',
+    'https://gh-proxy.com/',
+    'https://ghproxy.net/',
+    'https://ghproxy.cc/',
+  ];
+
+  static Future<String?> _activeProxy() =>
+      ProxyResolver.resolve(explicit: proxyAddress);
+
+  static HttpClient _httpClient(String? proxy) {
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 10)
       ..userAgent = _userAgent;
-    final proxy = proxyAddress?.trim();
-    if (proxy != null && proxy.isNotEmpty) {
-      client.findProxy = (_) => 'PROXY $proxy';
+    final effective = ProxyResolver.normalize(proxy ?? '');
+    if (effective.isNotEmpty) {
+      client.findProxy = (_) => 'PROXY $effective';
     }
     return client;
   }
 
   /// 最新 Release 信息；无网络/接口异常时返回 null。
   static Future<ReleaseInfo?> checkLatest() async {
-    final client = _httpClient();
+    var proxy = await _activeProxy();
+    var info = await _fetchLatest(proxy);
+    if (info == null && proxy != null) {
+      if ((proxyAddress ?? '').trim().isEmpty) {
+        ProxyResolver.disableSystemProxy();
+      }
+      proxy = null;
+      info = await _fetchLatest(null);
+    }
+    return info;
+  }
+
+  static Future<ReleaseInfo?> _fetchLatest(String? proxy) async {
+    final client = _httpClient(proxy);
     try {
       final request = await client.getUrl(
         Uri.parse('https://api.github.com/repos/$_repo/releases/latest'),
       );
       final response = await request.close().timeout(
-        const Duration(seconds: 15),
+        const Duration(seconds: 10),
       );
       if (response.statusCode != 200) return null;
       final body = await response.transform(utf8.decoder).join();
@@ -63,10 +92,7 @@ class UpdateService {
   /// 三段式版本比较：remote > current 返回 true。
   static bool isNewer(String remote, String current) {
     List<int> parse(String v) {
-      final parts = v
-          .split('.')
-          .map((p) => int.tryParse(p) ?? 0)
-          .toList();
+      final parts = v.split('.').map((p) => int.tryParse(p) ?? 0).toList();
       while (parts.length < 3) {
         parts.add(0);
       }
@@ -99,52 +125,311 @@ class UpdateService {
     return null;
   }
 
+  static List<String> _candidateUrls(String url) => [
+    url,
+    for (final mirror in _mirrors) '$mirror$url',
+  ];
+
+  /// 并发探测每个下载线路的首字节耗时，返回最快的一条。
+  static Future<String?> _pickFastest(List<String> urls, String? proxy) async {
+    final results = await Future.wait(
+      urls.map((url) async {
+        final watch = Stopwatch()..start();
+        HttpClient? client;
+        try {
+          client = _httpClient(proxy);
+          final request = await client
+              .getUrl(Uri.parse(url))
+              .timeout(const Duration(seconds: 5));
+          request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+          request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+          final response = await request.close().timeout(
+            const Duration(seconds: 5),
+          );
+          final ok = response.statusCode == 200 || response.statusCode == 206;
+          try {
+            await response.drain<void>().timeout(const Duration(seconds: 3));
+          } catch (_) {}
+          return ok ? (url: url, ms: watch.elapsedMilliseconds) : null;
+        } catch (_) {
+          return null;
+        } finally {
+          client?.close(force: true);
+        }
+      }),
+    );
+    final valid = results.whereType<({String url, int ms})>().toList()
+      ..sort((a, b) => a.ms.compareTo(b.ms));
+    return valid.isEmpty ? null : valid.first.url;
+  }
+
   /// 下载安装包到临时目录，返回落盘路径。
+  ///
+  /// 大于 8MB 的包会拆成 2~6 段并发下载；任一线路失败会自动换
+  /// 下一个镜像。最终校验文件大小，避免半包被当成安装程序。
   static Future<String?> download(
     ({String name, String url, int size}) asset, {
     void Function(double progress)? onProgress,
+    void Function(String status)? onStatus,
   }) async {
-    final client = _httpClient();
-    try {
-      final request = await client.getUrl(Uri.parse(asset.url));
-      final response = await request.close().timeout(
-        const Duration(seconds: 30),
-      );
-      if (response.statusCode != 200) return null;
-      final total = response.contentLength > 0
-          ? response.contentLength
-          : asset.size;
-      final temp = Directory.systemTemp;
-      final file = File('${temp.path}/${asset.name}');
-      final sink = file.openWrite();
-      var received = 0;
-      await for (final chunk in response) {
-        received += chunk.length;
-        sink.add(chunk);
-        if (total > 0) onProgress?.call((received / total).clamp(0.0, 1.0));
+    var proxy = await _activeProxy();
+    final candidates = _candidateUrls(asset.url);
+
+    onStatus?.call('正在测速下载线路…');
+    var fastest = await _pickFastest(candidates, proxy);
+    if (fastest == null && proxy != null) {
+      if ((proxyAddress ?? '').trim().isEmpty) {
+        ProxyResolver.disableSystemProxy();
       }
-      await sink.close();
-      if (file.lengthSync() < 1024) {
-        file.deleteSync();
-        return null;
-      }
-      return file.path;
-    } catch (_) {
-      return null;
-    } finally {
-      client.close(force: true);
+      proxy = null;
+      fastest = await _pickFastest(candidates, proxy);
     }
+    final ordered = <String>[
+      ?fastest,
+      ...candidates.where((url) => url != fastest),
+    ];
+
+    final file = File('${Directory.systemTemp.path}/${asset.name}');
+    try {
+      if (file.existsSync()) file.deleteSync();
+    } catch (_) {}
+
+    final total = asset.size;
+    if (total >= 8 * 1024 * 1024) {
+      onStatus?.call('正在多线程下载 ${asset.name}…');
+      final ok = await _downloadSegmented(
+        file,
+        ordered,
+        total,
+        proxy,
+        onProgress,
+      );
+      if (ok &&
+          file.existsSync() &&
+          file.lengthSync() == total &&
+          _validInstaller(file, asset.name)) {
+        return file.path;
+      }
+      try {
+        if (file.existsSync()) file.deleteSync();
+      } catch (_) {}
+    }
+
+    onStatus?.call('正在下载 ${asset.name}…');
+    final ok = await _downloadSingle(file, ordered, total, proxy, onProgress);
+    if (ok &&
+        file.existsSync() &&
+        file.lengthSync() >= 1024 &&
+        (total <= 0 || file.lengthSync() == total) &&
+        _validInstaller(file, asset.name)) {
+      return file.path;
+    }
+    try {
+      if (file.existsSync()) file.deleteSync();
+    } catch (_) {}
+    return null;
+  }
+
+  /// 防止镜像返回同尺寸的 HTML 错误页被当成安装包。
+  static bool _validInstaller(File file, String name) {
+    try {
+      final raf = file.openSync();
+      final head = raf.readSync(4);
+      raf.closeSync();
+      if (name.toLowerCase().endsWith('.exe')) {
+        return head.length >= 2 && head[0] == 0x4D && head[1] == 0x5A;
+      }
+      if (name.toLowerCase().endsWith('.zip') ||
+          name.toLowerCase().endsWith('.apk')) {
+        return head.length >= 2 && head[0] == 0x50 && head[1] == 0x4B;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<bool> _downloadSegmented(
+    File file,
+    List<String> urls,
+    int total,
+    String? proxy,
+    void Function(double progress)? onProgress,
+  ) async {
+    final connections = total >= 40 * 1024 * 1024
+        ? 6
+        : total >= 16 * 1024 * 1024
+        ? 4
+        : 2;
+    final chunk = (total / connections).ceil();
+    final raf = await file.open(mode: FileMode.write);
+    var received = 0;
+    var lastReport = DateTime.fromMillisecondsSinceEpoch(0);
+
+    void report(int delta) {
+      received += delta;
+      final now = DateTime.now();
+      if (now.difference(lastReport) < const Duration(milliseconds: 120)) {
+        return;
+      }
+      lastReport = now;
+      onProgress?.call((received / total).clamp(0.0, 1.0));
+    }
+
+    try {
+      final tasks = <Future<void>>[];
+      for (var i = 0; i < connections; i++) {
+        final start = i * chunk;
+        if (start >= total) break;
+        final end = math.min(total - 1, start + chunk - 1);
+        tasks.add(() async {
+          final ok = await _downloadSegment(
+            raf,
+            urls,
+            start,
+            end,
+            proxy,
+            report,
+          );
+          if (!ok) throw StateError('segment failed');
+        }());
+      }
+      await Future.wait(tasks);
+      await raf.flush();
+      if (received == total) {
+        onProgress?.call(1.0);
+        return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
+    } finally {
+      await raf.close();
+    }
+  }
+
+  static Future<bool> _downloadSegment(
+    RandomAccessFile raf,
+    List<String> urls,
+    int start,
+    int end,
+    String? proxy,
+    void Function(int delta) report,
+  ) async {
+    final expected = end - start + 1;
+    for (final url in urls) {
+      HttpClient? client;
+      var written = 0;
+      try {
+        client = _httpClient(proxy);
+        final request = await client
+            .getUrl(Uri.parse(url))
+            .timeout(const Duration(seconds: 10));
+        request.headers.set(HttpHeaders.rangeHeader, 'bytes=$start-$end');
+        request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+        final response = await request.close().timeout(
+          const Duration(seconds: 20),
+        );
+        if (response.statusCode != 206) {
+          try {
+            await response.drain<void>();
+          } catch (_) {}
+          continue;
+        }
+        final length = response.contentLength;
+        if (length > 0 && length != expected) {
+          try {
+            await response.drain<void>();
+          } catch (_) {}
+          continue;
+        }
+        await for (final chunk in response.timeout(
+          const Duration(seconds: 25),
+        )) {
+          raf.setPositionSync(start + written);
+          raf.writeFromSync(chunk);
+          written += chunk.length;
+          report(chunk.length);
+          if (written > expected) break;
+        }
+        if (written == expected) return true;
+        if (written > 0) {
+          report(-written);
+          written = 0;
+        }
+      } catch (_) {
+        if (written > 0) {
+          report(-written);
+          written = 0;
+        }
+      } finally {
+        client?.close(force: true);
+      }
+    }
+    return false;
+  }
+
+  static Future<bool> _downloadSingle(
+    File file,
+    List<String> urls,
+    int total,
+    String? proxy,
+    void Function(double progress)? onProgress,
+  ) async {
+    for (final url in urls) {
+      HttpClient? client;
+      IOSink? sink;
+      try {
+        client = _httpClient(proxy);
+        final request = await client
+            .getUrl(Uri.parse(url))
+            .timeout(const Duration(seconds: 10));
+        request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+        final response = await request.close().timeout(
+          const Duration(seconds: 20),
+        );
+        if (response.statusCode != 200) {
+          try {
+            await response.drain<void>();
+          } catch (_) {}
+          continue;
+        }
+        final expected = response.contentLength > 0
+            ? response.contentLength
+            : total;
+        sink = file.openWrite();
+        var received = 0;
+        await for (final chunk in response.timeout(
+          const Duration(seconds: 25),
+        )) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (expected > 0) {
+            onProgress?.call((received / expected).clamp(0.0, 1.0));
+          }
+        }
+        await sink.flush();
+        await sink.close();
+        sink = null;
+        if (expected > 0 && received != expected) continue;
+        if (received >= 1024) return true;
+      } catch (_) {
+        // 换下一条线路
+      } finally {
+        try {
+          await sink?.close();
+        } catch (_) {}
+        client?.close(force: true);
+      }
+    }
+    return false;
   }
 
   /// 启动安装包（Windows：Inno 向导会自动处理正在运行的应用；
   /// macOS：挂载 dmg）。
   static Future<void> launch(String path) async {
     if (Platform.isWindows) {
-      await Process.start(
-        path,
-        const [],
-        mode: ProcessStartMode.detached,
-      );
+      await Process.start(path, const [], mode: ProcessStartMode.detached);
     } else if (Platform.isMacOS) {
       await Process.run('open', [path]);
     }
