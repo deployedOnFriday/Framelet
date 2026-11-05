@@ -21,15 +21,25 @@ jobs:
       - run: flutter pub get
       - run: flutter test
       - run: flutter build windows --release
-      - name: Package
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v',''
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAppVersion=$version windows/installer/framelet.iss
+          Move-Item windows/installer/Output/FrameletSetup-$version-x64.exe FrameletSetup-$version-x64.exe
+      - name: Package portable zip
         shell: pwsh
         run: |
           Compress-Archive -Path build/windows/x64/runner/Release/* `
-            -DestinationPath framelet-windows-x64.zip
+            -DestinationPath framelet-windows-x64-portable.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: framelet-windows-x64
-          path: framelet-windows-x64.zip
+          name: framelet-windows
+          path: |
+            FrameletSetup-*-x64.exe
+            framelet-windows-x64-portable.zip
 
   android:
     runs-on: ubuntu-latest
@@ -65,16 +75,15 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter build macos --release
-      - name: Package
+      - name: Package dmg
         run: |
-          cd build/macos/Build/Products/Release
-          # 去隔离属性：无开发者签名的 .app 首次打开需右键，这里顺手清 quarantine 标记说明
-          ditto -c -k --sequesterRsrc --keepParent framelet.app framelet-macos.zip
-          cp framelet-macos.zip "$GITHUB_WORKSPACE/"
+          hdiutil create -volname "Framelet" \
+            -srcfolder build/macos/Build/Products/Release/framelet.app \
+            -ov -format UDZO framelet-macos.dmg
       - uses: actions/upload-artifact@v4
         with:
           name: framelet-macos
-          path: framelet-macos.zip
+          path: framelet-macos.dmg
 
   ios:
     runs-on: macos-latest
@@ -110,8 +119,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            framelet-windows-x64.zip
+            FrameletSetup-*-x64.exe
+            framelet-windows-x64-portable.zip
             framelet-android.apk
-            framelet-macos.zip
+            framelet-macos.dmg
             framelet-ios-unsigned.zip
           generate_release_notes: true
