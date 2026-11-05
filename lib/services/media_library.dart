@@ -52,7 +52,10 @@ class MediaLibrary extends ChangeNotifier {
   String? danmakuAppId;
   String? danmakuAppSecret;
 
-  bool get hasTmdb => (tmdbKey ?? '').trim().isNotEmpty;
+  /// TMDB 是否可用：用户配置了 key，或存在内置 key（开箱即用）。
+  bool get hasTmdb =>
+      (tmdbKey ?? '').trim().isNotEmpty ||
+      ScraperService.builtinTmdbApiKey.isNotEmpty;
 
   bool get hasDanmaku => DanmakuService.configured;
 
@@ -507,7 +510,7 @@ class MediaLibrary extends ChangeNotifier {
           ? null
           : scrapeProxy!.trim();
       ScraperService.tmdbApiKey = (tmdbKey ?? '').trim().isEmpty
-          ? null
+          ? ScraperService.builtinTmdbApiKey
           : tmdbKey!.trim();
       DanmakuService.provider = danmakuProvider;
       DanmakuService.baseUrl = danmakuBaseUrl;
@@ -539,7 +542,7 @@ class MediaLibrary extends ChangeNotifier {
         ? null
         : scrapeProxy!.trim();
     ScraperService.tmdbApiKey = (this.tmdbKey ?? '').trim().isEmpty
-        ? null
+        ? ScraperService.builtinTmdbApiKey
         : this.tmdbKey!.trim();
     DanmakuService.proxyAddress = ScraperService.proxyAddress;
     notifyListeners();

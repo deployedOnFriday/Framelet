@@ -77,6 +77,28 @@ class ScraperService {
   /// 关键失败（图片下载等）必须经由这里显性化，避免静默丢图。
   static void Function(String message)? onLog;
 
+  /// 内置 TMDB API Key：以「明文 XOR 掩码」的十六进制对存储，
+  /// 仓库与二进制中不含可直接 grep 的明文，运行时还原。
+  /// 注意这是混淆而非加密——决心逆向仍可还原；TMDB key 属免费
+  /// 申请的低敏感凭据，此级别足够。用户在设置里填写的 key 永远优先。
+  static const String _tmdbKeyMaskedHex =
+      '2805d1326095c22fc1cc628f7c4cea7c827dbfce07ef28a40fda02d50f8d5bf2';
+  static const String _tmdbKeyMaskHex =
+      '1d67b30151a3f74da5ff5bb9197bdf45b21c88f666d84cc73fb935b338ba3ec4';
+
+  static List<int> _unhex(String hex) => [
+    for (var i = 0; i + 1 < hex.length; i += 2)
+      int.parse(hex.substring(i, i + 2), radix: 16),
+  ];
+
+  static String get builtinTmdbApiKey {
+    final masked = _unhex(_tmdbKeyMaskedHex);
+    final mask = _unhex(_tmdbKeyMaskHex);
+    return String.fromCharCodes([
+      for (var i = 0; i < masked.length; i++) masked[i] ^ mask[i],
+    ]);
+  }
+
   /// 可选 HTTP 代理（如 127.0.0.1:7890）。
   static String? proxyAddress;
 
