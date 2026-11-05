@@ -1,0 +1,117 @@
+name: Release build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.8'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter test
+      - run: flutter build windows --release
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path build/windows/x64/runner/Release/* `
+            -DestinationPath framelet-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: framelet-windows-x64
+          path: framelet-windows-x64.zip
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.8'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - name: Package
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk framelet-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: framelet-android
+          path: framelet-android.apk
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.8'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: Package
+        run: |
+          cd build/macos/Build/Products/Release
+          # 去隔离属性：无开发者签名的 .app 首次打开需右键，这里顺手清 quarantine 标记说明
+          ditto -c -k --sequesterRsrc --keepParent framelet.app framelet-macos.zip
+          cp framelet-macos.zip "$GITHUB_WORKSPACE/"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: framelet-macos
+          path: framelet-macos.zip
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.8'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      # 未签名构建：无开发者账号无法安装，仅作工程验证产物
+      - run: flutter build ios --release --no-codesign
+      - name: Package
+        run: |
+          mkdir -p Payload
+          cp -R build/ios/iphoneos/Runner.app Payload/
+          zip -qry framelet-ios-unsigned.zip Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: framelet-ios-unsigned
+          path: framelet-ios-unsigned.zip
+
+  release:
+    needs: [windows, android, macos, ios]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            framelet-windows-x64.zip
+            framelet-android.apk
+            framelet-macos.zip
+            framelet-ios-unsigned.zip
+          generate_release_notes: true
