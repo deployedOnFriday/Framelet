@@ -24,7 +24,9 @@ CloseApplications=yes
 RestartApplications=no
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; ChineseSimplified.isl 内嵌于仓库（choco 的 Inno Setup 不带简中翻译），
+; 来源：jrsoftware/issrc is-6_5_1 tag（Files/Languages/Unofficial）
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
