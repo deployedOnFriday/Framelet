@@ -99,6 +99,19 @@ class MediaLibrary extends ChangeNotifier {
 
   String? passwordOf(String sourceId) => _passwords[sourceId];
 
+  /// 媒体源是否参与展示与刮削（「显示并刮削」开关）。
+  bool sourceEnabled(String id) => sourceById(id)?.enabled ?? true;
+
+  /// 切换媒体源「显示并刮削」开关：关闭后该源不参与海报墙展示与
+  /// 自动刮削，已同步数据保留，重新打开即恢复。
+  Future<void> setSourceEnabled(String id, bool enabled) async {
+    final index = _sources.indexWhere((source) => source.id == id);
+    if (index < 0 || _sources[index].enabled == enabled) return;
+    _sources[index] = _sources[index].copyWith(enabled: enabled);
+    await _persistSources();
+    notifyListeners();
+  }
+
   /// 按 sourceId + 路径精确查找原始扫描条目（用于从播放历史续播）。
   ScannedVideo? findVideo(String sourceId, String path) {
     for (final videos in _videosBySource.values) {
@@ -120,6 +133,7 @@ class MediaLibrary extends ChangeNotifier {
     // 这样「想见你」这类 14 集的剧集不会留在电影分类里。
     final merged = <String, ScannedVideo>{};
     for (final entry in _videosBySource.entries) {
+      if (!sourceEnabled(entry.key)) continue;
       final aggregated = _aggregated(entry.key);
       for (final video in aggregated) {
         if (video.kind != kind) continue;
@@ -153,6 +167,7 @@ class MediaLibrary extends ChangeNotifier {
     final key = _seriesMergeKey(video);
     final seasons = <ScannedVideo>[];
     for (final entry in _videosBySource.entries) {
+      if (!sourceEnabled(entry.key)) continue;
       for (final item in _aggregated(entry.key)) {
         if (_seriesMergeKey(item) == key) seasons.add(item);
       }
@@ -222,6 +237,7 @@ class MediaLibrary extends ChangeNotifier {
     final result = <ScannedVideo>[];
     final seen = <String>{};
     for (final sourceId in _videosBySource.keys) {
+      if (!sourceEnabled(sourceId)) continue;
       for (final video in _aggregated(sourceId)) {
         if (video.isScraped) continue;
         if (!seen.add(video.path)) continue;
@@ -1105,10 +1121,13 @@ class MediaLibrary extends ChangeNotifier {
   /// representative 必须用聚合条目——它的 title 是从目录名推导出的剧名
   /// （如「成何体统」）；group.first 的 title 是原始文件名（如「01~4K」），
   /// 拿它去搜索永远搜不到。
-  static List<({ScannedVideo representative, List<ScannedVideo> group})>
+  List<({ScannedVideo representative, List<ScannedVideo> group})>
   _scrapeJobsOf(Map<String, List<ScannedVideo>> videosBySource) {
     final jobs = <({ScannedVideo representative, List<ScannedVideo> group})>[];
-    for (final videos in videosBySource.values) {
+    for (final entry in videosBySource.entries) {
+      // 「显示并刮削」关闭的源不参与刮削
+      if (!sourceEnabled(entry.key)) continue;
+      final videos = entry.value;
       final aggregated = aggregate(videos);
       final byPath = <String, ScannedVideo>{
         for (final item in aggregated) item.path: item,

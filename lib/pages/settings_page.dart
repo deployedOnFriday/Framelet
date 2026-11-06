@@ -996,6 +996,8 @@ class _SettingsPageState extends State<SettingsPage>
                 onEdit: () => _editSource(existing: source),
                 onSync: () => _scanSource(source),
                 onDelete: () => _deleteSource(source),
+                onToggleEnabled: (enabled) =>
+                    MediaLibrary.instance.setSourceEnabled(source.id, enabled),
               ),
               const SizedBox(height: 12),
             ],
@@ -1538,6 +1540,7 @@ class _MediaSourceCard extends StatelessWidget {
     required this.onEdit,
     required this.onSync,
     required this.onDelete,
+    required this.onToggleEnabled,
   });
 
   final MediaSource source;
@@ -1547,6 +1550,7 @@ class _MediaSourceCard extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onSync;
   final VoidCallback onDelete;
+  final ValueChanged<bool> onToggleEnabled;
 
   @override
   Widget build(BuildContext context) {
@@ -1652,6 +1656,25 @@ class _MediaSourceCard extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
+          // 「显示并刮削」开关：关闭后该源不参与海报墙展示与自动刮削
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Switch(
+                value: source.enabled,
+                activeThumbColor: context.colors.primary,
+                onChanged: busy ? null : onToggleEnabled,
+              ),
+              Text(
+                source.enabled ? '显示' : '已隐藏',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: context.colors.muted,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 4),
           IconButton(
             onPressed: busy ? null : onSync,
             tooltip: '同步扫描',

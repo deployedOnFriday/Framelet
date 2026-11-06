@@ -17,6 +17,7 @@ import '../services/player_host.dart';
 import '../services/subtitle_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/webdav_service.dart';
+import '../widgets/danmaku_overlay.dart';
 
 /// 沉浸式播放页：media_kit 硬件解码 + WebDAV Basic 认证流。
 ///
@@ -85,6 +86,10 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _danmakuEnabled = false;
   bool _loadingDanmaku = false;
 
+  /// 弹幕时钟：position 流实时更新，弹幕层用它驱动逐帧重绘，
+  /// 不经 setState（整页 setState 每帧重建是卡顿根源之一）。
+  final ValueNotifier<double> _danmakuClock = ValueNotifier(0);
+
   /// 当前播放的条目（可切集）
   late ScannedVideo _current = widget.video;
   double _speed = 1.0;
@@ -132,6 +137,8 @@ class _PlayerPageState extends State<PlayerPage> {
     super.initState();
     _positionSub = _player.stream.position.listen((position) {
       _positionSec = position.inMilliseconds / 1000;
+      // 弹幕层逐帧时钟（ValueNotifier，不触发整页重建）
+      _danmakuClock.value = _positionSec;
       // 每 10 秒自动存档一次进度，应用崩溃/断电也能续播
       if (_durationSec > 0 &&
           _positionSec > 1 &&
@@ -249,6 +256,7 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void dispose() {
     _recordProgress();
+    _danmakuClock.dispose();
     _positionSub?.cancel();
     _durationSub?.cancel();
     _errorSub?.cancel();
@@ -544,17 +552,21 @@ class _PlayerPageState extends State<PlayerPage> {
         _showOsd('没有找到「$query」第 $episodeNumber 集的弹幕');
         return;
       }
-      final selected = episodes.length == 1
-          ? episodes.first
-          : await _pickDanmakuEpisode(episodes);
-      if (selected == null || !mounted) return;
+      // 自动匹配：取相关度最高的第一个候选，不打断播放选框
+      final selected = episodes.first;
       final comments = await DanmakuService.comments(selected.episodeId);
       if (!mounted) return;
+      comments.sort((a, b) => a.timeSec.compareTo(b.timeSec));
       setState(() {
         _danmakuComments = comments;
         _danmakuEnabled = comments.isNotEmpty;
       });
-      _showOsd(comments.isEmpty ? '该节目暂无弹幕' : '弹幕已加载 · ${comments.length} 条');
+      _showOsd(
+        comments.isEmpty
+            ? '该节目暂无弹幕'
+            : '弹幕已匹配「${selected.animeTitle} · ${selected.episodeTitle}」'
+                  ' · ${comments.length} 条',
+      );
     } on DanmakuException catch (error) {
       if (mounted) _showOsd(error.message);
     } catch (error) {
@@ -562,33 +574,6 @@ class _PlayerPageState extends State<PlayerPage> {
     } finally {
       if (mounted) setState(() => _loadingDanmaku = false);
     }
-  }
-
-  Future<DanmakuEpisode?> _pickDanmakuEpisode(
-    List<DanmakuEpisode> episodes,
-  ) async {
-    final picked = await showDialog<DanmakuEpisode>(
-      context: context,
-      builder: (context) => SimpleDialog(
-        backgroundColor: const Color(0xF21A1A1A),
-        title: const Text(
-          '选择弹幕节目',
-          style: TextStyle(color: Colors.white, fontSize: 16),
-        ),
-        children: [
-          for (final episode in episodes.take(20))
-            SimpleDialogOption(
-              onPressed: () => Navigator.of(context).pop(episode),
-              child: Text(
-                '${episode.animeTitle} · ${episode.episodeTitle}',
-                style: const TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-            ),
-        ],
-      ),
-    );
-    _refocus();
-    return picked;
   }
 
   /// 播放前探测文件地址：把 HTTP 状态码显示在错误卡片上，便于排查。
@@ -1140,77 +1125,8 @@ class _PlayerPageState extends State<PlayerPage> {
     if (!_danmakuEnabled || _danmakuComments.isEmpty) {
       return const SizedBox.shrink();
     }
-    const lifetime = 8.0;
-    final active = <(DanmakuComment, double)>[];
-    for (final comment in _danmakuComments) {
-      final elapsed = _positionSec - comment.timeSec;
-      if (elapsed >= 0 && elapsed <= lifetime) {
-        active.add((comment, elapsed));
-        if (active.length >= 60) break;
-      }
-    }
-    if (active.isEmpty) return const SizedBox.shrink();
-    return IgnorePointer(
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          return Stack(
-            clipBehavior: Clip.none,
-            children: [
-              for (final entry in active)
-                _danmakuText(
-                  entry.$1,
-                  entry.$2,
-                  constraints.maxWidth,
-                  constraints.maxHeight,
-                  lifetime,
-                ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _danmakuText(
-    DanmakuComment comment,
-    double elapsed,
-    double width,
-    double height,
-    double lifetime,
-  ) {
-    final lane = comment.text.hashCode.abs() % 7;
-    final colorValue = comment.color & 0xFFFFFF;
-    final color = colorValue == 0
-        ? Colors.white
-        : Color(0xFF000000 | colorValue);
-    final style = TextStyle(
-      color: color,
-      fontSize: 18,
-      fontWeight: FontWeight.w600,
-      shadows: const [
-        Shadow(blurRadius: 3, color: Colors.black87),
-        Shadow(blurRadius: 6, color: Colors.black54),
-      ],
-    );
-    if (comment.mode == 4 || comment.mode == 5) {
-      final top = comment.mode == 5
-          ? 74.0 + lane * 27
-          : height - 130.0 - lane * 27;
-      if (elapsed > 4) return const SizedBox.shrink();
-      return Positioned(
-        left: 0,
-        right: 0,
-        top: top.clamp(54.0, height - 54),
-        child: Center(child: Text(comment.text, style: style)),
-      );
-    }
-    final progress = (elapsed / lifetime).clamp(0.0, 1.0);
-    final left = width - progress * (width + 360);
-    return Positioned(
-      left: left,
-      top: 74.0 + lane * 31,
-      child: Text(comment.text, style: style, softWrap: false),
-    );
+    // Canvas 绘制：TextPainter 缓存 + ticker 驱动，不随播放页整页重建
+    return DanmakuOverlay(comments: _danmakuComments, clock: _danmakuClock);
   }
 
   Widget _buildScreen(BuildContext context) {

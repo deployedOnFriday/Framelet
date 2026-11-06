@@ -16,6 +16,7 @@ class MediaSource {
     this.directory = '/',
     this.connected = false,
     this.lastSync = '尚未同步',
+    this.enabled = true,
   });
 
   final String id;
@@ -26,6 +27,10 @@ class MediaSource {
   final String directory;
   final bool connected;
   final String lastSync;
+
+  /// 「显示并刮削」开关：关闭后该源不参与海报墙展示与自动刮削，
+  /// 已同步的数据保留，重新打开即恢复。
+  final bool enabled;
 
   bool get isLocal => kind == MediaSourceKind.local;
 
@@ -48,6 +53,7 @@ class MediaSource {
     String? directory,
     bool? connected,
     String? lastSync,
+    bool? enabled,
   }) {
     return MediaSource(
       id: id ?? this.id,
@@ -58,6 +64,7 @@ class MediaSource {
       directory: directory ?? this.directory,
       connected: connected ?? this.connected,
       lastSync: lastSync ?? this.lastSync,
+      enabled: enabled ?? this.enabled,
     );
   }
 
@@ -70,6 +77,7 @@ class MediaSource {
     'directory': directory,
     'connected': connected,
     'lastSync': lastSync,
+    'enabled': enabled,
   };
 
   factory MediaSource.fromJson(Map<String, Object?> json) {
@@ -86,6 +94,7 @@ class MediaSource {
       directory: json['directory'] as String? ?? '/',
       connected: json['connected'] as bool? ?? false,
       lastSync: json['lastSync'] as String? ?? '尚未同步',
+      enabled: json['enabled'] as bool? ?? true,
     );
   }
 
