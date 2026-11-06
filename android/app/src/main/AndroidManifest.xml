@@ -1,8 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- WebDAV 媒体源、TMDB 刮削、检查更新都需要联网；缺失时 release 包
+         所有网络请求被系统静默拦截（debug 模板自带故开发期无感） -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="framelet"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
