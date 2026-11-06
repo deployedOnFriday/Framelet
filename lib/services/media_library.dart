@@ -1384,17 +1384,22 @@ class MediaLibrary extends ChangeNotifier {
     return cleaned;
   }
 
-  /// 由所在目录推导剧名：跳过「电影」「1」（季号）这类无效目录，向上找真正的剧名。
-  /// 返回 null 表示没有有效目录名（如文件直接放在通用/根目录下）。
+  /// 由所在目录推导剧名：跳过「1」（季号）这类无效目录，向上找真正的剧名。
+  /// 返回 null 表示没有有效目录名，回退用清洗后的文件名。
+  ///
+  /// 关键规则：直接父目录是分类容器（movie/电影/夸克网盘这类）时
+  /// 返回 null——容器的祖先只可能是组织性目录（挂载名/根目录），
+  /// 继续向上只会拿到「首页」这类垃圾片名；此时正确标题就是文件名。
+  /// 季目录（1、Season 2）除外：它们的上层才是剧名。
   static String? _seriesTitle(String parentPath, List<ScannedVideo> group) {
     var path = parentPath;
     var segment = _lastSegment(path);
+    if (!_isSeasonFolder(segment) && _isGenericFolder(segment)) return null;
     var guard = 0;
     while (guard < 4) {
-      final isSeasonFolder =
-          RegExp(r'^\d{1,2}$').hasMatch(segment) ||
-          RegExp(r'^season\s*\d+', caseSensitive: false).hasMatch(segment);
-      if (!_isGenericFolder(segment) && !isSeasonFolder && segment.isNotEmpty) {
+      if (!_isGenericFolder(segment) &&
+          !_isSeasonFolder(segment) &&
+          segment.isNotEmpty) {
         return WebDavService.cleanTitle(segment);
       }
       final nextPath = parentPathOf(path);
@@ -1406,6 +1411,11 @@ class MediaLibrary extends ChangeNotifier {
     }
     return null;
   }
+
+  /// 目录名是否是季目录：纯数字（1、2）或 Season 2 / Season.2 / Season-2。
+  static bool _isSeasonFolder(String segment) =>
+      RegExp(r'^\d{1,2}$').hasMatch(segment) ||
+      RegExp(r'^season[\s._-]*\d+', caseSensitive: false).hasMatch(segment);
 
   /// 文件夹名是否只是"电影/电视剧/动漫/综艺"这类通用名。
   static bool _isGenericFolder(String name) {
