@@ -142,7 +142,7 @@ class _SettingsPageState extends State<SettingsPage>
               _playbackSwitch(
                 key: 'playback-auto-danmaku',
                 title: '自动加载弹幕',
-                subtitle: '播放时自动匹配并加载弹幕，需先在「弹幕」页配置服务',
+                subtitle: '播放时自动匹配并加载弹幕（弹弹play 凭据已内置，开箱即用）',
                 value: prefs.autoLoadDanmaku,
                 onChanged: prefs.setAutoLoadDanmaku,
               ),
@@ -1188,8 +1188,9 @@ class _SettingsPageState extends State<SettingsPage>
                         ? '填写御坂网络弹幕服务的完整接口地址，例如 '
                               'http://192.168.1.100:7768/api/v1/<Token>。'
                               '也可以填写其它兼容 DanDanPlay API 的服务。'
-                        : '在 doc.dandanplay.com 开发者中心申请 AppId/AppSecret。'
-                              '非商业项目可免费使用标准配额，凭据只保存在本机。',
+                        : '应用已内置弹弹play 凭据，无需填写即可使用。'
+                              '想用自己的配额时，可在 doc.dandanplay.com '
+                              '开发者中心申请 AppId/AppSecret 填到这里覆盖内置值。',
                     style: TextStyle(
                       color: context.colors.muted,
                       fontSize: 12.5,
@@ -1217,7 +1218,7 @@ class _SettingsPageState extends State<SettingsPage>
                       spellCheckConfiguration:
                           const SpellCheckConfiguration.disabled(),
                       decoration: const InputDecoration(
-                        labelText: 'AppId',
+                        labelText: 'AppId（已内置，留空即用内置凭据）',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),
@@ -1230,7 +1231,7 @@ class _SettingsPageState extends State<SettingsPage>
                       spellCheckConfiguration:
                           const SpellCheckConfiguration.disabled(),
                       decoration: InputDecoration(
-                        labelText: 'AppSecret',
+                        labelText: 'AppSecret（已内置，留空即用内置凭据）',
                         border: const OutlineInputBorder(),
                         isDense: true,
                         suffixIcon: IconButton(

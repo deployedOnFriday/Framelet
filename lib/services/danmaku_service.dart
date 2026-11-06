@@ -57,10 +57,23 @@ class DanmakuService {
   static String? appSecret;
   static String? proxyAddress;
 
+  /// 内置弹弹play 开放 API 凭据：开箱即用，无需用户配置。
+  /// 用户在 设置→弹幕 里填写的凭据优先级更高。
+  static const builtinAppId = 'j6fj7hpqhg';
+  static const builtinAppSecret = 'bEjx9A6uMQqLveCmyyih9PKcCFeJzycw';
+
+  static String get effectiveAppId {
+    final custom = (appId ?? '').trim();
+    return custom.isNotEmpty ? custom : builtinAppId;
+  }
+
+  static String get effectiveAppSecret {
+    final custom = (appSecret ?? '').trim();
+    return custom.isNotEmpty ? custom : builtinAppSecret;
+  }
+
   static bool get configured => switch (provider) {
-    DanmakuProvider.dandanplay =>
-      (appId ?? '').trim().isNotEmpty &&
-          (appSecret ?? '').trim().isNotEmpty,
+    DanmakuProvider.dandanplay => true, // 内置凭据兜底，恒可用
     DanmakuProvider.custom => baseUrl.trim().isNotEmpty,
   };
 
@@ -142,7 +155,7 @@ class DanmakuService {
     if (!configured) {
       throw DanmakuException(
         provider == DanmakuProvider.dandanplay
-            ? '尚未配置弹弹play AppId/AppSecret，请到 设置 → 弹幕 填写'
+            ? '弹弹play 服务不可用'
             : '尚未配置自定义弹幕接口地址，请到 设置 → 弹幕 填写',
       );
     }
@@ -157,15 +170,15 @@ class DanmakuService {
       final request = await client.getUrl(uri);
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       if (provider == DanmakuProvider.dandanplay) {
+        final id = effectiveAppId;
+        final secret = effectiveAppSecret;
         final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         final path = uri.path;
         final signature = base64Encode(
-          sha256
-              .convert(utf8.encode('$appId$timestamp$path$appSecret'))
-              .bytes,
+          sha256.convert(utf8.encode('$id$timestamp$path$secret')).bytes,
         );
         request.headers
-          ..set('X-AppId', appId!.trim())
+          ..set('X-AppId', id)
           ..set('X-Timestamp', timestamp.toString())
           ..set('X-Signature', signature);
       }
