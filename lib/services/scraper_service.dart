@@ -422,6 +422,12 @@ class ScraperService {
     final uri = Uri.parse('https://$_apiHost$pathAndQuery');
     _lastNetworkDetail = null;
     _lastHttpStatus = 0;
+    // 各线路是否收到过 HTTP 状态码。收到了（哪怕 404/5xx）说明线路可达，
+    // 属内容/节点层问题；只有全程无响应才算真不可达、才值得全局冷却。
+    var sawHttpStatus = false;
+    void noteHttpStatus() {
+      if (_lastHttpStatus != 0) sawHttpStatus = true;
+    }
 
     if (proxy != null) {
       final text = await _httpGetText(uri, proxy: proxy);
@@ -440,6 +446,7 @@ class ScraperService {
         ProxyResolver.disableSystemProxy();
         proxy = null;
       }
+      noteHttpStatus();
     }
 
     bool keyRejected() => _lastHttpStatus == 401 || _lastHttpStatus == 403;
@@ -449,6 +456,7 @@ class ScraperService {
       lastSearchError = 'TMDB API Key 无效或已失效，请到 设置 → 刮削 重新填写';
     }
 
+    noteHttpStatus();
     _lastHttpStatus = 0;
     final body = await _sniGetBytes(_apiHost, pathAndQuery);
     if (body != null) {
@@ -463,6 +471,7 @@ class ScraperService {
 
     // api.tmdb.org 是 TMDB 的另一条 CloudFront 线路，域名未被污染时
     // 可直接 HTTPS 访问；这是实测最有效的免代理备用通道。
+    noteHttpStatus();
     _lastHttpStatus = 0;
     var text = await _httpGetText(
       Uri.parse('https://$_apiAltHost$pathAndQuery'),
@@ -476,6 +485,7 @@ class ScraperService {
       return null;
     }
 
+    noteHttpStatus();
     _lastHttpStatus = 0;
     final altBody = await _sniGetBytes(_apiAltHost, pathAndQuery);
     if (altBody != null) {
@@ -488,6 +498,7 @@ class ScraperService {
     }
 
     // 端口 80 + 内置 IP + Host 头：绕过 SNI 阻断与污染 DNS。
+    noteHttpStatus();
     _lastHttpStatus = 0;
     final plain = await _plainHttpGetViaIp(
       _apiHost,
@@ -503,6 +514,7 @@ class ScraperService {
       return null;
     }
 
+    noteHttpStatus();
     _lastHttpStatus = 0;
     final altPlain = await _plainHttpGetViaIp(
       _apiAltHost,
@@ -520,6 +532,7 @@ class ScraperService {
 
     // 部分地区没有 DNS 污染（或用户改了 hosts / 开了系统级 VPN），
     // 普通直连反而最稳，作为最后一条通道。
+    noteHttpStatus();
     _lastHttpStatus = 0;
     text = await _httpGetText(uri);
     if (text != null) {
@@ -567,6 +580,20 @@ class ScraperService {
     if (proxyText != null) {
       _markTmdbOnline('自建反代');
       return proxyText;
+    }
+
+    noteHttpStatus();
+
+    // 线路收到过 HTTP 响应（如 404/5xx）：网络是通的，属内容/节点层问题
+    // （实测失效的 CloudFront 边缘节点会对有效路径回 404）。此时绝不进入
+    // 离线冷却——否则一次瞬时异常会把整批任务连坐成"未匹配"；让调用方
+    // 回退到搜索线路自行恢复。
+    if (sawHttpStatus) {
+      lastSearchError =
+          'TMDB 线路可达但返回 HTTP $_lastHttpStatus'
+          '（可能为失效节点或反代异常），本条目未匹配，可重试';
+      onLog?.call('  TMDB 请求失败：$lastSearchError');
+      return null;
     }
 
     _tmdbOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
