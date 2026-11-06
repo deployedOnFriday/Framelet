@@ -60,15 +60,37 @@ class WebDavService {
     return client;
   }
 
+  /// 规范化「目录」字段：地址尾段（如 /dav）在目录里被重复填写时
+  /// 自动剥掉，避免拼出 /dav/dav 读 404。
+  ///
+  /// 标准填法：地址 = WebDAV 服务根（AList 为 http://host:5244/dav），
+  /// 目录 = 服务根以下的相对路径（/ 或 /夸克网盘/movie）。
+  /// （若用户真有一个名为 dav 的挂载目录且地址已含 /dav，此处会
+  /// 误纠——比 404 静默 0 条好。）
+  static String _normalizeDirectory(String address, String directory) {
+    final dir = directory.trim();
+    if (dir.isEmpty) return '/';
+    final segments =
+        Uri.parse(address.trim()).path.split('/').where((s) => s.isNotEmpty);
+    final lastSegment = segments.isEmpty ? '' : segments.last.toLowerCase();
+    if (lastSegment.isEmpty) return dir;
+    final dirSegments =
+        dir.split('/').where((s) => s.isNotEmpty).toList();
+    if (dirSegments.isEmpty) return '/';
+    if (dirSegments.first.toLowerCase() == lastSegment) {
+      dirSegments.removeAt(0);
+    }
+    final normalized = '/${dirSegments.join('/')}';
+    return normalized == '//' ? '/' : normalized;
+  }
+
   /// 测试连接；失败抛异常，成功静默返回。
   static Future<void> testConnection(
     MediaSource source,
     String password,
   ) async {
     final client = _client(source, password);
-    final directory = source.directory.trim().isEmpty
-        ? '/'
-        : source.directory.trim();
+    final directory = _normalizeDirectory(source.address, source.directory);
     // 直接对媒体目录做 PROPFIND：同时验证连通性与认证，
     // 兼容「地址填主机、媒体目录填 /dav」的网盘填法。
     await client.readDir(directory);
@@ -84,9 +106,7 @@ class WebDavService {
   }) async {
     final client = _client(source, password);
     final videos = <ScannedVideo>[];
-    final root = source.directory.trim().isEmpty
-        ? '/'
-        : source.directory.trim();
+    final root = _normalizeDirectory(source.address, source.directory);
     final visited = <String>{};
     // 根目录读取失败时记录原因：扫出 0 条多半是这里出的问题，
     // 静默吞掉会让用户只看到「0 条」而不知道哪错了。
