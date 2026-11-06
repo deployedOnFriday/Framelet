@@ -1245,9 +1245,17 @@ class MediaLibrary extends ChangeNotifier {
           : _cleanFolderTitle(rawFolderTitle);
 
       // 无有效目录名（文件直接放在电影/网盘等通用或根目录下）：
-      // 各文件独立，标题保持文件名
+      // 各文件独立，标题用文件名解析出的片名（比原始文件名干净），
+      // 解析不出再回退清洗后的文件名
       if (folderTitle == null || folderTitle.isEmpty) {
-        result.addAll(group);
+        for (final video in group) {
+          final parsedName = _parsedName(video);
+          result.add(
+            video.copyWith(
+              title: parsedName.isNotEmpty ? parsedName : video.title,
+            ),
+          );
+        }
         continue;
       }
 
@@ -1290,34 +1298,121 @@ class MediaLibrary extends ChangeNotifier {
         continue;
       }
 
-      // 单文件电影：标题优先 TMDB 名，回退目录名
-      if (group.length == 1) {
+      // 电影：按「文件名解析出的片名+年份」聚类（Jellyfin 规则——
+      // 同目录多文件只有解析出同一部片才是多版本，不同的各自独立）。
+      // 目录是容器还是片名文件夹由此自然判定，不再依赖通用名单枚举。
+      final clusters = _clusterMovieFiles(group);
+      // 花絮不单独成片：正片存在时挂到其详情页「花絮与相关」分区
+      final mains = clusters
+          .where((c) => !WebDavService.isExtraFile(c.first.title))
+          .toList();
+      final effective = mains.isNotEmpty ? mains : clusters;
+      final folderIsTitle = effective.length == 1 &&
+          _sameTitleLoose(
+            _parsedName(effective.first.first),
+            folderTitle,
+          );
+      for (final cluster in effective) {
+        final first = cluster.first;
+        final ownTitle = first.tmdbTitle?.trim() ?? '';
+        final parsedName = _parsedName(first);
+        final groupTitle = (tmdbTitle != null && tmdbTitle.isNotEmpty)
+            ? tmdbTitle
+            : folderTitle;
+        final String title;
+        if (ownTitle.isNotEmpty) {
+          title = ownTitle;
+        } else if (folderIsTitle || parsedName.isEmpty) {
+          // 目录名与文件名解析一致（片名文件夹）或文件名无法解析：
+          // 用 TMDB 名 / 目录名
+          title = groupTitle;
+        } else {
+          // 目录是容器（里面是多部不同的片）：用文件名解析出的片名
+          title = parsedName;
+        }
         result.add(
-          group.first.copyWith(
-            title: (tmdbTitle != null && tmdbTitle.isNotEmpty)
-                ? tmdbTitle
-                : folderTitle,
-            tmdbId: tmdbId,
+          first.copyWith(
+            title: title,
+            episodeCount: 1,
+            posterPath: folderIsTitle
+                ? posterSource.posterPath
+                : first.posterPath,
+            summary: folderIsTitle ? posterSource.summary : first.summary,
+            rating: folderIsTitle ? posterSource.rating : first.rating,
+            tmdbId: folderIsTitle ? tmdbId : first.tmdbId,
           ),
         );
-        continue;
       }
-
-      // 同目录多文件但无集数标记：视为同一部影片的多版本，合并为一条电影
-      result.add(
-        group.first.copyWith(
-          title: (tmdbTitle != null && tmdbTitle.isNotEmpty)
-              ? tmdbTitle
-              : folderTitle,
-          episodeCount: 1,
-          posterPath: posterSource.posterPath,
-          summary: posterSource.summary,
-          rating: posterSource.rating,
-          tmdbId: tmdbId,
-        ),
-      );
     }
     return result;
+  }
+
+  /// 把同目录的电影文件按「解析出的片名 + 年份」聚类。
+  ///
+  /// 年份缺失视为通配：同名即同一部（多版本常只有部分文件带年份）；
+  /// 同名但年份不同是不同的片（续集/重拍版），按年份拆开。
+  /// 返回 ≥1 个聚类，每个聚类是同一部影片的版本集合。
+  static List<List<ScannedVideo>> _clusterMovieFiles(
+    List<ScannedVideo> group,
+  ) {
+    final parsedCache = <ScannedVideo, ({String name, int? year})>{};
+    for (final video in group) {
+      final parsed = ScraperService.parseTitle(video.title);
+      parsedCache[video] = (
+        name: parsed.queries.isEmpty ? '' : parsed.queries.first,
+        year: parsed.year,
+      );
+    }
+    final byName = <String, List<ScannedVideo>>{};
+    for (final video in group) {
+      final name = parsedCache[video]!.name.trim().toLowerCase();
+      byName.putIfAbsent(
+        name.isEmpty ? 'file:${video.title.toLowerCase()}' : name,
+        () => [],
+      ).add(video);
+    }
+    final clusters = <List<ScannedVideo>>[];
+    for (final sameName in byName.values) {
+      final years = sameName
+          .map((v) => parsedCache[v]!.year)
+          .whereType<int>()
+          .toSet();
+      if (years.length <= 1) {
+        clusters.add(sameName);
+        continue;
+      }
+      // 同名不同年份是不同的片，按年份拆开（无年份的归入最早年份组）
+      final byYear = <int, List<ScannedVideo>>{};
+      for (final video in sameName) {
+        final year = parsedCache[video]!.year ?? -1;
+        byYear.putIfAbsent(year, () => []).add(video);
+      }
+      final ordered = byYear.entries.toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      for (final entry in ordered) {
+        clusters.add(entry.value);
+      }
+    }
+    return clusters;
+  }
+
+  /// 文件名解析出的主片名（parseTitle 的首个查询词），解析失败返回空串。
+  static String _parsedName(ScannedVideo video) {
+    final parsed = ScraperService.parseTitle(video.title);
+    return parsed.queries.isEmpty ? '' : parsed.queries.first.trim();
+  }
+
+  /// 宽松比较两个片名：去空白/点/下划线/括号内容与大小写后相等，
+  /// 或一方为另一方的前缀（目录名常带年份尾巴，如「一代宗师 (2013)」）。
+  static bool _sameTitleLoose(String a, String b) {
+    String norm(String text) => text
+        .toLowerCase()
+        .replaceAll(RegExp(r'[（(][^）)]*[）)]'), '')
+        .replaceAll(RegExp(r'[\s._（）()\-]+'), '');
+    final left = norm(a);
+    final right = norm(b);
+    if (left.isEmpty || right.isEmpty) return false;
+    return left == right || left.startsWith(right) || right.startsWith(left);
   }
 
   /// 清洗文件夹名作为展示标题：剥掉尾部的年份/画质/码率等杂质。

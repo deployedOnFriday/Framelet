@@ -293,4 +293,56 @@ void main() {
       expect(cleared.tmdbTitle, '某剧');
     });
   });
+
+  group('电影聚类（Jellyfin 规则）', () {
+    test('分类容器下多部不同电影按文件名解析各自独立', () {
+      final result = MediaLibrary.aggregate([
+        video(
+          '/首页/夸克网盘/movie/Transformers.Rise.of.The.Beasts.2023.2160p.UHD',
+          'Transformers.Rise.of.The.Beasts.2023.2160p.UHD',
+        ),
+        video(
+          '/首页/夸克网盘/movie/Oppenheimer.2023.1080p.BluRay',
+          'Oppenheimer.2023.1080p.BluRay',
+        ),
+      ]);
+      expect(result, hasLength(2));
+      expect(result.every((v) => v.episodeCount == 1), isTrue);
+      // 标题用解析出的片名，不带技术杂质
+      expect(
+        result.map((v) => v.title),
+        containsAll(['Transformers Rise of The Beasts', 'Oppenheimer']),
+      );
+    });
+
+    test('同目录同名多版本合并为一条', () {
+      final result = MediaLibrary.aggregate([
+        video('/夸克网盘/一代宗师/一代宗师.2013.1080p', '一代宗师.2013.1080p'),
+        video('/夸克网盘/一代宗师/一代宗师.2013.2160p', '一代宗师.2013.2160p'),
+      ]);
+      expect(result, hasLength(1));
+      expect(result.first.episodeCount, 1);
+      expect(result.first.title, '一代宗师');
+    });
+
+    test('目录是容器时两部不同的片不再错并', () {
+      final result = MediaLibrary.aggregate([
+        video('/夸克网盘/我的收藏/流浪地球.2019.1080p', '流浪地球.2019.1080p'),
+        video('/夸克网盘/我的收藏/疯狂的石头.2006.1080p', '疯狂的石头.2006.1080p'),
+      ]);
+      expect(result, hasLength(2));
+      expect(
+        result.map((v) => v.title),
+        containsAll(['流浪地球', '疯狂的石头']),
+      );
+    });
+
+    test('同名不同年份是不同的片（续集/重拍版）', () {
+      final result = MediaLibrary.aggregate([
+        video('/夸克网盘/电影角/Transformers.2007.1080p', 'Transformers.2007.1080p'),
+        video('/夸克网盘/电影角/Transformers.2009.1080p', 'Transformers.2009.1080p'),
+      ]);
+      expect(result, hasLength(2));
+    });
+  });
 }
