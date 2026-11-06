@@ -400,6 +400,11 @@ class ScraperService {
     return result.take(16).toList();
   }
 
+  /// 是否处于离线冷却（此时请求会被短路直接返回失败）。
+  static bool get tmdbCoolingDown =>
+      _tmdbOfflineUntil != null &&
+      _tmdbOfflineUntil!.isAfter(DateTime.now());
+
   /// 通过「国内可用 IP + 域名 SNI」直连 TMDB API。
   ///
   /// TMDB 在国内被 DNS 污染，直接解析域名常会超时；这里用 SecureSocket

@@ -791,6 +791,8 @@ class MediaLibrary extends ChangeNotifier {
       }
 
       _scrapeLog('共 $scrapeTotal 个任务开始');
+      final networkFailedJobs =
+          <({ScannedVideo representative, List<ScannedVideo> group})>[];
       for (final job in jobs) {
         final target = job.group.firstWhere(
           (v) => v.posterPath != null,
@@ -812,6 +814,54 @@ class MediaLibrary extends ChangeNotifier {
           continue;
         }
 
+        final matched = await _processScrapeJob(job);
+        if (!matched && ScraperService.tmdbCoolingDown) {
+          // 接口处于离线冷却（网络原因）才进重试队列；
+          // 真正「搜不到结果」的留给手动匹配。
+          networkFailedJobs.add(job);
+        }
+      }
+
+      // 网络原因失败的任务：等离线冷却结束自动重试一轮（仅一轮，
+      // 避免死循环）。
+      if (networkFailedJobs.isNotEmpty) {
+        scrapeProgress =
+            '${networkFailedJobs.length} 个任务因网络失败，'
+            '等线路恢复后自动重试…';
+        notifyListeners();
+        var waited = 0;
+        while (ScraperService.tmdbCoolingDown && waited < 70) {
+          await Future.delayed(const Duration(seconds: 2));
+          waited += 2;
+        }
+        if (!ScraperService.tmdbCoolingDown) {
+          scrapeProgress =
+              '线路恢复，自动重试 ${networkFailedJobs.length} 个任务…';
+          notifyListeners();
+          for (final job in networkFailedJobs) {
+            // 首轮已计入进度，重试前先扣回，避免重复计数
+            scrapeDone -= job.group.length;
+            await _processScrapeJob(job);
+          }
+        }
+      }
+
+      final unmatched = scrapeTotal - scrapeMatched;
+      scrapeProgress = unmatched <= 0
+          ? '刮削完成，共匹配 $scrapeMatched 个条目'
+          : '刮削完成：已匹配 $scrapeMatched / $scrapeTotal，'
+                '$unmatched 个未匹配（可在下方手动匹配，或先检测刮削线路）';
+    } finally {
+      scraping = false;
+      notifyListeners();
+    }
+  }
+
+  /// 单个刮削任务：解析查询词 → 复用/搜索 TMDB → TVmaze 兜底 → 落库
+  /// → 下载剧照。返回是否成功匹配。首轮与网络失败重试共用。
+  Future<bool> _processScrapeJob(
+    ({ScannedVideo representative, List<ScannedVideo> group}) job,
+  ) async {
         scrapeProgress = '正在匹配「${job.representative.title}」…';
         _scrapeLog(
           '任务 $scrapeDone+: ${job.representative.title}（${job.group.length} 集）',
@@ -821,7 +871,9 @@ class MediaLibrary extends ChangeNotifier {
         final parsed = ScraperService.parseTitle(job.representative.title);
         final preferTv =
             job.group.length > 1 || job.representative.kind != MediaKind.movie;
+        final isSeriesJob = job.group.length > 1;
         final seasonNumber = seasonOf(job.representative);
+        var matched = false;
 
         // 候选评估：拉详情 + 目标季集数据，满足要求才算命中。
         // TMDB 上存在残缺的重复条目（如「旋风少女2」只登记了 1 季 1 集，
@@ -914,6 +966,7 @@ class MediaLibrary extends ChangeNotifier {
               scraped.tmdbId != null) {
             if (posterPath != null || scraped.tmdbId != null) {
               scrapeMatched += job.group.length;
+              matched = true;
             }
             for (final member in job.group) {
               final episodeNumber = episodeNumberOfVideo(member);
@@ -972,17 +1025,7 @@ class MediaLibrary extends ChangeNotifier {
         _scrapeLog('  完成 $scrapeDone/$scrapeTotal');
         scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal 个条目';
         notifyListeners();
-      }
-
-      final unmatched = scrapeTotal - scrapeMatched;
-      scrapeProgress = unmatched <= 0
-          ? '刮削完成，共匹配 $scrapeMatched 个条目'
-          : '刮削完成：已匹配 $scrapeMatched / $scrapeTotal，'
-                '$unmatched 个未匹配（可在下方手动匹配，或先检测刮削线路）';
-    } finally {
-      scraping = false;
-      notifyListeners();
-    }
+        return matched;
   }
 
   /// 刮削任务列表：与展示聚合同规则分组，组内文件一起刮削。
