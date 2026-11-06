@@ -903,7 +903,7 @@ class ScraperService {
         .toList();
 
     const junkPattern =
-        r'^(1080p|720p|2160p|4k|8k|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|dv|dolby|atmos|10bit|8bit|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|60fps|120fps|60帧|120帧|高码|高bitrate|hq|web)$';
+        r'^(1080p|720p|2160p|4k|8k|uhd|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|dv|dolby|atmos|10bits?|8bits?|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|60fps|120fps|60帧|120帧|高码|高bitrate|hq|web)$';
     final junk = RegExp(junkPattern, caseSensitive: false);
     final episode = RegExp(
       r'^(s\d{1,2}(e\d{1,2})?|e\d{1,2}|ep\d{1,3}|\d{1,2}[集期])$',
@@ -920,6 +920,16 @@ class ScraperService {
         continue;
       }
       if (junk.hasMatch(token) || episode.hasMatch(token)) continue;
+      // 连字符粘着的技术段（Atmos-CiNEPHiLES、Blu-ray-Remux 之类）：
+      // 任一段是技术词就整段丢弃；纯标题连字符（Spider-Man）不含
+      // 技术词，原样保留。
+      if (token.contains('-') &&
+          token
+              .toLowerCase()
+              .split('-')
+              .any((segment) => junk.hasMatch(segment))) {
+        continue;
+      }
       // 末尾的 1~2 位纯数字视为集数
       if (RegExp(r'^\d{1,2}$').hasMatch(token) && i >= tokens.length - 2) {
         continue;
