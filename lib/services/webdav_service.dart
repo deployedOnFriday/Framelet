@@ -88,6 +88,9 @@ class WebDavService {
         ? '/'
         : source.directory.trim();
     final visited = <String>{};
+    // 根目录读取失败时记录原因：扫出 0 条多半是这里出的问题，
+    // 静默吞掉会让用户只看到「0 条」而不知道哪错了。
+    var rootError = '';
 
     // 队列元素：目录路径、已确定分类（null=待定）、当前深度
     final queue = <(String, MediaKind?, int)>[(root, null, 0)];
@@ -104,7 +107,10 @@ class WebDavService {
         entries = await client.readDir(dirPath);
       } catch (error) {
         // 单个目录失败不中断整体扫描
-        onProgress?.call('跳过无法读取的目录 $dirPath');
+        onProgress?.call('跳过无法读取的目录 $dirPath：$error');
+        if (dirPath == root) {
+          rootError = '$error';
+        }
         continue;
       }
 
@@ -138,6 +144,15 @@ class WebDavService {
           ),
         );
       }
+    }
+
+    // 根目录读不了 + 一无所获：把根因抛出去，别让用户对着 0 条猜。
+    if (videos.isEmpty && rootError.isNotEmpty) {
+      throw StateError(
+        '无法读取 WebDAV 目录 $root：$rootError。'
+        '常见原因：① 地址已含 /dav 时「目录」里不要再填 /dav；'
+        '② 账号或密码不对；③ 服务端未开启 WebDAV。',
+      );
     }
     return videos;
   }
