@@ -813,6 +813,10 @@ class MediaLibrary extends ChangeNotifier {
           scrapeDone += episodes;
           scrapeMatched += episodes;
           scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal 个条目（跳过已有海报）';
+          // 早期版本刮削没落 tmdbTitle（海报下显示的是目录名）：
+          // 对这类条目按既有 tmdbId 补拉一次详情，把官方名写回库。
+          // 只在缺名时触发，补齐后不再产生请求。
+          await _backfillTmdbTitle(job);
           // 不逐条 notify：几百个已刮条目会在一帧内触发几百次全界面重建
           continue;
         }
@@ -858,6 +862,32 @@ class MediaLibrary extends ChangeNotifier {
       scraping = false;
       notifyListeners();
     }
+  }
+
+  /// 早期版本刮削只落海报没落 tmdbTitle：对已刮但缺官方名的条目，
+  /// 按既有 tmdbId 补拉一次详情把名字写回库。每条至多一次轻量请求，
+  /// 补齐后不再触发。
+  Future<void> _backfillTmdbTitle(
+    ({ScannedVideo representative, List<ScannedVideo> group}) job,
+  ) async {
+    final id = job.representative.tmdbId;
+    if (id == null) return;
+    if ((job.representative.tmdbTitle ?? '').trim().isNotEmpty) return;
+    final details = await ScraperService.fetchTmdbDetails(
+      mediaType: job.representative.kind == MediaKind.movie ? 'movie' : 'tv',
+      id: id,
+    );
+    final name = details?.name.trim() ?? '';
+    if (name.isEmpty) return;
+    for (final member in job.group) {
+      _updateVideo(
+        member.sourceId,
+        member.path,
+        (video) => video.copyWith(tmdbTitle: name),
+      );
+    }
+    await _persistVideos(job.representative.sourceId);
+    notifyListeners();
   }
 
   /// 单个刮削任务：解析查询词 → 复用/搜索 TMDB → TVmaze 兜底 → 落库
@@ -1022,6 +1052,10 @@ class MediaLibrary extends ChangeNotifier {
                   runtimeSec: seasonRuntimeSec ?? scraped.runtimeSec,
                   episodeTitle: episodeInfos[episodeNumber]?.title,
                   tmdbId: scraped.tmdbId,
+                  // TMDB 官方名落库：聚合层与海报墙的展示名都取它
+                  tmdbTitle: scraped.name.trim().isEmpty
+                      ? null
+                      : scraped.name.trim(),
                   kind: kindForGenres(video.kind, scraped.genres),
                 ),
               );
@@ -1238,6 +1272,10 @@ class MediaLibrary extends ChangeNotifier {
           stillPath: episodeStillPaths[episodeNumber],
           episodeTitle: episodeTitles[episodeNumber],
           tmdbId: candidate.tmdbId,
+          // 手动匹配同样要落 TMDB 官方名，海报墙才不显示原始文件名
+          tmdbTitle: candidate.name.trim().isEmpty
+              ? null
+              : candidate.name.trim(),
           kind: kindForGenres(video.kind, genres),
         ),
       );
