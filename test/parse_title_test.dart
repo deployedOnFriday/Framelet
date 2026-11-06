@@ -39,8 +39,8 @@ void main() {
   group('parseTitle 目录名噪音剥离（Pixar 式命名）', () {
     test('年份粘连前缀被剥离并记为年份', () {
       final parsed = ScraperService.parseTitle('1995-玩具总动员1【中英字幕】');
-      expect(parsed.queries.first, '玩具总动员1');
-      expect(parsed.queries, contains('玩具总动员'));
+      // 中英粘连拆分后尾部序号直接剥掉，首个查询词即可命中
+      expect(parsed.queries.first, '玩具总动员');
       expect(parsed.year, 1995);
       // 字幕标签不得进入查询词
       expect(parsed.queries, isNot(contains('中英字幕')));
@@ -77,6 +77,55 @@ void main() {
       final parsed = ScraperService.parseTitle('虫虫危机 1998');
       expect(parsed.queries.first, '虫虫危机');
       expect(parsed.year, 1998);
+    });
+  });
+
+  group('parseTitle 网盘标签目录/粘连子词（v0.1.17）', () {
+    test('中英粘连子词拆分：技术词与标签剔除', () {
+      final parsed = ScraperService.parseTitle('挽救计划4K英语中字');
+      expect(parsed.queries.first, '挽救计划');
+      expect(parsed.queries, isNot(contains('英语中字')));
+    });
+
+    test('纯标签目录名不进查询词', () {
+      final parsed = ScraperService.parseTitle('英语中字');
+      expect(parsed.queries, isEmpty);
+    });
+
+    test('位置规则变体：标题在首个技术词前截断', () {
+      final parsed = ScraperService.parseTitle('The Mask Upscale2160p Inter');
+      expect(parsed.queries, contains('The Mask'));
+    });
+
+    test('位置规则变体：S01E01 之后的残留不影响', () {
+      final parsed = ScraperService.parseTitle(
+        'Loki.S01E01.Glorious.Purpose DDP5 1.Atmos.DV.H',
+      );
+      expect(parsed.queries, contains('Loki'));
+      expect(parsed.queries.first, isNot(contains('DDP5')));
+    });
+
+    test('尾部「字母+数字」标签（MA7）剥出变体', () {
+      final parsed = ScraperService.parseTitle('Life of Pi MA7');
+      expect(parsed.queries, contains('Life of Pi'));
+    });
+
+    test('IMAX/iT 等规格词不污染英文标题', () {
+      final parsed = ScraperService.parseTitle(
+        'Project Hail Mary iMAX iT DDP5 せんどう',
+      );
+      expect(parsed.queries, contains('Project Hail Mary'));
+    });
+
+    test('语言标签（MULTI.FRENCH）剥出干净片名', () {
+      final parsed = ScraperService.parseTitle('Hoppers 2026.MULTI.FRENCH.2160p');
+      expect(parsed.queries, contains('Hoppers'));
+      expect(parsed.year, 2026);
+    });
+
+    test('数字开头的中文片名不误伤（24城记）', () {
+      final parsed = ScraperService.parseTitle('24城记');
+      expect(parsed.queries.first, '24城记');
     });
   });
 }

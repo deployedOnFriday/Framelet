@@ -924,37 +924,52 @@ class MediaLibrary extends ChangeNotifier {
           _scrapeLog('  复用既有 tmdbId=$cachedId');
           await consider(cachedId, isSeriesJob ? 'tv' : 'movie');
         }
-        // 2) TMDB 搜索（中文片名与电影覆盖最好），逐个查询词尝试
+        // 2) TMDB 搜索（中文片名与电影覆盖最好），逐个查询词尝试。
+        //    三个来源按置信度排序：条目标题 → 文件名 → 祖先目录名，
+        //    已试过的查询词不重复请求。
+        final triedQueries = <String>{};
+        Future<bool> searchQuery(String query, int? year) async {
+          final q = query.trim();
+          if (q.isEmpty || !triedQueries.add(q)) return false;
+          final hit = await ScraperService.searchTmdb(
+            q,
+            year: year,
+            preferTv: preferTv,
+          );
+          if (hit?.tmdbId == null) return false;
+          await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
+          return best != null;
+        }
+
         if (best == null) {
           for (final query in parsed.queries) {
-            final hit = await ScraperService.searchTmdb(
-              query,
-              year: parsed.year,
-              preferTv: preferTv,
-            );
-            if (hit?.tmdbId == null) continue;
-            await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
-            if (best != null) break;
+            if (await searchQuery(query, parsed.year)) break;
           }
         }
         // 2.5) 文件名兜底：目录名常带序号/标签噪音（「24 黑寡妇 Black
         // Widow MA」），正式发布的文件名（Black.Widow.2021.2160p…）反而
         // 是 guessit 式的干净来源。仅在前面的查询词全部落空时才试。
         if (best == null) {
-          final baseName = job.representative.path
-              .split(RegExp(r'[\\/]'))
-              .last;
+          final segments = job.representative.path.split(RegExp(r'[\\/]'));
+          final baseName = segments.last;
           final fromFile = ScraperService.parseTitle(baseName);
           for (final query in fromFile.queries) {
-            if (parsed.queries.contains(query)) continue;
-            final hit = await ScraperService.searchTmdb(
-              query,
-              year: fromFile.year ?? parsed.year,
-              preferTv: preferTv,
-            );
-            if (hit?.tmdbId == null) continue;
-            await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
-            if (best != null) break;
+            if (await searchQuery(query, fromFile.year ?? parsed.year)) break;
+          }
+          // 2.6) 祖先目录兜底：网盘常见「/网盘/片名/标签子目录/文件.mkv」
+          //      结构（挽救计划/英语中字/…、变相怪杰(1994) 4K/…），真正的
+          //      片名往往在上级目录名里。从最深一层往上逐个试。
+          if (best == null && segments.length > 1) {
+            for (final dir in segments.reversed.skip(1)) {
+              if (best != null) break;
+              if (dir.isEmpty) continue;
+              final fromDir = ScraperService.parseTitle(dir);
+              for (final query in fromDir.queries) {
+                if (await searchQuery(query, fromDir.year ?? parsed.year)) {
+                  break;
+                }
+              }
+            }
           }
         }
         // 3) TVmaze 兜底（无 TMDB Key 或 TMDB 不可达）

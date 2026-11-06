@@ -976,7 +976,7 @@ class ScraperService {
     }
 
     const junkPattern =
-        r'^(1080p|720p|2160p|4k|8k|uhd|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|dv|dolby|atmos|10bits?|8bits?|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|60fps|120fps|60帧|120帧|高码|高bitrate|hq|web)$';
+        r'^(1080p|720p|2160p|4k|8k|uhd|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|hdr|dv|dolby|atmos|ddp?\d{1,2}(\.1)?|dd\+|imax|(re)?upscale(2160|1080|720)?p?|10bits?|8bits?|50fps|60fps|120fps|60帧|120帧|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|高码|高bitrate|hq|web|multi|french|german|italian|spanish|russian|korean|japanese|mandarin|cantonese|dualaudio|inter)$';
     final junk = RegExp(junkPattern, caseSensitive: false);
 
     // 目录名开头的粘连年份（「1995-玩具总动员1」）：剥离并记为年份。
@@ -1023,16 +1023,28 @@ class ScraperService {
     // 文件名里的独立年份 token 更可信，覆盖目录名剥出的粘连年份
     int? year = leadingYear;
     final yearTokens = <int>[];
-    final cleaned = <String>[];
+    // (token 原始下标, 清洗后的标题词)——供位置规则变体使用
+    final cleaned = <(int, String)>[];
+    // 首个「已识别模式」（年份/技术词/集数）的位置：guessit 位置规则认为
+    // 标题只出现在它之前（Loki.Glorious.Purpose.DDP5.Atmos → Loki…）
+    int? titleEnd;
+    final cjk = RegExp(r'[\u4e00-\u9fff]');
+    final cjkBoundary = RegExp(
+      r'(?<=[\u4e00-\u9fff])(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])(?=[\u4e00-\u9fff])',
+    );
     for (var i = 0; i < tokens.length; i++) {
       final token = tokens[i];
       final isYear = RegExp(r'^(19|20)\d{2}$').hasMatch(token);
       if (isYear) {
         year = int.tryParse(token);
         yearTokens.add(year!);
+        titleEnd ??= i;
         continue;
       }
-      if (junk.hasMatch(token) || episode.hasMatch(token)) continue;
+      if (junk.hasMatch(token) || episode.hasMatch(token)) {
+        titleEnd ??= i;
+        continue;
+      }
       // 纯标点/连字符残段（「A - B」剥词后剩下的「-」）
       if (RegExp(r'^[-–—.·]+$').hasMatch(token)) continue;
       // 连字符粘着的技术段（Atmos-CiNEPHiLES、Blu-ray-Remux 之类）：
@@ -1043,16 +1055,45 @@ class ScraperService {
               .toLowerCase()
               .split('-')
               .any((segment) => junk.hasMatch(segment))) {
+        titleEnd ??= i;
         continue;
       }
       // 末尾的 1~2 位纯数字视为集数
       if (RegExp(r'^\d{1,2}$').hasMatch(token) && i >= tokens.length - 2) {
+        titleEnd ??= i;
         continue;
       }
-      cleaned.add(token);
+      // 中英粘连单 token（挽救计划4K英语中字）：按 CJK↔拉丁边界拆子词，
+      // 技术/标签子词剔除，其余子词无缝拼回（「哆啦A梦」拆完原样还原）
+      if (cjk.hasMatch(token) && RegExp(r'[A-Za-z0-9]').hasMatch(token)) {
+        final subs = token
+            .split(cjkBoundary)
+            .where((s) => s.isNotEmpty)
+            .toList();
+        final kept = <String>[];
+        for (var s = 0; s < subs.length; s++) {
+          final sub = subs[s];
+          final isTrailingDigit =
+              RegExp(r'^\d{1,2}$').hasMatch(sub) && s == subs.length - 1;
+          if (junk.hasMatch(sub) ||
+              bracketLabel.hasMatch(sub) ||
+              episode.hasMatch(sub) ||
+              isTrailingDigit) {
+            continue;
+          }
+          kept.add(sub);
+        }
+        if (kept.isEmpty) {
+          titleEnd ??= i;
+          continue;
+        }
+        cleaned.add((i, kept.join()));
+        continue;
+      }
+      cleaned.add((i, token));
     }
 
-    var name = cleaned.join(' ').trim();
+    var name = cleaned.map((r) => r.$2).join(' ').trim();
     if (name.isEmpty && yearTokens.isNotEmpty) {
       // 剩余无标题块：被当作年份吃掉的首个四位数字就是片名本身
       // （《2012》《1917》）——首个年份升为片名，其余年份做消歧
@@ -1076,13 +1117,28 @@ class ScraperService {
     // 「序号 中文片名 英文名 标签尾」结构（「24 黑寡妇 Black Widow MA」），
     // 逐层生成更干净的变体，全名命中不了时还有后路。
     final variants = <String>[];
+    // 「英语中字」「中英字幕」这类整串都是标签的词拿去搜索只会命中噪音
+    final pureLabelTail = RegExp(
+      r'(中字|字幕|国粤|国语|粤语|双语|简体|繁体|普通话)$',
+    );
     void addVariant(String q) {
       final t = q.trim();
       if (t.length < 2) return; // 单字符查询噪音太大
+      if (pureLabelTail.hasMatch(t) && t.length <= 6) return;
       if (!variants.contains(t)) variants.add(t);
     }
 
     if (name.isNotEmpty) addVariant(name);
+    // guessit 位置规则变体：标题只出现在首个已识别模式之前
+    // （Loki Glorious Purpose DDP5 Atmos → Loki Glorious Purpose）
+    if (titleEnd != null) {
+      final prefix = cleaned
+          .where((r) => r.$1 < titleEnd!)
+          .map((r) => r.$2)
+          .join(' ')
+          .trim();
+      if (prefix.isNotEmpty && prefix != name) addVariant(prefix);
+    }
     final expanded = <String>[];
     for (final v in variants) {
       expanded.add(v);
@@ -1097,12 +1153,12 @@ class ScraperService {
       ..clear()
       ..addAll(expanded);
     // 剥结尾孤立的 1~3 位字母标签（「… Black Widow MA」→「… Black Widow」，
-    // MA/HEVC/HSBS 这类多为发布组或规格残留）。完整片名剥完为空的
+    // MA7/HEVC/HSBS 这类多为发布组或规格残留）。完整片名剥完为空的
     // 不受影响——「Ma」「IT」「Up」本身就是片名。
     final expanded2 = <String>[];
     for (final v in variants) {
       expanded2.add(v);
-      final m = RegExp(r'^(.+?)\s+[A-Za-z]{1,3}$').firstMatch(v);
+      final m = RegExp(r'^(.+?)\s+[A-Za-z]{1,3}\d{0,2}$').firstMatch(v);
       if (m != null) {
         final stripped = m.group(1)!.trim();
         if (stripped.length >= 2) expanded2.add(stripped);
@@ -1112,7 +1168,6 @@ class ScraperService {
       ..clear()
       ..addAll(expanded2);
     // 中英混排时补单语变体：TMDB 对纯中文/纯英文的检索明显更准
-    final cjk = RegExp(r'[\u4e00-\u9fff]');
     final expanded3 = <String>[];
     for (final v in variants) {
       expanded3.add(v);

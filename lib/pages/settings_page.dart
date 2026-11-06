@@ -560,7 +560,7 @@ class _SettingsPageState extends State<SettingsPage>
                 final unscraped = library.unscrapedItems();
                 return unscraped.isEmpty
                     ? const SizedBox.shrink()
-                    : _UnmatchedSection(items: unscraped);
+                    : _UnmatchedEntry(items: unscraped);
               },
             ),
             const SizedBox(height: 18),
@@ -1336,112 +1336,194 @@ class _SettingsPageState extends State<SettingsPage>
   }
 }
 
-/// 未匹配内容区：列出没刮出来的条目，可逐条手动补全海报与元数据。
-class _UnmatchedSection extends StatelessWidget {
-  const _UnmatchedSection({required this.items});
+/// 未匹配内容入口：只显示一条摘要卡片，点进去才是逐条匹配的二级页面，
+/// 避免几十个未匹配条目把刮削设置页铺满。
+class _UnmatchedEntry extends StatelessWidget {
+  const _UnmatchedEntry({required this.items});
 
   final List<ScannedVideo> items;
-
-  Future<void> _match(BuildContext context, ScannedVideo item) async {
-    final library = MediaLibrary.instance;
-    final episodes = library.episodesOf(item);
-    final parsed = ScraperService.parseTitle(item.title);
-    final initialQuery = parsed.queries.isEmpty
-        ? item.title
-        : parsed.queries.first;
-    final candidate = await showDialog<ScrapeCandidate>(
-      context: context,
-      builder: (_) => MatchSearchDialog(
-        initialQuery: initialQuery,
-        preferTv: episodes.length > 1,
-      ),
-    );
-    if (candidate == null || !context.mounted) return;
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    await library.applyCandidate(item, episodes, candidate);
-    messenger
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text('「${candidate.name}」已匹配，已在前端展示')));
-  }
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: context.colors.surface,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: context.colors.border),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '未匹配内容（${items.length}）',
-            style: Theme.of(context).textTheme.titleSmall
-                ?.copyWith(fontWeight: FontWeight.w700),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+            builder: (_) => const _UnmatchedPage(),
           ),
-          const SizedBox(height: 4),
-          Text(
-            '这些没能自动匹配到 TMDB，首页会先用渐变封面占位。'
-            '点「匹配」手动搜索选一下，匹配成功后就会换上正式海报。',
-            style: TextStyle(
-              color: context.colors.muted,
-              fontSize: 12,
-              height: 1.6,
-            ),
-          ),
-          const SizedBox(height: 10),
-          ...items.map(
-            (item) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          item.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: context.colors.text,
-                          ),
-                        ),
-                        Text(
-                          item.path,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: context.colors.muted,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  SizedBox(
-                    height: 34,
-                    child: OutlinedButton.icon(
-                      onPressed: () => _match(context, item),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: context.colors.primary,
-                        side: BorderSide(color: context.colors.primary),
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        textStyle: const TextStyle(fontSize: 12.5),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '未匹配内容（${items.length}）',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: context.colors.text,
                       ),
-                      icon: const Icon(Icons.manage_search_rounded, size: 16),
-                      label: const Text('匹配'),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '没能自动匹配到 TMDB，点进去逐条手动搜索匹配',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: context.colors.muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 22,
+                color: context.colors.muted,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 手动匹配单个条目：弹出搜索对话框，选定候选后应用并提示。
+Future<void> _matchUnmatchedItem(
+  BuildContext context,
+  ScannedVideo item,
+) async {
+  final library = MediaLibrary.instance;
+  final episodes = library.episodesOf(item);
+  final parsed = ScraperService.parseTitle(item.title);
+  final initialQuery = parsed.queries.isEmpty
+      ? item.title
+      : parsed.queries.first;
+  final candidate = await showDialog<ScrapeCandidate>(
+    context: context,
+    builder: (_) => MatchSearchDialog(
+      initialQuery: initialQuery,
+      preferTv: episodes.length > 1,
+    ),
+  );
+  if (candidate == null || !context.mounted) return;
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  await library.applyCandidate(item, episodes, candidate);
+  messenger
+    ?..hideCurrentSnackBar()
+    ..showSnackBar(SnackBar(content: Text('「${candidate.name}」已匹配，已在前端展示')));
+}
+
+/// 未匹配内容二级页：逐条列出并手动匹配。监听媒体库变化，匹配成功
+/// 的条目实时从列表消失。
+class _UnmatchedPage extends StatelessWidget {
+  const _UnmatchedPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('未匹配内容')),
+      body: AnimatedBuilder(
+        animation: MediaLibrary.instance,
+        builder: (context, _) {
+          final items = MediaLibrary.instance.unscrapedItems();
+          if (items.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.task_alt_rounded,
+                    size: 44,
+                    color: context.colors.muted,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '全部匹配完成',
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      color: context.colors.muted,
                     ),
                   ),
                 ],
               ),
-            ),
-          ),
-        ],
+            );
+          }
+          return ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            itemCount: items.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 8),
+            itemBuilder: (context, index) {
+              final item = items[index];
+              return Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: context.colors.surface,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: context.colors.border),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            item.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: context.colors.text,
+                            ),
+                          ),
+                          Text(
+                            item.path,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: context.colors.muted,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    SizedBox(
+                      height: 34,
+                      child: OutlinedButton.icon(
+                        onPressed: () => _matchUnmatchedItem(context, item),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: context.colors.primary,
+                          side: BorderSide(color: context.colors.primary),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          textStyle: const TextStyle(fontSize: 12.5),
+                        ),
+                        icon: const Icon(
+                          Icons.manage_search_rounded,
+                          size: 16,
+                        ),
+                        label: const Text('匹配'),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
       ),
     );
   }
