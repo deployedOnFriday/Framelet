@@ -560,13 +560,13 @@ class ScraperService {
     }
 
     // 先不带 key（反代注入自己的）；反代要求 key（401）再带上重试
-    var text = await tryProxy(withKey: false);
-    if (text == null && _lastHttpStatus == 401) {
-      text = await tryProxy(withKey: true);
+    var proxyText = await tryProxy(withKey: false);
+    if (proxyText == null && _lastHttpStatus == 401) {
+      proxyText = await tryProxy(withKey: true);
     }
-    if (text != null) {
+    if (proxyText != null) {
       _markTmdbOnline('自建反代');
-      return text;
+      return proxyText;
     }
 
     _tmdbOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
