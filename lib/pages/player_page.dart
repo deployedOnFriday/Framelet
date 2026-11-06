@@ -79,12 +79,21 @@ class _PlayerPageState extends State<PlayerPage> {
 
   String? _errorMessage;
   String? _probeResult;
+
+  /// 自检拿到网页而不是媒体流时，通常意味着地址缺少 WebDAV 路径前缀。
+  bool get _probeLooksLikeWebPage =>
+      _probeResult?.toLowerCase().contains('text/html') == true;
   List<SubtitleFile> _subtitleFiles = const [];
   String? _activeSubtitlePath;
   bool _loadingSubtitles = false;
   List<DanmakuComment> _danmakuComments = const [];
   bool _danmakuEnabled = false;
   bool _loadingDanmaku = false;
+  List<DanmakuEpisode> _danmakuCandidates = const [];
+  int? _danmakuEpisodeId;
+
+  /// 用户本次是否想要弹幕；切集后据此继续自动加载。
+  bool _danmakuWanted = false;
 
   /// 弹幕时钟：position 流实时更新，弹幕层用它驱动逐帧重绘，
   /// 不经 setState（整页 setState 每帧重建是卡顿根源之一）。
@@ -377,6 +386,10 @@ class _PlayerPageState extends State<PlayerPage> {
       _seekedToStart = false;
       _errorMessage = null;
       _probeResult = null;
+      _danmakuComments = const [];
+      _danmakuCandidates = const [];
+      _danmakuEpisodeId = null;
+      _danmakuEnabled = false;
     });
     if (osd != null) _showOsd(osd);
     _debugLog('切换剧集: ${video.title}');
@@ -444,7 +457,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _debugLog('open() 调用完成');
       unawaited(_loadSubtitleFiles(source, authPassword));
       // 自动加载弹幕（设置 → 播放），需先配置弹幕服务
-      if (PlaybackPreferences.instance.autoLoadDanmaku &&
+      if ((PlaybackPreferences.instance.autoLoadDanmaku || _danmakuWanted) &&
           DanmakuService.configured) {
         unawaited(_loadDanmaku());
       }
@@ -517,59 +530,110 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Future<void> _toggleDanmaku() async {
+    _debugLog(
+      '弹幕开关点击: enabled=$_danmakuEnabled comments=${_danmakuComments.length} '
+      'loading=$_loadingDanmaku provider=${DanmakuService.providerLabel}',
+    );
     if (_danmakuEnabled) {
       setState(() {
         _danmakuEnabled = false;
-        _danmakuComments = const [];
+        _danmakuWanted = false;
       });
       _showOsd('弹幕已关闭');
       return;
     }
+    _danmakuWanted = true;
+    // 已加载过就直接显示，不必重新请求（切集时会清空）
+    if (_danmakuComments.isNotEmpty) {
+      setState(() => _danmakuEnabled = true);
+      _showOsd(_danmakuCoverageHint() ?? '弹幕已开启');
+      return;
+    }
     if (!DanmakuService.configured) {
+      _debugLog('弹幕服务未配置');
       _showOsd('请先在 设置 → 弹幕 配置服务');
       return;
     }
     await _loadDanmaku();
   }
 
-  Future<void> _loadDanmaku() async {
-    if (_loadingDanmaku) return;
+  /// 加载弹幕。[episodeId] 用于在已匹配的候选里切换弹幕源，
+  /// [searchAgain] 会重新按当前集搜索一遍。
+  Future<void> _loadDanmaku({int? episodeId, bool searchAgain = false}) async {
+    if (_loadingDanmaku) {
+      _debugLog('弹幕加载中，忽略重复请求');
+      return;
+    }
     setState(() => _loadingDanmaku = true);
+    _showOsd('正在匹配弹幕…');
     try {
-      final aggregated = MediaLibrary.instance.resolveAggregated(_current);
-      final query = MediaLibrary.normalizeSeriesTitle(
-        aggregated.tmdbTitle?.trim().isNotEmpty == true
-            ? aggregated.tmdbTitle!
-            : aggregated.title,
-      );
-      final episodeNumber = MediaLibrary.episodeNumberOfVideo(_current) ?? 1;
-      final episodes = await DanmakuService.searchEpisodes(
-        anime: query,
-        episode: episodeNumber,
-      );
-      if (!mounted) return;
-      if (episodes.isEmpty) {
-        _showOsd('没有找到「$query」第 $episodeNumber 集的弹幕');
-        return;
+      var candidates = _danmakuCandidates;
+      var query = '';
+      var episodeNumber = 1;
+      if (searchAgain || candidates.isEmpty || episodeId == null) {
+        final aggregated = MediaLibrary.instance.resolveAggregated(_current);
+        query = MediaLibrary.normalizeSeriesTitle(
+          aggregated.tmdbTitle?.trim().isNotEmpty == true
+              ? aggregated.tmdbTitle!
+              : aggregated.title,
+        );
+        episodeNumber = MediaLibrary.episodeNumberOfVideo(_current) ?? 1;
+        _debugLog(
+          '弹幕搜索: query="$query" episode=$episodeNumber '
+          'baseUrl=${DanmakuService.baseUrl}',
+        );
+        candidates = await DanmakuService.searchEpisodes(
+          anime: query,
+          episode: episodeNumber,
+        );
+        _debugLog('弹幕搜索完成: ${candidates.length} 个源');
+        if (!mounted) return;
+        if (candidates.isEmpty) {
+          _showOsd('没有找到「$query」第 $episodeNumber 集的弹幕');
+          return;
+        }
+        setState(() => _danmakuCandidates = candidates);
       }
-      // 自动匹配：取相关度最高的第一个候选，不打断播放选框
-      final selected = episodes.first;
+      final selected = episodeId == null
+          ? candidates.first
+          : candidates.firstWhere(
+              (episode) => episode.episodeId == episodeId,
+              orElse: () => candidates.first,
+            );
+      _debugLog(
+        '拉取弹幕: ${selected.animeTitle} · ${selected.episodeTitle} '
+        '(${selected.episodeId})',
+      );
       final comments = await DanmakuService.comments(selected.episodeId);
+      _debugLog('弹幕拉取完成: ${comments.length} 条');
       if (!mounted) return;
       comments.sort((a, b) => a.timeSec.compareTo(b.timeSec));
+      if (comments.isNotEmpty) {
+        _debugLog(
+          '弹幕时间范围: ${_clockText(comments.first.timeSec)} - '
+          '${_clockText(comments.last.timeSec)}，当前 '
+          '${_clockText(_positionSec)}',
+        );
+      }
       setState(() {
         _danmakuComments = comments;
+        _danmakuEpisodeId = selected.episodeId;
         _danmakuEnabled = comments.isNotEmpty;
+        _danmakuWanted = comments.isNotEmpty;
       });
+      final coverageHint = _danmakuCoverageHint();
       _showOsd(
         comments.isEmpty
             ? '该节目暂无弹幕'
-            : '弹幕已匹配「${selected.animeTitle} · ${selected.episodeTitle}」'
-                  ' · ${comments.length} 条',
+            : coverageHint ??
+                  '弹幕已匹配「${selected.animeTitle} · ${selected.episodeTitle}」'
+                      ' · ${comments.length} 条',
       );
     } on DanmakuException catch (error) {
+      _debugLog('弹幕加载失败: ${error.message}');
       if (mounted) _showOsd(error.message);
     } catch (error) {
+      _debugLog('弹幕加载异常: $error');
       if (mounted) _showOsd('弹幕加载失败：$error');
     } finally {
       if (mounted) setState(() => _loadingDanmaku = false);
@@ -672,6 +736,24 @@ class _PlayerPageState extends State<PlayerPage> {
     _osdTimer = Timer(const Duration(milliseconds: 1600), () {
       if (mounted) setState(() => _osdMessage = null);
     });
+  }
+
+  /// 当前进度超过最后一颗弹幕时给出解释，避免误以为弹幕没加载。
+  String? _danmakuCoverageHint() {
+    if (_danmakuComments.isEmpty) return null;
+    final last = _danmakuComments.last.timeSec;
+    if (_positionSec <= last + 1) return null;
+    return '当前进度暂无弹幕（该集弹幕止于 ${_clockText(last)}）';
+  }
+
+  static String _clockText(double seconds) {
+    final total = seconds.round().clamp(0, 359999);
+    final h = total ~/ 3600;
+    final m = (total % 3600) ~/ 60;
+    final s = total % 60;
+    final mm = m.toString().padLeft(2, '0');
+    final ss = s.toString().padLeft(2, '0');
+    return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
   }
 
   void _refocus() {
@@ -965,22 +1047,352 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  Widget _buildDanmakuButton() {
-    return Tooltip(
-      message: _danmakuEnabled ? '关闭弹幕' : '加载弹幕',
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: _loadingDanmaku ? null : _toggleDanmaku,
-          child: _ControlButtonLabel(
-            icon: _danmakuEnabled
-                ? Icons.chat_bubble_rounded
-                : Icons.chat_bubble_outline_rounded,
-            label: _loadingDanmaku ? '弹幕…' : (_danmakuEnabled ? '弹幕开' : '弹幕'),
+  /// 弹幕开关：点击直接弹出菜单。第一次点击会先匹配一次，
+  /// 菜单里同时提供「开启/关闭」和已匹配的弹幕源。
+  ///
+  /// 按钮固定放在控制条右侧常显区域，避免被滚动手势吞掉点击。
+  Widget _buildDanmakuSwitch() {
+    return Builder(
+      builder: (buttonContext) => Tooltip(
+        message: '弹幕开关（点击选择弹幕源）',
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: () => unawaited(_openDanmakuMenu(buttonContext)),
+            borderRadius: BorderRadius.circular(6),
+            child: _ControlButtonLabel(
+              icon: _danmakuEnabled
+                  ? Icons.chat_bubble_rounded
+                  : Icons.chat_bubble_outline_rounded,
+              label: _loadingDanmaku
+                  ? '弹幕…'
+                  : (_danmakuEnabled ? '弹幕开' : '弹幕关'),
+            ),
           ),
         ),
       ),
     );
+  }
+
+  Future<void> _openDanmakuMenu(BuildContext buttonContext) async {
+    _debugLog(
+      '弹幕菜单打开: enabled=$_danmakuEnabled '
+      'candidates=${_danmakuCandidates.length} loading=$_loadingDanmaku',
+    );
+    _refocus();
+    // 第一次点击先匹配一次，让菜单里直接出现可选的弹幕源。
+    if (_danmakuCandidates.isEmpty && !_loadingDanmaku) {
+      await _loadDanmaku();
+    }
+    if (!mounted || !buttonContext.mounted) return;
+    final overlay =
+        Overlay.of(buttonContext).context.findRenderObject() as RenderBox?;
+    final box = buttonContext.findRenderObject() as RenderBox?;
+    if (overlay == null || box == null || !box.hasSize) return;
+    final topLeft = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final anchor = topLeft & box.size;
+    final value = await showMenu<String>(
+      context: buttonContext,
+      color: _menuColor,
+      position: RelativeRect.fromRect(anchor, Offset.zero & overlay.size),
+      items: _danmakuMenuItems(),
+    );
+    if (!mounted || value == null) return;
+    _debugLog('弹幕菜单选择: $value');
+    if (value == 'toggle') {
+      await _toggleDanmaku();
+    } else if (value == 'seek-first') {
+      if (_danmakuComments.isNotEmpty) {
+        await _player.seek(
+          Duration(
+            milliseconds: (_danmakuComments.first.timeSec * 1000).round(),
+          ),
+        );
+        _showOsd('已跳到有弹幕的位置');
+      }
+    } else if (value == 'reload') {
+      await _loadDanmaku(searchAgain: true);
+    } else if (value.startsWith('episode:')) {
+      final id = int.tryParse(value.substring('episode:'.length));
+      if (id != null) await _loadDanmaku(episodeId: id);
+    }
+  }
+
+  List<PopupMenuEntry<String>> _danmakuMenuItems() {
+    return [
+      if (_loadingDanmaku)
+        const PopupMenuItem<String>(
+          enabled: false,
+          height: 44,
+          child: Row(
+            children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 1.8,
+                  color: Colors.white54,
+                ),
+              ),
+              SizedBox(width: 9),
+              Text(
+                '正在匹配弹幕…',
+                style: TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ],
+          ),
+        )
+      else
+        PopupMenuItem<String>(
+          value: 'toggle',
+          height: 44,
+          child: Row(
+            children: [
+              Icon(
+                _danmakuEnabled
+                    ? Icons.toggle_on_rounded
+                    : Icons.toggle_off_rounded,
+                size: 26,
+                color: _danmakuEnabled
+                    ? const Color(0xFF5B8CFF)
+                    : Colors.white38,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                _danmakuEnabled ? '关闭弹幕' : '开启弹幕',
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      if (_danmakuComments.isNotEmpty &&
+          _positionSec > _danmakuComments.last.timeSec + 1)
+        PopupMenuItem<String>(
+          value: 'seek-first',
+          height: 40,
+          child: Row(
+            children: [
+              const Icon(
+                Icons.fast_rewind_rounded,
+                size: 18,
+                color: Colors.white70,
+              ),
+              const SizedBox(width: 7),
+              Text(
+                '跳到有弹幕的位置（${_clockText(_danmakuComments.first.timeSec)}）',
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      if (_danmakuCandidates.isNotEmpty) ...[
+        const PopupMenuDivider(),
+        const PopupMenuItem<String>(
+          enabled: false,
+          height: 28,
+          child: Text(
+            '弹幕源（点击切换）',
+            style: TextStyle(color: Colors.white38, fontSize: 11.5),
+          ),
+        ),
+        for (final candidate in _danmakuCandidates.take(8))
+          PopupMenuItem<String>(
+            value: 'episode:${candidate.episodeId}',
+            height: 40,
+            child: _menuRow(
+              '${candidate.animeTitle} · ${candidate.episodeTitle}',
+              candidate.episodeId == _danmakuEpisodeId,
+            ),
+          ),
+      ],
+      const PopupMenuDivider(),
+      const PopupMenuItem<String>(
+        value: 'reload',
+        height: 40,
+        child: Row(
+          children: [
+            Icon(Icons.refresh_rounded, size: 17, color: Colors.white70),
+            SizedBox(width: 7),
+            Text(
+              '重新匹配弹幕',
+              style: TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
+  Widget _buildDanmakuSettingsButton() {
+    return _ControlIconButton(
+      icon: Icons.tune_rounded,
+      tooltip: '弹幕设置',
+      onTap: _showDanmakuSettings,
+    );
+  }
+
+  /// 弹幕显示设置：字号 / 不透明度 / 滚动时长 / 行数，改动即时生效。
+  Future<void> _showDanmakuSettings() async {
+    _refocus();
+    final prefs = PlaybackPreferences.instance;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            Widget sliderRow({
+              required String label,
+              required String valueLabel,
+              required double min,
+              required double max,
+              required int divisions,
+              required double value,
+              required ValueChanged<double> onChanged,
+            }) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        label,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const Spacer(),
+                      Text(
+                        valueLabel,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      trackHeight: 2,
+                      activeTrackColor: const Color(0xFF5B8CFF),
+                      inactiveTrackColor: Colors.white24,
+                      thumbColor: const Color(0xFF5B8CFF),
+                      overlayShape: const RoundSliderOverlayShape(
+                        overlayRadius: 12,
+                      ),
+                    ),
+                    child: Slider(
+                      value: value,
+                      min: min,
+                      max: max,
+                      divisions: divisions,
+                      label: valueLabel,
+                      onChanged: (next) {
+                        onChanged(next);
+                        setSheetState(() {});
+                      },
+                    ),
+                  ),
+                ],
+              );
+            }
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(22, 16, 22, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Text(
+                          '弹幕设置',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const Spacer(),
+                        TextButton(
+                          onPressed: () {
+                            unawaited(prefs.setDanmakuFontSize(18));
+                            unawaited(prefs.setDanmakuOpacity(1));
+                            unawaited(prefs.setDanmakuLifetime(16));
+                            unawaited(prefs.setDanmakuLanes(7));
+                            setSheetState(() {});
+                          },
+                          child: const Text(
+                            '恢复默认',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    sliderRow(
+                      label: '字号',
+                      valueLabel: '${prefs.danmakuFontSize.round()}',
+                      min: 12,
+                      max: 30,
+                      divisions: 18,
+                      value: prefs.danmakuFontSize,
+                      onChanged: (value) =>
+                          unawaited(prefs.setDanmakuFontSize(value)),
+                    ),
+                    sliderRow(
+                      label: '不透明度',
+                      valueLabel: '${(prefs.danmakuOpacity * 100).round()}%',
+                      min: 0.3,
+                      max: 1,
+                      divisions: 14,
+                      value: prefs.danmakuOpacity,
+                      onChanged: (value) =>
+                          unawaited(prefs.setDanmakuOpacity(value)),
+                    ),
+                    sliderRow(
+                      label: '滚动时长（越大越慢）',
+                      valueLabel:
+                          '${prefs.danmakuLifetime.toStringAsFixed(0)} 秒/屏',
+                      min: 12,
+                      max: 24,
+                      divisions: 12,
+                      value: prefs.danmakuLifetime,
+                      onChanged: (value) =>
+                          unawaited(prefs.setDanmakuLifetime(value)),
+                    ),
+                    sliderRow(
+                      label: '显示行数',
+                      valueLabel: '${prefs.danmakuLanes} 行',
+                      min: 3,
+                      max: 10,
+                      divisions: 7,
+                      value: prefs.danmakuLanes.toDouble(),
+                      onChanged: (value) =>
+                          unawaited(prefs.setDanmakuLanes(value.round())),
+                    ),
+                    const SizedBox(height: 2),
+                    const Text(
+                      '改动即时生效，下次播放沿用。',
+                      style: TextStyle(color: Colors.white38, fontSize: 11.5),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    _refocus();
   }
 
   /// 右键弹出影片技术信息（分辨率/码率/编码/帧率等）。
@@ -1125,8 +1537,36 @@ class _PlayerPageState extends State<PlayerPage> {
     if (!_danmakuEnabled || _danmakuComments.isEmpty) {
       return const SizedBox.shrink();
     }
+    final last = _danmakuComments.last.timeSec;
+    if (_positionSec > last + 1) {
+      return IgnorePointer(
+        child: Align(
+          alignment: Alignment.topCenter,
+          child: Container(
+            margin: const EdgeInsets.only(top: 84),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: Colors.black54,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              '当前进度暂无弹幕 · 该集弹幕止于 ${_clockText(last)}',
+              style: const TextStyle(color: Colors.white54, fontSize: 12),
+            ),
+          ),
+        ),
+      );
+    }
+    final prefs = PlaybackPreferences.instance;
     // Canvas 绘制：TextPainter 缓存 + ticker 驱动，不随播放页整页重建
-    return DanmakuOverlay(comments: _danmakuComments, clock: _danmakuClock);
+    return DanmakuOverlay(
+      comments: _danmakuComments,
+      clock: _danmakuClock,
+      fontSize: prefs.danmakuFontSize,
+      opacity: prefs.danmakuOpacity,
+      lifetimeSeconds: prefs.danmakuLifetime,
+      laneCount: prefs.danmakuLanes,
+    );
   }
 
   Widget _buildScreen(BuildContext context) {
@@ -1143,13 +1583,30 @@ class _PlayerPageState extends State<PlayerPage> {
                 key: _videoKey,
                 controller: _controller,
                 // 视频尚未就绪时不渲染控制条，避免其布局在零尺寸下溢出报错。
-                controls: (state) => _durationSec > 0
-                    ? MaterialDesktopVideoControls(state)
-                    : const SizedBox.shrink(),
+                //
+                // 弹幕层必须放在 controls 里：media_kit 进入全屏时会新建
+                // 一个只包含 Video 的路由，挂在播放页 Stack 上的覆盖层
+                // 不会跟过去。controls 闭包会被复制到全屏 Video，因此
+                // 普通模式和全屏模式都能看到同一层弹幕。
+                controls: (state) => _durationSec <= 0
+                    ? const SizedBox.shrink()
+                    : Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Positioned.fill(
+                            child: AnimatedBuilder(
+                              animation: PlaybackPreferences.instance,
+                              builder: (_, _) => _buildDanmakuOverlay(),
+                            ),
+                          ),
+                          Positioned.fill(
+                            child: MaterialDesktopVideoControls(state),
+                          ),
+                        ],
+                      ),
               ),
             ),
           ),
-          Positioned.fill(child: _buildDanmakuOverlay()),
           if (_durationSec <= 0)
             const Positioned.fill(
               child: IgnorePointer(
@@ -1238,9 +1695,16 @@ class _PlayerPageState extends State<PlayerPage> {
                           ),
                         ],
                         const SizedBox(height: 16),
-                        const Text(
-                          '请检查媒体源密码是否变更，或稍后重试',
-                          style: TextStyle(color: Colors.white38, fontSize: 12),
+                        Text(
+                          _probeLooksLikeWebPage
+                              ? '服务器返回的是网页而不是视频文件：请检查媒体源地址'
+                                    '是否为 WebDAV 地址（AList 通常以 /dav 结尾）。'
+                              : '请检查媒体源密码是否变更，或稍后重试',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white38,
+                            fontSize: 12,
+                          ),
                         ),
                       ],
                     ),
@@ -1322,7 +1786,7 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   /// 控制条主题：禁用内建键盘快捷键（由页面层统一接管）；
-  /// 底部控制条挂上 上一集/下一集/选集/音轨/字幕/倍速，内建的
+  /// 底部控制条挂上 上一集/下一集/选集/弹幕/音轨/字幕/倍速，内建的
   /// SkipPrevious/SkipNext 只会切 Player 内部播放列表（我们不用），换成自己的切集。
   ///
   /// 注意：media_kit 的底栏是一个不换行的 Row，电视剧多出「上一集/下一集」后
@@ -1353,21 +1817,20 @@ class _PlayerPageState extends State<PlayerPage> {
         Expanded(
           child: Align(
             alignment: Alignment.centerRight,
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              reverse: true,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (multi) _buildEpisodeButton(),
-                  // 音轨/字幕入口常显：电视剧单音轨、无内嵌字幕轨也要能点开确认
-                  _buildDanmakuButton(),
-                  _buildAudioButton(audioTracks),
-                  _buildSubtitleButton(subtitleTracks),
-                  _buildSpeedButton(),
-                  const MaterialDesktopFullscreenButton(),
-                ],
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (multi) _buildEpisodeButton(),
+                // 紧贴音轨左侧，中间不留弹性空隙。
+                _buildDanmakuSwitch(),
+                _buildDanmakuSettingsButton(),
+                // 音轨/字幕入口常显：电视剧单音轨、无内嵌字幕轨也要能点开确认
+                _buildAudioButton(audioTracks),
+                _buildSubtitleButton(subtitleTracks),
+                _buildSpeedButton(),
+                const SizedBox(width: 2),
+                const MaterialDesktopFullscreenButton(),
+              ],
             ),
           ),
         ),

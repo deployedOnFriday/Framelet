@@ -255,7 +255,8 @@ class _CandidateCardState extends State<_CandidateCard> {
       _posterFuture = ScraperService.downloadPoster(
         url,
         cacheKey:
-            'candidate_${widget.candidate.tmdbId ?? widget.candidate.name}'
+            'candidate_'
+            '${widget.candidate.tmdbId ?? widget.candidate.tvmazeId ?? widget.candidate.name}'
             '_${widget.candidate.year ?? ''}',
       );
     }

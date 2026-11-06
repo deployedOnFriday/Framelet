@@ -183,11 +183,18 @@ class MediaLibrary extends ChangeNotifier {
         if (existing == null) {
           merged[key] = video;
         } else {
-          // 同一部剧的多季：集数无条件相加（两季集数相同也要累加），
-          // 剧名统一用规范化基名（魔幻手机2：傻妞归来 → 魔幻手机）
-          merged[key] = video.copyWith(
+          // 同一部剧的多季 / 同一部电影的多版本：集数无条件相加
+          // （两季集数相同也要累加）。展示字段取信息更完整的一条，
+          // 而不是无脑取后一条——否则修正匹配后，另一条旧条目的
+          // 旧海报会把新海报盖掉，表现为「改了匹配但海报不切换」。
+          final base = _mergeAggregatedEntries(existing, video);
+          merged[key] = base.copyWith(
             episodeCount: existing.episodeCount + video.episodeCount,
-            title: normalizeSeriesTitle(video.tmdbTitle ?? video.title),
+            // 剧名统一用规范化基名（魔幻手机2：傻妞归来 → 魔幻手机）；
+            // 电影名不能剥尾部数字（流浪地球2 → 流浪地球）。
+            title: base.kind == MediaKind.movie
+                ? base.title
+                : normalizeSeriesTitle(base.tmdbTitle ?? base.title),
           );
         }
       }
@@ -198,6 +205,48 @@ class MediaLibrary extends ChangeNotifier {
             (b.modified ?? DateTime(0)).compareTo(a.modified ?? DateTime(0)),
       );
     return _byKindCache[kind] = list;
+  }
+
+  /// 合并同一展示键下的多条聚合条目：以信息最完整的一条为底，
+  /// 其余条目只补空缺字段。
+  ///
+  /// 手动修正匹配只会写其中一条时，旧条目往往也持有 posterPath；
+  /// 若直接取最后一条，旧海报会覆盖刚下载的新海报。
+  static ScannedVideo _mergeAggregatedEntries(
+    ScannedVideo first,
+    ScannedVideo second,
+  ) {
+    final base = _metadataScore(second) > _metadataScore(first)
+        ? second
+        : first;
+    final other = identical(base, first) ? second : first;
+    return base.copyWith(
+      posterPath: base.posterPath ?? other.posterPath,
+      backdropPath: base.backdropPath ?? other.backdropPath,
+      summary: base.summary ?? other.summary,
+      rating: base.rating ?? other.rating,
+      genres: base.genres.isEmpty ? other.genres : null,
+      cast: base.cast.isEmpty ? other.cast : null,
+      releaseDate: base.releaseDate ?? other.releaseDate,
+      runtimeSec: base.runtimeSec ?? other.runtimeSec,
+      stillPath: base.stillPath ?? other.stillPath,
+      episodeTitle: base.episodeTitle ?? other.episodeTitle,
+      tmdbId: base.tmdbId ?? other.tmdbId,
+      tmdbTitle: base.tmdbTitle ?? other.tmdbTitle,
+    );
+  }
+
+  /// 条目信息完整度：海报权重最高，其次是 TMDB 官方名与简介。
+  static int _metadataScore(ScannedVideo video) {
+    var score = 0;
+    if (video.posterPath != null) score += 8;
+    if ((video.tmdbTitle ?? '').trim().isNotEmpty) score += 4;
+    if ((video.summary ?? '').trim().isNotEmpty) score += 2;
+    if ((video.backdropPath ?? '').trim().isNotEmpty) score += 1;
+    if ((video.rating ?? '').trim().isNotEmpty) score += 1;
+    if (video.genres.isNotEmpty) score += 1;
+    if (video.cast.isNotEmpty) score += 1;
+    return score;
   }
 
   /// 一部剧的每一季（跨文件夹、跨 TMDB ID）。单季剧集返回它自己。
@@ -1081,9 +1130,14 @@ class MediaLibrary extends ChangeNotifier {
           // 断网会让整条进度全丢（龙门镖局事故）。
           String? posterPath;
           if (scraped.posterUrl != null) {
+            final identity = scraped.tmdbId != null
+                ? 'tmdb_${scraped.tmdbId}'
+                : 'name_${scraped.name}_${scraped.year ?? ''}';
             posterPath = await ScraperService.downloadPoster(
               scraped.posterUrl!,
-              cacheKey: '${job.representative.kind.name}_${scraped.name}',
+              cacheKey:
+                  '${job.representative.kind.name}_'
+                  '${scraped.mediaType ?? 'item'}_$identity',
             );
           }
           final scrapedBackdrop = await _downloadBackdrop(scraped);
@@ -1243,6 +1297,15 @@ class MediaLibrary extends ChangeNotifier {
     List<ScannedVideo> group,
     ScrapeCandidate candidate,
   ) async {
+    // 缓存键必须带条目身份：同名同年的电影/剧集是两个不同条目，
+    // 只按「片名+年份」会把上一部片的海报当成新片海报直接复用。
+    final identity = candidate.tmdbId != null
+        ? 'tmdb_${candidate.tmdbId}'
+        : candidate.tvmazeId != null
+        ? 'tvmaze_${candidate.tvmazeId}'
+        : 'name_${candidate.name}_${candidate.year ?? ''}';
+    final previousTmdbId = target.tmdbId;
+    final identityChanged = previousTmdbId != candidate.tmdbId;
     String? poster;
     String? backdrop;
     String? summary = candidate.overview;
@@ -1262,7 +1325,7 @@ class MediaLibrary extends ChangeNotifier {
         if (details.backdropUrl != null) {
           backdrop = await ScraperService.downloadPoster(
             details.backdropUrl!,
-            cacheKey: 'manual_backdrop_${candidate.name}',
+            cacheKey: 'manual_backdrop_${candidate.mediaType}_$identity',
           );
         }
         summary = details.summary ?? summary;
@@ -1316,16 +1379,40 @@ class MediaLibrary extends ChangeNotifier {
     if (candidate.posterUrl != null) {
       poster = await ScraperService.downloadPoster(
         candidate.posterUrl!,
-        cacheKey: 'manual_${candidate.name}_${candidate.year ?? ''}',
+        cacheKey: 'manual_${candidate.mediaType}_$identity',
       );
     }
-    for (final member in group) {
+
+    // 同一目录里已被匹配到同一个（旧）TMDB 条目的文件是同一部片的
+    // 多版本/重复扫描产物：修正匹配时要一起改，否则海报墙按 tmdbId
+    // 合并展示时会继续命中另一条旧记录的海报。
+    final members = <ScannedVideo>[...group];
+    if (previousTmdbId != null) {
+      final parent = parentPathOf(target.path);
+      for (final video
+          in _videosBySource[target.sourceId] ?? const <ScannedVideo>[]) {
+        if (video.tmdbId != previousTmdbId) continue;
+        if (parentPathOf(video.path) != parent) continue;
+        if (members.any((member) => member.path == video.path)) continue;
+        members.add(video);
+      }
+    }
+
+    for (final member in members) {
       final episodeNumber = episodeNumberOfVideo(member);
+      final hasStill = episodeStillPaths.containsKey(episodeNumber);
+      final hasEpisodeTitle = episodeTitles.containsKey(episodeNumber);
       _updateVideo(
         member.sourceId,
         member.path,
         (video) => video.copyWith(
           posterPath: poster,
+          // 换了条目但新图没取到：宁可回占位图，也不要继续显示
+          // 上一部片的旧海报/剧照。
+          clearPoster: poster == null && identityChanged,
+          clearBackdrop: backdrop == null && identityChanged,
+          clearStill: !hasStill && identityChanged,
+          clearEpisodeTitle: !hasEpisodeTitle && identityChanged,
           summary: summary,
           rating: rating,
           backdropPath: backdrop,
@@ -1336,6 +1423,9 @@ class MediaLibrary extends ChangeNotifier {
           stillPath: episodeStillPaths[episodeNumber],
           episodeTitle: episodeTitles[episodeNumber],
           tmdbId: candidate.tmdbId,
+          // TVmaze 兜底候选没有 TMDB ID：必须清掉旧值，否则下次
+          // 自动刮削会「复用既有 tmdbId」再次匹配回错误条目。
+          clearTmdbId: candidate.tmdbId == null,
           // 手动匹配同样要落 TMDB 官方名，海报墙才不显示原始文件名
           tmdbTitle: candidate.name.trim().isEmpty
               ? null
@@ -1362,9 +1452,12 @@ class MediaLibrary extends ChangeNotifier {
 
   Future<String?> _downloadBackdrop(ScrapeResult result) async {
     if (result.backdropUrl == null) return null;
+    final identity = result.tmdbId != null
+        ? 'tmdb_${result.tmdbId}'
+        : 'name_${result.name}_${result.year ?? ''}';
     return ScraperService.downloadPoster(
       result.backdropUrl!,
-      cacheKey: 'backdrop_${result.mediaType ?? 'item'}_${result.name}',
+      cacheKey: 'backdrop_${result.mediaType ?? 'item'}_$identity',
     );
   }
 

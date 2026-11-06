@@ -78,12 +78,12 @@ class WebDavService {
   static String _normalizeDirectory(String address, String directory) {
     final dir = directory.trim();
     if (dir.isEmpty) return '/';
-    final segments =
-        Uri.parse(address.trim()).path.split('/').where((s) => s.isNotEmpty);
+    final segments = Uri.parse(address.trim()).path
+        .split('/')
+        .where((s) => s.isNotEmpty);
     final lastSegment = segments.isEmpty ? '' : segments.last.toLowerCase();
     if (lastSegment.isEmpty) return dir;
-    final dirSegments =
-        dir.split('/').where((s) => s.isNotEmpty).toList();
+    final dirSegments = dir.split('/').where((s) => s.isNotEmpty).toList();
     if (dirSegments.isEmpty) return '/';
     if (dirSegments.first.toLowerCase() == lastSegment) {
       dirSegments.removeAt(0);
@@ -159,8 +159,7 @@ class WebDavService {
         case 'tcp-dead':
           final uri = Uri.tryParse(source.address.trim());
           final host = uri?.host ?? source.address.trim();
-          final port =
-              (uri?.port == 0 || uri?.port == null)
+          final port = (uri?.port == 0 || uri?.port == null)
               ? (uri?.scheme == 'https' ? 443 : 80)
               : uri!.port;
           throw StateError(
@@ -189,18 +188,15 @@ class WebDavService {
     } catch (_) {
       return 'tcp-dead';
     }
-    Future<bool> probeIp(InternetAddress a) => Socket.connect(a, port,
-            timeout: const Duration(seconds: 4))
-        .then((s) {
-      s.destroy();
-      return true;
-    }).catchError((_) => false);
-    final v6 = addrs
-        .where((a) => a.type == InternetAddressType.IPv6)
-        .toList();
-    final v4 = addrs
-        .where((a) => a.type == InternetAddressType.IPv4)
-        .toList();
+    Future<bool> probeIp(InternetAddress a) =>
+        Socket.connect(a, port, timeout: const Duration(seconds: 4))
+            .then((s) {
+              s.destroy();
+              return true;
+            })
+            .catchError((_) => false);
+    final v6 = addrs.where((a) => a.type == InternetAddressType.IPv6).toList();
+    final v4 = addrs.where((a) => a.type == InternetAddressType.IPv4).toList();
     final v6ok = v6.isEmpty ? null : await probeIp(v6.first);
     final v4ok = v4.isEmpty ? null : await probeIp(v4.first);
     if (v4ok == true && v6ok == false) return 'ipv6-broken';
@@ -442,15 +438,37 @@ class WebDavService {
   /// 只在这里统一编码；再手动 decode 会在文件名含 % 时抛 Illegal percent encoding。
   static Uri playUrl(MediaSource source, String filePath) {
     final base = Uri.parse(source.address.trim());
-    final segments = filePath
+    final baseSegments = base.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .toList();
+    final fileSegments = filePath
         .split('/')
         .where((segment) => segment.isNotEmpty)
         .toList();
+    // 扫描得到的路径是相对地址根目录的；重建 URL 时必须保留地址里的
+    // 路径前缀（如 AList 的 /dav），否则会请求到网页界面而不是文件。
+    // 同时兼容旧数据里路径已重复带上该前缀的情况。
+    if (baseSegments.isNotEmpty && fileSegments.isNotEmpty) {
+      final leading = fileSegments.take(baseSegments.length).toList();
+      final repeatsBase =
+          leading.length == baseSegments.length &&
+          List.generate(
+            baseSegments.length,
+            (i) => leading[i].toLowerCase() == baseSegments[i].toLowerCase(),
+          ).every((same) => same);
+      if (repeatsBase) {
+        fileSegments.removeRange(0, baseSegments.length);
+      } else if (fileSegments.first.toLowerCase() ==
+          baseSegments.last.toLowerCase()) {
+        fileSegments.removeAt(0);
+      }
+    }
     return Uri(
       scheme: base.scheme.isEmpty ? 'http' : base.scheme,
       host: base.host,
       port: base.port,
-      pathSegments: segments,
+      pathSegments: [...baseSegments, ...fileSegments],
+      query: base.hasQuery ? base.query : null,
     );
   }
 

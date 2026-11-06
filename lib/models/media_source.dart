@@ -243,6 +243,11 @@ class ScannedVideo {
     String? episodeTitle,
     int? tmdbId,
     String? tmdbTitle,
+    bool clearPoster = false,
+    bool clearBackdrop = false,
+    bool clearStill = false,
+    bool clearEpisodeTitle = false,
+    bool clearTmdbId = false,
   }) => ScannedVideo(
     sourceId: sourceId,
     path: path,
@@ -251,17 +256,19 @@ class ScannedVideo {
     episodeCount: episodeCount ?? this.episodeCount,
     sizeBytes: sizeBytes,
     modified: modified,
-    posterPath: posterPath ?? this.posterPath,
+    posterPath: clearPoster ? null : (posterPath ?? this.posterPath),
     summary: summary ?? this.summary,
     rating: rating ?? this.rating,
-    backdropPath: backdropPath ?? this.backdropPath,
+    backdropPath: clearBackdrop ? null : (backdropPath ?? this.backdropPath),
     genres: genres ?? this.genres,
     cast: cast ?? this.cast,
     releaseDate: releaseDate ?? this.releaseDate,
     runtimeSec: runtimeSec ?? this.runtimeSec,
-    stillPath: stillPath ?? this.stillPath,
-    episodeTitle: episodeTitle ?? this.episodeTitle,
-    tmdbId: tmdbId ?? this.tmdbId,
+    stillPath: clearStill ? null : (stillPath ?? this.stillPath),
+    episodeTitle: clearEpisodeTitle
+        ? null
+        : (episodeTitle ?? this.episodeTitle),
+    tmdbId: clearTmdbId ? null : (tmdbId ?? this.tmdbId),
     tmdbTitle: tmdbTitle ?? this.tmdbTitle,
   );
 

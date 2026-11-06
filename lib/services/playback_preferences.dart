@@ -34,6 +34,18 @@ class PlaybackPreferences extends ChangeNotifier {
   /// 播放时自动匹配并加载弹幕（需先配置弹幕服务）。
   bool autoLoadDanmaku = false;
 
+  /// 弹幕字号（12–30）。
+  double danmakuFontSize = 18;
+
+  /// 弹幕不透明度（0.3–1）。
+  double danmakuOpacity = 1;
+
+  /// 单条弹幕横向滚动时长（秒，12–24）。数值越大越慢。
+  double danmakuLifetime = 16;
+
+  /// 弹幕轨道行数（3–10）。
+  int danmakuLanes = 7;
+
   /// 每次打开播放器的初始倍速。
   double defaultSpeed = 1.0;
 
@@ -51,6 +63,23 @@ class PlaybackPreferences extends ChangeNotifier {
           await _store.read('framelet.player.rememberVolume') != '0';
       hardwareDecode = await _store.read('framelet.player.hwdec') != '0';
       autoLoadDanmaku = await _store.read('framelet.player.autoDanmaku') == '1';
+      danmakuFontSize =
+          double.tryParse(
+            await _store.read('framelet.danmaku.fontSize') ?? '',
+          ) ??
+          18;
+      danmakuOpacity =
+          double.tryParse(
+            await _store.read('framelet.danmaku.opacity') ?? '',
+          ) ??
+          1;
+      danmakuLifetime =
+          double.tryParse(
+            await _store.read('framelet.danmaku.lifetime') ?? '',
+          ) ??
+          16;
+      danmakuLanes =
+          int.tryParse(await _store.read('framelet.danmaku.lanes') ?? '') ?? 7;
       defaultSpeed =
           double.tryParse(await _store.read('framelet.player.speed') ?? '') ??
           1.0;
@@ -63,16 +92,25 @@ class PlaybackPreferences extends ChangeNotifier {
       if (!speedOptions.contains(defaultSpeed)) defaultSpeed = 1.0;
       if (!seekStepOptions.contains(seekStep)) seekStep = 5;
       if (!rewindOptions.contains(rewindSeconds)) rewindSeconds = 3;
+      if (!danmakuFontSize.isFinite) danmakuFontSize = 18;
+      if (!danmakuOpacity.isFinite) danmakuOpacity = 1;
+      if (!danmakuLifetime.isFinite) danmakuLifetime = 16;
+      danmakuFontSize = danmakuFontSize.clamp(12.0, 30.0);
+      danmakuOpacity = danmakuOpacity.clamp(0.3, 1.0);
+      // 旧版 5–15 秒的范围整体偏快；低于 12 秒的旧设置统一提升到 16 秒。
+      if (danmakuLifetime < 12) {
+        danmakuLifetime = 16;
+      } else {
+        danmakuLifetime = danmakuLifetime.clamp(12.0, 24.0);
+      }
+      danmakuLanes = danmakuLanes.clamp(3, 10);
     } catch (_) {
       // 读取失败不影响使用默认值
     }
   }
 
-  Future<void> setAutoPlayNext(bool value) => _saveBool(
-    'framelet.player.autoNext',
-    value,
-    (v) => autoPlayNext = v,
-  );
+  Future<void> setAutoPlayNext(bool value) =>
+      _saveBool('framelet.player.autoNext', value, (v) => autoPlayNext = v);
 
   Future<void> setRememberVolume(bool value) => _saveBool(
     'framelet.player.rememberVolume',
@@ -80,11 +118,8 @@ class PlaybackPreferences extends ChangeNotifier {
     (v) => rememberVolume = v,
   );
 
-  Future<void> setHardwareDecode(bool value) => _saveBool(
-    'framelet.player.hwdec',
-    value,
-    (v) => hardwareDecode = v,
-  );
+  Future<void> setHardwareDecode(bool value) =>
+      _saveBool('framelet.player.hwdec', value, (v) => hardwareDecode = v);
 
   Future<void> setAutoLoadDanmaku(bool value) => _saveBool(
     'framelet.player.autoDanmaku',
@@ -92,23 +127,32 @@ class PlaybackPreferences extends ChangeNotifier {
     (v) => autoLoadDanmaku = v,
   );
 
-  Future<void> setDefaultSpeed(double value) => _saveString(
-    'framelet.player.speed',
+  Future<void> setDanmakuFontSize(double value) => _saveString(
+    'framelet.danmaku.fontSize',
     value,
-    (v) => defaultSpeed = v,
+    (v) => danmakuFontSize = v,
   );
 
-  Future<void> setSeekStep(int value) => _saveString(
-    'framelet.player.seekStep',
+  Future<void> setDanmakuOpacity(double value) =>
+      _saveString('framelet.danmaku.opacity', value, (v) => danmakuOpacity = v);
+
+  Future<void> setDanmakuLifetime(double value) => _saveString(
+    'framelet.danmaku.lifetime',
     value,
-    (v) => seekStep = v,
+    (v) => danmakuLifetime = v,
   );
 
-  Future<void> setRewindSeconds(int value) => _saveString(
-    'framelet.player.rewind',
-    value,
-    (v) => rewindSeconds = v,
-  );
+  Future<void> setDanmakuLanes(int value) =>
+      _saveString('framelet.danmaku.lanes', value, (v) => danmakuLanes = v);
+
+  Future<void> setDefaultSpeed(double value) =>
+      _saveString('framelet.player.speed', value, (v) => defaultSpeed = v);
+
+  Future<void> setSeekStep(int value) =>
+      _saveString('framelet.player.seekStep', value, (v) => seekStep = v);
+
+  Future<void> setRewindSeconds(int value) =>
+      _saveString('framelet.player.rewind', value, (v) => rewindSeconds = v);
 
   Future<void> _saveBool(
     String key,

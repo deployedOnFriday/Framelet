@@ -70,56 +70,95 @@ class _DetailPageState extends State<DetailPage> {
           onSeasonSelected = (index) => setState(() => _seasonIndex = index);
         }
 
-        return Scaffold(
-          backgroundColor: context.colors.background,
-          body: Stack(
-            children: [
-              SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onSecondaryTapDown: (details) =>
+              _showContextMenu(context, details.globalPosition, current),
+          child: Scaffold(
+            backgroundColor: context.colors.background,
+            body: Stack(
               children: [
-                _HeroSection(
-                  title: displayTitle,
-                  video: hero,
-                  source: source,
-                  episodes: episodes,
-                  isSeries: isSeries,
-                ),
-                const SizedBox(height: 30),
-                if (isSeries) ...[
-                  _EpisodeCarousel(
-                    episodes: episodes,
-                    posterPath: season.posterPath,
-                    seasonLabel:
-                        '第 ${MediaLibrary.seasonOf(seasons[seasonIndex])} 季',
-                    seasons: seasons,
-                    seasonIndex: seasonIndex,
-                    onSeasonSelected: onSeasonSelected,
+                SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _HeroSection(
+                        title: displayTitle,
+                        video: hero,
+                        source: source,
+                        episodes: episodes,
+                        isSeries: isSeries,
+                      ),
+                      const SizedBox(height: 30),
+                      if (isSeries) ...[
+                        _EpisodeCarousel(
+                          episodes: episodes,
+                          posterPath: season.posterPath,
+                          seasonLabel:
+                              '第 ${MediaLibrary.seasonOf(seasons[seasonIndex])} 季',
+                          seasons: seasons,
+                          seasonIndex: seasonIndex,
+                          onSeasonSelected: onSeasonSelected,
+                        ),
+                      ] else
+                        const SizedBox(height: 20),
+                      const SizedBox(height: 34),
+                      if (hero.cast.isNotEmpty) ...[
+                        _CastSection(cast: hero.cast),
+                        const SizedBox(height: 32),
+                      ],
+                      _FileInfo(
+                        video: season,
+                        source: source,
+                        episodes: episodes,
+                      ),
+                      const SizedBox(height: 44),
+                    ],
                   ),
-                ] else
-                  const SizedBox(height: 20),
-                const SizedBox(height: 34),
-                if (hero.cast.isNotEmpty) ...[
-                  _CastSection(cast: hero.cast),
-                  const SizedBox(height: 32),
-                ],
-                _FileInfo(video: season, source: source, episodes: episodes),
-                const SizedBox(height: 44),
+                ),
               ],
             ),
-          ),
-              Positioned(
-                top: 12,
-                right: 14,
-                child: _HideButton(
-                  onHide: () => _hideCurrent(context, current),
-                ),
-              ),
-            ],
           ),
         );
       },
     );
+  }
+
+  /// 右键菜单：目前提供「隐藏该影片」，隐藏后从海报墙移除。
+  Future<void> _showContextMenu(
+    BuildContext context,
+    Offset globalPosition,
+    ScannedVideo target,
+  ) async {
+    final overlay = Overlay.of(context).context.findRenderObject();
+    if (overlay is! RenderBox) return;
+    final action = await showMenu<String>(
+      context: context,
+      color: _isDark(context) ? const Color(0xFF1F1F1F) : Colors.white,
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(globalPosition, globalPosition),
+        Offset.zero & overlay.size,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: 'hide',
+          height: 40,
+          child: Row(
+            children: [
+              Icon(
+                Icons.visibility_off_rounded,
+                size: 17,
+                color: context.colors.muted,
+              ),
+              const SizedBox(width: 8),
+              const Text('隐藏该影片', style: TextStyle(fontSize: 13)),
+            ],
+          ),
+        ),
+      ],
+    );
+    if (action != 'hide' || !context.mounted) return;
+    await _hideCurrent(context, target);
   }
 
   /// 季详情优先，缺失字段回退到整剧条目。
@@ -1352,41 +1391,4 @@ String? _yearOf(ScannedVideo video) {
   }
   if (video.modified != null) return '${video.modified!.year}';
   return null;
-}
-
-/// 详情页右上角的「隐藏影片」按钮。
-class _HideButton extends StatelessWidget {
-  const _HideButton({required this.onHide});
-
-  final VoidCallback onHide;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: _isDark(context) ? Colors.black38 : Colors.black26,
-      borderRadius: BorderRadius.circular(18),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(18),
-        onTap: onHide,
-        child: const Tooltip(
-          message: '隐藏该影片',
-          child: Padding(
-            padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.visibility_off_rounded, size: 15,
-                    color: Colors.white),
-                SizedBox(width: 5),
-                Text(
-                  '隐藏',
-                  style: TextStyle(color: Colors.white, fontSize: 12.5),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
