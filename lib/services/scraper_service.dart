@@ -144,6 +144,10 @@ class ScraperService {
 
   static const _apiHost = 'api.themoviedb.org';
   static const _apiAltHost = 'api.tmdb.org';
+
+  /// 自建 TMDB API 反代（Cloudflare）：官方全部线路不可达时的最后
+  /// 通道。换域名改这里即可。
+  static const _apiProxyHost = 'tmdb.qizhunanhai.ccwu.cc';
   static const _imageHost = 'image.tmdb.org';
 
   /// TMDB 图片实际落在 Bunny CDN。该域名绕开被污染的 image.tmdb.org
@@ -522,8 +526,26 @@ class ScraperService {
       return null;
     }
 
+    // 自建反代兜底：官方线路全挂时走自己的 Cloudflare 反代，
+    // 避免整批任务因 45 秒离线冷却全部连坐失败。
+    _lastHttpStatus = 0;
+    text = await _httpGetText(
+      Uri.parse('https://$_apiProxyHost$pathAndQuery'),
+      timeout: const Duration(seconds: 12),
+    );
+    if (text != null) {
+      _markTmdbOnline('自建反代');
+      return text;
+    }
+    if (keyRejected()) {
+      rejectKey('自建反代');
+      return null;
+    }
+
     _tmdbOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
-    lastSearchError = 'TMDB 接口不可达：${_networkHint()}';
+    lastSearchError =
+        'TMDB 官方线路与自建反代均不可达：${_networkHint()}'
+        '（45 秒后自动重试）';
     onLog?.call('  TMDB 请求失败：$lastSearchError');
     return null;
   }
