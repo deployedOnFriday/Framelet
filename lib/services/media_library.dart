@@ -782,7 +782,9 @@ class MediaLibrary extends ChangeNotifier {
     try {
       final jobs = _scrapeJobsOf(_videosBySource);
 
-      scrapeTotal = jobs.length;
+      // 进度按「条目数」统计而非任务数：一个 40 集的剧是 1 个任务
+      // 却是 40 个条目，任务进度会与「待匹配」统计严重对不上
+      scrapeTotal = jobs.fold(0, (sum, job) => sum + job.group.length);
       if (scrapeTotal == 0) {
         scrapeProgress = '媒体库还是空的，先同步媒体源';
         return;
@@ -802,9 +804,10 @@ class MediaLibrary extends ChangeNotifier {
             job.group.where((v) => _imageExists(v.stillPath)).length >=
                 ((job.group.length + 1) ~/ 2);
         if (!force && hasPoster && hasBackdrop && stillComplete) {
-          scrapeDone++;
-          scrapeMatched++;
-          scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal（跳过已有海报）';
+          final episodes = job.group.length;
+          scrapeDone += episodes;
+          scrapeMatched += episodes;
+          scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal 个条目（跳过已有海报）';
           // 不逐条 notify：几百个已刮条目会在一帧内触发几百次全界面重建
           continue;
         }
@@ -910,7 +913,7 @@ class MediaLibrary extends ChangeNotifier {
               scraped.rating != null ||
               scraped.tmdbId != null) {
             if (posterPath != null || scraped.tmdbId != null) {
-              scrapeMatched++;
+              scrapeMatched += job.group.length;
             }
             for (final member in job.group) {
               final episodeNumber = episodeNumberOfVideo(member);
@@ -965,9 +968,9 @@ class MediaLibrary extends ChangeNotifier {
           );
         }
 
-        scrapeDone++;
+        scrapeDone += job.group.length;
         _scrapeLog('  完成 $scrapeDone/$scrapeTotal');
-        scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal';
+        scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal 个条目';
         notifyListeners();
       }
 
