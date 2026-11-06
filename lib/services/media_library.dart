@@ -656,6 +656,9 @@ class MediaLibrary extends ChangeNotifier {
         await WebDavService.testConnection(source, password);
       }
       return null;
+    } on StateError catch (error) {
+      // WebDavService 抛出的是已经写好人话的诊断文案，原样透传
+      return error.message;
     } catch (error) {
       return describeError(error);
     }
@@ -1263,20 +1266,29 @@ class MediaLibrary extends ChangeNotifier {
     );
   }
 
-  /// 把底层错误翻译成人话。
+  /// 把底层错误翻译成人话。分支顺序注意：dio 的连接超时 toString 是
+  /// 「DioError [connection timeout]」，含 "connection" 字样，必须先判
+  /// 超时再判 connection，否则超时会被误报成「无法连接」。
   static String describeError(Object error) {
     final text = error.toString();
-    if (text.contains('401') ||
-        text.toLowerCase().contains('unauthorized') ||
-        text.toLowerCase().contains('auth')) {
+    final lower = text.toLowerCase();
+    if (lower.contains('401') ||
+        lower.contains('unauthorized') ||
+        lower.contains('auth')) {
       return '用户名或密码不正确（服务器返回 401）';
     }
-    if (text.contains('404')) return '目录不存在（服务器返回 404），请检查媒体目录';
-    if (text.contains('Connection refused') || text.contains('connection')) {
-      return '无法连接服务器，请检查地址与网络';
+    if (lower.contains('404')) {
+      return '目录不存在（服务器返回 404），请检查媒体目录';
     }
-    if (text.contains('timed out') || text.contains('Timeout')) {
-      return '连接超时，服务器无响应';
+    if (lower.contains('timed out') ||
+        lower.contains('timeout') ||
+        lower.contains('连接超时')) {
+      return '连接超时，服务器无响应。若域名有 IPv6 地址，常见原因是 '
+          'IPv6 路由不通（浏览器会自动回落 IPv4 所以网页打得开），'
+          '可尝试重新测试连接（会自动改用 IPv4）';
+    }
+    if (text.contains('Connection refused') || lower.contains('connection')) {
+      return '无法连接服务器，请检查地址与网络';
     }
     return '连接失败：$text';
   }

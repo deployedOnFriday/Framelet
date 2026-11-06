@@ -46,10 +46,18 @@ class WebDavService {
     '.sup',
   };
 
-  /// 建立客户端。uri 规范化：去掉结尾斜杠。
+  /// 本会话内按原始地址记忆的「可用 IPv4 主机」。家宽 IPv6 常见配置
+  /// 问题：DNS 同时给 AAAA+A，AAAA 路由不通（浏览器 Happy Eyeballs 自动
+  /// 回落所以「网页打得开」），而 Dart HttpClient 顺序尝试会被 IPv6 卡死。
+  /// 探测出 IPv6 不通后把主机替换成 IPv4 记在这里，后续所有客户端受益。
+  static final Map<String, String> _preferredHost = {};
+
+  /// 建立客户端。uri 规范化：去掉结尾斜杠；命中 IPv4 回落时替换主机。
   static webdav.Client _client(MediaSource source, String password) {
+    final raw = source.address.trim().replaceFirst(RegExp(r'/+$'), '');
+    final address = _preferredHost[raw] ?? raw;
     final client = webdav.newClient(
-      source.address.trim().replaceFirst(RegExp(r'/+$'), ''),
+      address,
       user: source.username,
       password: password,
       debug: false,
@@ -84,16 +92,134 @@ class WebDavService {
     return normalized == '//' ? '/' : normalized;
   }
 
-  /// 测试连接；失败抛异常，成功静默返回。
+  /// 测试连接；失败抛 StateError（文案已是人话，调用方原样透传）。
   static Future<void> testConnection(
     MediaSource source,
     String password,
   ) async {
-    final client = _client(source, password);
     final directory = _normalizeDirectory(source.address, source.directory);
     // 直接对媒体目录做 PROPFIND：同时验证连通性与认证，
     // 兼容「地址填主机、媒体目录填 /dav」的网盘填法。
-    await client.readDir(directory);
+    try {
+      await _client(source, password).readDir(directory);
+      return;
+    } catch (error) {
+      final text = error.toString().toLowerCase();
+      if (text.contains('401') ||
+          text.contains('unauthorized') ||
+          text.contains('auth')) {
+        throw StateError(
+          '认证未通过（服务器返回 401）：请确认用户名与密码。'
+          'AList 需在「用户管理」给账号勾选 WebDAV 读取权限，'
+          'WebDAV 地址为 http://主机:5244/dav（浏览器打开的 :5244 是'
+          '网页界面，与 WebDAV 认证无关）。',
+        );
+      }
+      if (text.contains('404')) {
+        throw StateError(
+          '目录不存在（服务器返回 404）：请检查地址尾段与「目录」'
+          '是否重复填写（例如地址已含 /dav，目录里又填了 /dav）。',
+        );
+      }
+
+      // 网络/超时类错误：做 TCP 层探测，区分 IPv6 失联与整机不可达
+      final probe = await _probeHost(source.address.trim());
+      switch (probe) {
+        case 'ipv6-broken':
+          final ipv4 = await _firstIpv4(source.address.trim());
+          if (ipv4 != null) {
+            // 记住 IPv4 回落并重试一次（仅 http 可安全替换主机）
+            final uri = Uri.parse(source.address.trim());
+            if (uri.scheme != 'https') {
+              _preferredHost[source.address.trim()] = ipv4;
+              try {
+                await _client(source, password).readDir(directory);
+                return;
+              } catch (retryError) {
+                final retryText = retryError.toString().toLowerCase();
+                if (retryText.contains('401') ||
+                    retryText.contains('unauthorized') ||
+                    retryText.contains('auth')) {
+                  throw StateError(
+                    '已连接成功但认证未通过（401）：请确认用户名与密码。'
+                    'AList 需在「用户管理」给账号勾选 WebDAV 读取权限。',
+                  );
+                }
+                throw StateError(
+                  '服务器 IPv6 不可达，已自动改用 IPv4（$ipv4）仍失败：'
+                  '$retryError',
+                );
+              }
+            }
+          }
+          throw StateError(
+            '服务器 IPv6 地址不通、IPv4 可达，但当前线路无法直接改用。'
+            '可在 hosts 里把域名指向 IPv4，或换用 http 地址重试。',
+          );
+        case 'tcp-dead':
+          final uri = Uri.tryParse(source.address.trim());
+          final host = uri?.host ?? source.address.trim();
+          final port =
+              (uri?.port == 0 || uri?.port == null)
+              ? (uri?.scheme == 'https' ? 443 : 80)
+              : uri!.port;
+          throw StateError(
+            '无法建立 TCP 连接（$host:$port）：服务器未开机、端口未放行'
+            '或被当前网络拦截。浏览器能打开网页界面，不代表 WebDAV '
+            '端口对当前网络可达。',
+          );
+      }
+      rethrow;
+    }
+  }
+
+  /// TCP 探测：分别尝试 IPv6/IPv4 各一条，返回
+  /// 'ipv6-broken'（v6 不通 v4 通）/ 'tcp-dead'（都不通）/ 'tcp-ok'。
+  static Future<String> _probeHost(String address) async {
+    final uri = Uri.tryParse(address);
+    final host = uri?.host ?? '';
+    if (host.isEmpty) return 'tcp-ok';
+    final port = (uri!.port == 0)
+        ? (uri.scheme == 'https' ? 443 : 80)
+        : uri.port;
+    List<InternetAddress> addrs;
+    try {
+      addrs = await InternetAddress.lookup(host)
+          .timeout(const Duration(seconds: 6));
+    } catch (_) {
+      return 'tcp-dead';
+    }
+    Future<bool> probeIp(InternetAddress a) => Socket.connect(a, port,
+            timeout: const Duration(seconds: 4))
+        .then((s) {
+      s.destroy();
+      return true;
+    }).catchError((_) => false);
+    final v6 = addrs
+        .where((a) => a.type == InternetAddressType.IPv6)
+        .toList();
+    final v4 = addrs
+        .where((a) => a.type == InternetAddressType.IPv4)
+        .toList();
+    final v6ok = v6.isEmpty ? null : await probeIp(v6.first);
+    final v4ok = v4.isEmpty ? null : await probeIp(v4.first);
+    if (v4ok == true && v6ok == false) return 'ipv6-broken';
+    if (v4ok == false && v6ok != true) return 'tcp-dead';
+    return 'tcp-ok';
+  }
+
+  static Future<String?> _firstIpv4(String address) async {
+    final uri = Uri.tryParse(address);
+    final host = uri?.host ?? '';
+    if (host.isEmpty) return null;
+    try {
+      final addrs = await InternetAddress.lookup(host)
+          .timeout(const Duration(seconds: 6));
+      for (final a in addrs) {
+        if (a.type == InternetAddressType.IPv4) return a.address;
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// 递归扫描视频文件，返回扁平列表。
