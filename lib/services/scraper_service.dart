@@ -1546,7 +1546,10 @@ class ScraperService {
 
   static String _lastImageChannel = '';
 
-  static String _imageProxyUrl(Uri uri) {
+  static String _imageProxyUrl(
+    Uri uri, {
+    String host = 'images.weserv.nl',
+  }) {
     final width = RegExp(r'/t/p/(w\d+)/').firstMatch(uri.path)?.group(1);
     final query = <String>[
       'url=${Uri.encodeQueryComponent(uri.toString())}',
@@ -1554,7 +1557,7 @@ class ScraperService {
       'q=88',
       if (width != null) 'w=${width.substring(1)}',
     ];
-    return 'https://wsrv.nl/?${query.join('&')}';
+    return 'https://$host/?${query.join('&')}';
   }
 
   /// 用内置 IP + Host 头发起纯 HTTP 请求。部分运营商只阻断
@@ -1763,8 +1766,16 @@ class ScraperService {
           retries: 1,
         );
       case _chWsrv:
-        return _httpGetBytes(
+        // 兜底图片代理：正式域名 images.weserv.nl 实测可达，
+        // 短域名 wsrv.nl 部分网络连不上，作为第二入口。
+        final first = await _httpGetBytes(
           Uri.parse(_imageProxyUrl(uri)),
+          timeout: const Duration(seconds: 15),
+          retries: 1,
+        );
+        if (first != null) return first;
+        return _httpGetBytes(
+          Uri.parse(_imageProxyUrl(uri, host: 'wsrv.nl')),
           timeout: const Duration(seconds: 15),
           retries: 1,
         );
