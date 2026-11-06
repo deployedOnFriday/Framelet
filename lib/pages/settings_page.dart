@@ -1006,9 +1006,79 @@ class _SettingsPageState extends State<SettingsPage>
                 padding: EdgeInsets.symmetric(vertical: 48),
                 child: Center(child: Text('还没有媒体源，点击右上角添加')),
               ),
+            _buildHiddenItems(context, library),
           ],
         );
       },
+    );
+  }
+
+  /// 已隐藏影片管理：逐条「恢复显示」。无隐藏条目时不占位。
+  Widget _buildHiddenItems(BuildContext context, MediaLibrary library) {
+    final hidden = library.hiddenItems;
+    if (hidden.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: context.colors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '已隐藏影片（${hidden.length}）',
+            style: TextStyle(
+              fontSize: 13.5,
+              fontWeight: FontWeight.w700,
+              color: context.colors.text,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '这些条目不显示在海报墙、也不参与刮削，点「恢复」即可重新显示',
+            style: TextStyle(fontSize: 11.5, color: context.colors.muted),
+          ),
+          const SizedBox(height: 10),
+          ...hidden.entries.map(
+            (entry) => Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      entry.value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: context.colors.text,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  SizedBox(
+                    height: 30,
+                    child: OutlinedButton(
+                      onPressed: () =>
+                          MediaLibrary.instance.unhideItem(entry.key),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: context.colors.primary,
+                        side: BorderSide(color: context.colors.primary),
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        textStyle: const TextStyle(fontSize: 12),
+                      ),
+                      child: const Text('恢复'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

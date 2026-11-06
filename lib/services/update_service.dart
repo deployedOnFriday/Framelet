@@ -42,17 +42,17 @@ class UpdateService {
   }
 
   /// 最新 Release 信息；无网络/接口异常时返回 null。
+  ///
+  /// 代理与直连并发竞速取先成功者——串行重试在代理半死时会
+  /// 先挂满 10 秒再等直连 10 秒，用户看起来就是「卡住」。
   static Future<ReleaseInfo?> checkLatest() async {
-    var proxy = await _activeProxy();
-    var info = await _fetchLatest(proxy);
-    if (info == null && proxy != null) {
-      if ((proxyAddress ?? '').trim().isEmpty) {
-        ProxyResolver.disableSystemProxy();
-      }
-      proxy = null;
-      info = await _fetchLatest(null);
-    }
-    return info;
+    final proxy = await _activeProxy();
+    if (proxy == null) return _fetchLatest(null);
+    final results = await Future.wait([
+      _fetchLatest(proxy),
+      _fetchLatest(null),
+    ]);
+    return results.firstWhere((info) => info != null, orElse: () => null);
   }
 
   static Future<ReleaseInfo?> _fetchLatest(String? proxy) async {

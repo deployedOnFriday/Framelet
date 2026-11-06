@@ -112,6 +112,46 @@ class MediaLibrary extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ---------------------------------------------------------------------------
+  // 影片隐藏：按条目粒度「不显示、不刮削」，与源级开关互补。
+  // 键为 'sourceId|聚合条目 path'，持久化到 app_meta.hidden_items。
+  // ---------------------------------------------------------------------------
+
+  final Map<String, String> _hiddenItems = {}; // key -> 显示名
+
+  bool _isHidden(ScannedVideo video) =>
+      _hiddenItems.containsKey('${video.sourceId}|${video.path}');
+
+  /// 已隐藏影片（key -> 显示名），供设置页管理列表。
+  Map<String, String> get hiddenItems => Map.unmodifiable(_hiddenItems);
+
+  Future<void> hideItem(ScannedVideo video) async {
+    final key = '${video.sourceId}|${video.path}';
+    if (_hiddenItems.containsKey(key)) return;
+    _hiddenItems[key] = video.title;
+    await _db.saveMeta('hidden_items', jsonEncode(_hiddenItems));
+    notifyListeners();
+  }
+
+  Future<void> unhideItem(String key) async {
+    if (_hiddenItems.remove(key) == null) return;
+    await _db.saveMeta('hidden_items', jsonEncode(_hiddenItems));
+    notifyListeners();
+  }
+
+  Future<void> _loadHiddenItems() async {
+    final raw = await _db.loadMeta('hidden_items');
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final map = jsonDecode(raw) as Map<String, Object?>;
+      _hiddenItems
+        ..clear()
+        ..addAll(map.map((k, v) => MapEntry(k, v as String)));
+    } catch (_) {
+      // 配置损坏时从空开始，不影响其余功能。
+    }
+  }
+
   /// 按 sourceId + 路径精确查找原始扫描条目（用于从播放历史续播）。
   ScannedVideo? findVideo(String sourceId, String path) {
     for (final videos in _videosBySource.values) {
@@ -137,6 +177,7 @@ class MediaLibrary extends ChangeNotifier {
       final aggregated = _aggregated(entry.key);
       for (final video in aggregated) {
         if (video.kind != kind) continue;
+        if (_isHidden(video)) continue;
         final key = _seriesMergeKey(video);
         final existing = merged[key];
         if (existing == null) {
@@ -240,6 +281,7 @@ class MediaLibrary extends ChangeNotifier {
       if (!sourceEnabled(sourceId)) continue;
       for (final video in _aggregated(sourceId)) {
         if (video.isScraped) continue;
+        if (_isHidden(video)) continue;
         if (!seen.add(video.path)) continue;
         result.add(video);
       }
@@ -410,6 +452,7 @@ class MediaLibrary extends ChangeNotifier {
   Future<void> load() async {
     await _db.open();
     await _loadScrapeSettings();
+    await _loadHiddenItems();
     await _migrateLegacyStorage();
     final sources = await _db.loadSources();
     if (sources.isEmpty) return;
@@ -1142,6 +1185,8 @@ class MediaLibrary extends ChangeNotifier {
       for (final group in grouped.values) {
         // 聚合条目的 path 等于组内第一个文件的 path，据此找回聚合标题。
         final representative = byPath[group.first.path] ?? group.first;
+        // 已隐藏的影片不参与刮削
+        if (_isHidden(representative)) continue;
         jobs.add((representative: representative, group: group));
       }
     }

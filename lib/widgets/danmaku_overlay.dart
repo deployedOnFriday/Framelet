@@ -32,8 +32,14 @@ class _DanmakuOverlayState extends State<DanmakuOverlay>
     with SingleTickerProviderStateMixin {
   /// 每帧跳动的驱动器：AnimationController 是 Listenable，直接作为
   /// CustomPainter 的 repaint 信号，全程不经 setState。
-  late final AnimationController _ticker = AnimationController(vsync: this)
-    ..repeat();
+  /// 必须给 duration——repeat() 在没有 duration 时 debug 抛
+  /// FlutterError、release 抛 TypeError，弹幕层整个失效。
+  late final AnimationController _ticker = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 1),
+    lowerBound: 0,
+    upperBound: 1,
+  )..repeat();
   final Map<String, TextPainter> _painterCache = <String, TextPainter>{};
 
   @override

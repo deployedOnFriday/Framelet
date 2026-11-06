@@ -72,7 +72,9 @@ class _DetailPageState extends State<DetailPage> {
 
         return Scaffold(
           backgroundColor: context.colors.background,
-          body: SingleChildScrollView(
+          body: Stack(
+            children: [
+              SingleChildScrollView(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -105,6 +107,15 @@ class _DetailPageState extends State<DetailPage> {
                 const SizedBox(height: 44),
               ],
             ),
+          ),
+              Positioned(
+                top: 12,
+                right: 14,
+                child: _HideButton(
+                  onHide: () => _hideCurrent(context, current),
+                ),
+              ),
+            ],
           ),
         );
       },
@@ -147,6 +158,39 @@ class _DetailPageState extends State<DetailPage> {
         );
       });
     });
+  }
+
+  /// 隐藏当前影片：海报墙/未匹配列表/自动刮削都不再包含它，
+  /// 可在 设置→媒体源管理→已隐藏影片 恢复。
+  Future<void> _hideCurrent(BuildContext context, ScannedVideo target) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('隐藏该影片'),
+        content: Text(
+          '「${target.title}」将不再显示在海报墙，也不参与自动刮削。\n'
+          '文件不会被删除，可在 设置 → 媒体源管理 → 已隐藏影片 恢复显示。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('隐藏'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    await MediaLibrary.instance.hideItem(target);
+    if (!context.mounted) return;
+    messenger
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(const SnackBar(content: Text('已隐藏，可在设置中恢复')));
+    Navigator.of(context).maybePop();
   }
 }
 
@@ -1308,4 +1352,41 @@ String? _yearOf(ScannedVideo video) {
   }
   if (video.modified != null) return '${video.modified!.year}';
   return null;
+}
+
+/// 详情页右上角的「隐藏影片」按钮。
+class _HideButton extends StatelessWidget {
+  const _HideButton({required this.onHide});
+
+  final VoidCallback onHide;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: _isDark(context) ? Colors.black38 : Colors.black26,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onHide,
+        child: const Tooltip(
+          message: '隐藏该影片',
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.visibility_off_rounded, size: 15,
+                    color: Colors.white),
+                SizedBox(width: 5),
+                Text(
+                  '隐藏',
+                  style: TextStyle(color: Colors.white, fontSize: 12.5),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
