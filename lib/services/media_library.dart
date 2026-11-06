@@ -937,6 +937,26 @@ class MediaLibrary extends ChangeNotifier {
             if (best != null) break;
           }
         }
+        // 2.5) 文件名兜底：目录名常带序号/标签噪音（「24 黑寡妇 Black
+        // Widow MA」），正式发布的文件名（Black.Widow.2021.2160p…）反而
+        // 是 guessit 式的干净来源。仅在前面的查询词全部落空时才试。
+        if (best == null) {
+          final baseName = job.representative.path
+              .split(RegExp(r'[\\/]'))
+              .last;
+          final fromFile = ScraperService.parseTitle(baseName);
+          for (final query in fromFile.queries) {
+            if (parsed.queries.contains(query)) continue;
+            final hit = await ScraperService.searchTmdb(
+              query,
+              year: fromFile.year ?? parsed.year,
+              preferTv: preferTv,
+            );
+            if (hit?.tmdbId == null) continue;
+            await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
+            if (best != null) break;
+          }
+        }
         // 3) TVmaze 兜底（无 TMDB Key 或 TMDB 不可达）
         var result = best ?? firstUsable;
         if (result == null) {

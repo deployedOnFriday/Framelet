@@ -36,6 +36,47 @@ void main() {
       expect(parsed.year, 2025);
     });
   });
-}
+  group('parseTitle 目录名噪音剥离（Pixar 式命名）', () {
+    test('年份粘连前缀被剥离并记为年份', () {
+      final parsed = ScraperService.parseTitle('1995-玩具总动员1【中英字幕】');
+      expect(parsed.queries.first, '玩具总动员1');
+      expect(parsed.queries, contains('玩具总动员'));
+      expect(parsed.year, 1995);
+      // 字幕标签不得进入查询词
+      expect(parsed.queries, isNot(contains('中英字幕')));
+    });
 
-// 追加：中文数字季号
+    test('序号前缀与 MA 标签尾生成干净变体', () {
+      final parsed = ScraperService.parseTitle('24 黑寡妇 Black Widow MA');
+      expect(parsed.queries.first, '24 黑寡妇 Black Widow MA');
+      expect(parsed.queries, contains('黑寡妇 Black Widow MA'));
+      expect(parsed.queries, contains('黑寡妇 Black Widow'));
+      expect(parsed.queries, contains('黑寡妇'));
+      expect(parsed.queries, contains('Black Widow'));
+    });
+
+    test('无字幕标签被过滤', () {
+      final parsed = ScraperService.parseTitle('2001-怪兽电力公司【无字幕】');
+      expect(parsed.queries.first, '怪兽电力公司');
+      expect(parsed.queries, isNot(contains('无字幕')));
+    });
+
+    test('片名本身是短英文词不被误剥（Ma/IT/Up）', () {
+      final parsed = ScraperService.parseTitle('Up 2009 1080p');
+      expect(parsed.queries.first, 'Up');
+      expect(parsed.year, 2009);
+    });
+
+    test('点分隔发布名开头的年份是片名（2012），不当年份剥', () {
+      final parsed = ScraperService.parseTitle('2012.2009.2160p.BluRay.x265');
+      expect(parsed.queries.first, '2012');
+      expect(parsed.year, 2009);
+    });
+
+    test('年份-空格-片名（1995 玩具总动员）正常解析', () {
+      final parsed = ScraperService.parseTitle('虫虫危机 1998');
+      expect(parsed.queries.first, '虫虫危机');
+      expect(parsed.year, 1998);
+    });
+  });
+}

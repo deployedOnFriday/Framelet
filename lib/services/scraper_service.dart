@@ -975,10 +975,35 @@ class ScraperService {
       text = text.substring(0, dot);
     }
 
+    const junkPattern =
+        r'^(1080p|720p|2160p|4k|8k|uhd|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|dv|dolby|atmos|10bits?|8bits?|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|60fps|120fps|60帧|120帧|高码|高bitrate|hq|web)$';
+    final junk = RegExp(junkPattern, caseSensitive: false);
+
+    // 目录名开头的粘连年份（「1995-玩具总动员1」）：剥离并记为年份。
+    // 仅处理 -/_ 粘连——点分隔的发布名是「片名在前」（2012.2009.1080p
+    // 的开头 2012 是片名本身），空格分隔则与「2012」这类年份片名难区分。
+    int? leadingYear;
+    final leadYear = RegExp(r'^(19|20)\d{2}[-_]').firstMatch(text);
+    if (leadYear != null && text.length > leadYear.end) {
+      leadingYear = int.tryParse(text.substring(0, leadYear.end - 1));
+      text = text.substring(leadYear.end);
+    }
+
+    // 字幕/音轨/封装标签（中英字幕、简繁、国粤双语…）不是片名候选，
+    // 拿去搜索只会命中噪音；这里的方括号只可能是标签或发布组。
+    final bracketLabel = RegExp(
+      r'字幕|简体|繁体|中字|英字|双语|国语|国粤|粤语|普通话|内封|内嵌|外挂|杜比|全景声|原盘|无损|高码|DIY|简繁',
+      caseSensitive: false,
+    );
     final bracketNames = RegExp(r'[\[【]([^\]】]+)[\]】]')
         .allMatches(text)
         .map((m) => m.group(1)!.trim())
-        .where((s) => s.isNotEmpty)
+        .where(
+          (s) =>
+              s.isNotEmpty &&
+              !bracketLabel.hasMatch(s) &&
+              !junk.hasMatch(s),
+        )
         .toList();
     text = text.replaceAll(RegExp(r'[\[【][^\]】]*[\]】]'), ' ');
     // 圆括号内容剥掉（(1994)/(加长版) 等），年份由独立 token 识别
@@ -990,24 +1015,26 @@ class ScraperService {
         .where((token) => token.isNotEmpty)
         .toList();
 
-    const junkPattern =
-        r'^(1080p|720p|2160p|4k|8k|uhd|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|dv|dolby|atmos|10bits?|8bits?|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|60fps|120fps|60帧|120帧|高码|高bitrate|hq|web)$';
-    final junk = RegExp(junkPattern, caseSensitive: false);
     final episode = RegExp(
       r'^(s\d{1,2}(e\d{1,2})?|e\d{1,2}|ep\d{1,3}|\d{1,2}[集期])$',
       caseSensitive: false,
     );
 
-    int? year;
+    // 文件名里的独立年份 token 更可信，覆盖目录名剥出的粘连年份
+    int? year = leadingYear;
+    final yearTokens = <int>[];
     final cleaned = <String>[];
     for (var i = 0; i < tokens.length; i++) {
       final token = tokens[i];
       final isYear = RegExp(r'^(19|20)\d{2}$').hasMatch(token);
       if (isYear) {
         year = int.tryParse(token);
+        yearTokens.add(year!);
         continue;
       }
       if (junk.hasMatch(token) || episode.hasMatch(token)) continue;
+      // 纯标点/连字符残段（「A - B」剥词后剩下的「-」）
+      if (RegExp(r'^[-–—.·]+$').hasMatch(token)) continue;
       // 连字符粘着的技术段（Atmos-CiNEPHiLES、Blu-ray-Remux 之类）：
       // 任一段是技术词就整段丢弃；纯标题连字符（Spider-Man）不含
       // 技术词，原样保留。
@@ -1026,6 +1053,12 @@ class ScraperService {
     }
 
     var name = cleaned.join(' ').trim();
+    if (name.isEmpty && yearTokens.isNotEmpty) {
+      // 剩余无标题块：被当作年份吃掉的首个四位数字就是片名本身
+      // （《2012》《1917》）——首个年份升为片名，其余年份做消歧
+      name = '${yearTokens.first}';
+      year = yearTokens.length > 1 ? yearTokens.last : null;
+    }
     name = name.replaceAll(RegExp(r'\s+'), ' ');
     // 去掉残留的中文集数后缀，如 "三体 01"
     name = name.replaceAll(RegExp(r'\s+\d{1,2}$'), '').trim();
@@ -1038,16 +1071,79 @@ class ScraperService {
         .replaceAll(RegExp(r'\s*第\s*[0-9一二三四五六七八九十]+\s*季\s*$'), '')
         .trim();
 
-    final queries = <String>[if (name.isNotEmpty) name, ...bracketNames];
-    // 通用规则：标题尾部的 1~2 位纯数字多为季号（唐朝诡事录1/魔幻手机2），
-    // 生成一个剥掉后的变体用于搜索——命中率高且无需逐部写别名
-    final tail = RegExp(r'^(.*[^0-9])(\d{1,2})$').firstMatch(name);
-    if (tail != null) {
-      final stripped = tail.group(1)!.trim();
-      if (stripped.length >= 2 && !queries.contains(stripped)) {
-        queries.add(stripped);
+    // 查询词候选管线（guessit 思路：已知模式剥干净后，剩余块按置信度
+    // 降序逐个尝试，外层命中即停）。中文媒体库目录名常见
+    // 「序号 中文片名 英文名 标签尾」结构（「24 黑寡妇 Black Widow MA」），
+    // 逐层生成更干净的变体，全名命中不了时还有后路。
+    final variants = <String>[];
+    void addVariant(String q) {
+      final t = q.trim();
+      if (t.length < 2) return; // 单字符查询噪音太大
+      if (!variants.contains(t)) variants.add(t);
+    }
+
+    if (name.isNotEmpty) addVariant(name);
+    final expanded = <String>[];
+    for (final v in variants) {
+      expanded.add(v);
+      // 剥开头序号（「24 黑寡妇 …」→「黑寡妇 …」）
+      final leadingIndex = RegExp(r'^\d{1,2}\s+(?=\S)');
+      if (leadingIndex.hasMatch(v)) {
+        final stripped = v.replaceFirst(leadingIndex, '').trim();
+        if (stripped.length >= 2) expanded.add(stripped);
       }
     }
+    variants
+      ..clear()
+      ..addAll(expanded);
+    // 剥结尾孤立的 1~3 位字母标签（「… Black Widow MA」→「… Black Widow」，
+    // MA/HEVC/HSBS 这类多为发布组或规格残留）。完整片名剥完为空的
+    // 不受影响——「Ma」「IT」「Up」本身就是片名。
+    final expanded2 = <String>[];
+    for (final v in variants) {
+      expanded2.add(v);
+      final m = RegExp(r'^(.+?)\s+[A-Za-z]{1,3}$').firstMatch(v);
+      if (m != null) {
+        final stripped = m.group(1)!.trim();
+        if (stripped.length >= 2) expanded2.add(stripped);
+      }
+    }
+    variants
+      ..clear()
+      ..addAll(expanded2);
+    // 中英混排时补单语变体：TMDB 对纯中文/纯英文的检索明显更准
+    final cjk = RegExp(r'[\u4e00-\u9fff]');
+    final expanded3 = <String>[];
+    for (final v in variants) {
+      expanded3.add(v);
+      if (cjk.hasMatch(v) && RegExp(r'[A-Za-z]').hasMatch(v)) {
+        final words = v.split(RegExp(r'\s+'));
+        final zh = words.where(cjk.hasMatch).join(' ').trim();
+        final en = words
+            .where((w) => !cjk.hasMatch(w) && RegExp(r'[A-Za-z]').hasMatch(w))
+            .join(' ')
+            .trim();
+        if (zh.length >= 2) expanded3.add(zh);
+        if (en.length >= 2) expanded3.add(en);
+      }
+    }
+    variants
+      ..clear()
+      ..addAll(expanded3);
+
+    final queries = <String>[...variants.take(12)];
+    // 通用规则：标题尾部的 1~2 位纯数字多为季号（唐朝诡事录1/魔幻手机2），
+    // 生成一个剥掉后的变体用于搜索——命中率高且无需逐部写别名
+    for (final v in List<String>.of(queries)) {
+      final tail = RegExp(r'^(.*[^0-9])(\d{1,2})$').firstMatch(v);
+      if (tail != null) {
+        final stripped = tail.group(1)!.trim();
+        if (stripped.length >= 2 && !queries.contains(stripped)) {
+          queries.add(stripped);
+        }
+      }
+    }
+    queries.addAll(bracketNames);
     return (queries: queries, year: year);
   }
 
