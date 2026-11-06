@@ -532,19 +532,41 @@ class ScraperService {
     }
 
     // 自建反代兜底：官方线路全挂时走自己的 Cloudflare 反代，
-    // 避免整批任务因 45 秒离线冷却全部连坐失败。
-    _lastHttpStatus = 0;
-    text = await _httpGetText(
-      Uri.parse('https://$_apiProxyHost$pathAndQuery'),
-      timeout: const Duration(seconds: 12),
-    );
+    // 避免整批任务因离线冷却全部连坐失败。
+    // 反代行为（实测）：请求不带 api_key 时注入自己的 key（返回 200）；
+    // 带了则原样转发。且响应带 max-age=3600 的缓存头，偶发 404 会被
+    // 缓存一小时——因此剥离应用的 key 并加时间戳参数防缓存命中。
+    final qIndex = pathAndQuery.indexOf('?');
+    final basePath = qIndex < 0 ? pathAndQuery : pathAndQuery.substring(0, qIndex);
+    final params = <String>[];
+    if (qIndex >= 0) {
+      for (final pair in pathAndQuery.substring(qIndex + 1).split('&')) {
+        if (pair.isEmpty || pair.startsWith('api_key=')) continue;
+        params.add(pair);
+      }
+    }
+    final bust = DateTime.now().millisecondsSinceEpoch;
+    Future<String?> tryProxy({required bool withKey}) {
+      final all = <String>[
+        if (withKey && (tmdbApiKey?.trim().isNotEmpty ?? false))
+          'api_key=${tmdbApiKey!.trim()}',
+        ...params,
+        '_cb=$bust${withKey ? 'k' : 'n'}',
+      ];
+      return _httpGetText(
+        Uri.parse('https://$_apiProxyHost$basePath?${all.join('&')}'),
+        timeout: const Duration(seconds: 20),
+      );
+    }
+
+    // 先不带 key（反代注入自己的）；反代要求 key（401）再带上重试
+    var text = await tryProxy(withKey: false);
+    if (text == null && _lastHttpStatus == 401) {
+      text = await tryProxy(withKey: true);
+    }
     if (text != null) {
       _markTmdbOnline('自建反代');
       return text;
-    }
-    if (keyRejected()) {
-      rejectKey('自建反代');
-      return null;
     }
 
     _tmdbOfflineUntil = DateTime.now().add(const Duration(seconds: 45));
@@ -701,10 +723,22 @@ class ScraperService {
 
   /// 记录命中节点并返回响应；收到任何 HTTP 状态码都说明该节点可用，
   /// 401/403/404 等是内容层问题，换 IP 也不会变，交上层处理。
+  ///
+  /// 例外：非 200/206 的状态不把该 IP 记为「首选」并短暂冷却——
+  /// 实测失效的 CloudFront 边缘节点会对有效路径回 404，若记为首选
+  /// 会导致后续请求全部优先命中这个坏节点，恶性循环。
   static List<int>? _acceptSniResult(String host, _SniAttempt result) {
-    _preferredIp[host] = result.ip;
-    _ipCooldown.remove(result.ip);
-    _lastHttpStatus = result.status ?? 200;
+    final status = result.status;
+    if (status != null && status != 200 && status != 206) {
+      _preferredIp.remove(host);
+      _ipCooldown[result.ip] = DateTime.now().add(
+        const Duration(minutes: 3),
+      );
+    } else {
+      _preferredIp[host] = result.ip;
+      _ipCooldown.remove(result.ip);
+    }
+    _lastHttpStatus = status ?? 200;
     return result.bytes;
   }
 
