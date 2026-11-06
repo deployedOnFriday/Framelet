@@ -1730,6 +1730,7 @@ class ScraperService {
   static const _chHttps = 'HTTPS 直连';
   static const _chHttp = 'HTTP 直连';
   static const _chWsrv = '图片加速节点';
+  static const _chAmodb = '社区图片反代';
 
   /// 默认线路顺序（测速前的兜底顺序）。
   static const _defaultImageChannels = [
@@ -1740,6 +1741,7 @@ class ScraperService {
     _chHttps,
     _chHttp,
     _chWsrv,
+    _chAmodb,
   ];
 
   /// 本次运行实测的线路顺序（快→慢），会话内缓存；null 表示尚未测速。
@@ -1787,6 +1789,14 @@ class ScraperService {
         return _httpGetBytes(
           Uri.parse(_imageProxyUrl(uri, host: 'wsrv.nl')),
           timeout: const Duration(seconds: 15),
+          retries: 1,
+        );
+      case _chAmodb:
+        // 社区部署的 TMDB 图片反代（img.amodb.dev，Cloudflare），
+        // 实测时通时不通，只做最后的兜底线路之一。
+        return _httpGetBytes(
+          Uri.parse('https://img.amodb.dev$path'),
+          timeout: const Duration(seconds: 12),
           retries: 1,
         );
     }
