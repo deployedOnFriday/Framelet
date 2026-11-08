@@ -40,6 +40,9 @@ class MediaLibrary extends ChangeNotifier {
   ScanStatus scanStatus = ScanStatus.idle;
   String scanProgress = '';
 
+  /// 是否有扫描正在进行（手动同步与定时扫描互斥）。
+  bool get isScanning => _scanInFlight;
+
   bool scraping = false;
   String scrapeProgress = '';
   int scrapeDone = 0;
@@ -562,6 +565,7 @@ class MediaLibrary extends ChangeNotifier {
     return tags.isEmpty ? _lastSegment(video.path) : tags.join(' · ');
   }
 
+  /// 多版本卡片展示用的原始文件名（含扩展名）。
   /// 最近播放卡片上的紧凑版本徽标，只保留分辨率标签。
   static String versionBadgeOf(ScannedVideo video) {
     final label = versionLabelOf(video);
@@ -741,6 +745,7 @@ class MediaLibrary extends ChangeNotifier {
   Future<void> load() async {
     await _db.open();
     await _loadScrapeSettings();
+    await _loadScanSettings();
     await _loadHiddenItems();
     await _migrateLegacyStorage();
     final sources = await _db.loadSources();
@@ -835,6 +840,80 @@ class MediaLibrary extends ChangeNotifier {
   /// 读取刮削设置并注入到刮削服务。
   /// 扫描完成后自动刮削新内容（默认开启）。
   bool autoScrapeAfterScan = true;
+
+  /// 定时增量扫描间隔；null 表示关闭。
+  Duration? autoScanInterval = const Duration(minutes: 30);
+
+  /// 最近一次定时扫描的开始时间，设置页用来显示状态。
+  DateTime? lastAutoScanAt;
+
+  Timer? _autoScanTimer;
+  bool _autoScanInFlight = false;
+  bool _scanInFlight = false;
+
+  static const autoScanOptions = <int>[0, 15, 30, 60, 180, 360, 720];
+
+  Future<void> _loadScanSettings() async {
+    try {
+      final raw = await _store.read('framelet.scan.intervalMinutes');
+      if (raw == null) return;
+      final minutes = int.tryParse(raw) ?? 0;
+      autoScanInterval = minutes <= 0 ? null : Duration(minutes: minutes);
+    } catch (_) {
+      // 读取失败沿用默认值
+    }
+  }
+
+  /// 启动定时增量扫描。由 main 在启动时调用，测试不会自动启动。
+  void startAutoScan() {
+    _autoScanTimer?.cancel();
+    _autoScanTimer = null;
+    _scheduleNextAutoScan();
+  }
+
+  /// 固定延迟调度：上一轮（扫描 + 刮削）结束后再开始计时，
+  /// 因此不会出现「半小时没刮完又叠一轮」的情况。
+  void _scheduleNextAutoScan() {
+    _autoScanTimer?.cancel();
+    _autoScanTimer = null;
+    final interval = autoScanInterval;
+    if (interval == null || interval <= Duration.zero) return;
+    _autoScanTimer = Timer(interval, () async {
+      await _runScheduledScan();
+      _scheduleNextAutoScan();
+    });
+  }
+
+  /// 关闭定时扫描（退出或测试清理时使用）。
+  void stopAutoScan() {
+    _autoScanTimer?.cancel();
+    _autoScanTimer = null;
+  }
+
+  Future<void> setAutoScanInterval(Duration? interval) async {
+    autoScanInterval = interval;
+    await _store.write(
+      'framelet.scan.intervalMinutes',
+      '${interval?.inMinutes ?? 0}',
+    );
+    startAutoScan();
+    notifyListeners();
+  }
+
+  /// 定时触发的增量扫描：已在扫描或刮削时跳过，避免任务叠加。
+  Future<void> _runScheduledScan() async {
+    if (_autoScanInFlight) return;
+    if (_scanInFlight || scanStatus == ScanStatus.scanning || scraping) return;
+    if (_sources.isEmpty) return;
+    _autoScanInFlight = true;
+    lastAutoScanAt = DateTime.now();
+    notifyListeners();
+    try {
+      await syncAll();
+    } finally {
+      _autoScanInFlight = false;
+    }
+  }
 
   Future<void> _loadScrapeSettings() async {
     try {
@@ -1014,7 +1093,20 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   /// 全量扫描一个媒体源。完成后视频按分类就位。
+  ///
+  /// 全局互斥：手动同步、定时扫描、单源扫描同一时间只允许一个，
+  /// 避免两轮扫描同时改写媒体库。
   Future<void> scan(String sourceId) async {
+    if (_scanInFlight) return;
+    _scanInFlight = true;
+    try {
+      await _scanSource(sourceId);
+    } finally {
+      _scanInFlight = false;
+    }
+  }
+
+  Future<void> _scanSource(String sourceId) async {
     final source = sourceById(sourceId);
     final password = _passwords[sourceId];
     if (source == null) return;
@@ -1031,7 +1123,8 @@ class MediaLibrary extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final videos = source.isLocal
+      final startedAt = DateTime.now();
+      final result = source.isLocal
           ? await LocalMediaService.scan(
               source,
               onProgress: (message) {
@@ -1047,32 +1140,52 @@ class MediaLibrary extends ChangeNotifier {
                 notifyListeners();
               },
             );
-      // 重新扫描只更新文件结构：按 path 把之前刮到的数据（海报/剧照/匹配）
-      // 合并回新条目，避免一次重扫把整个媒体库的元数据抹掉。
-      final previous = _videosBySource[sourceId];
-      if (previous != null && previous.isNotEmpty) {
-        final byPath = {for (final video in previous) video.path: video};
-        for (var i = 0; i < videos.length; i++) {
-          final old = byPath[videos[i].path];
-          if (old == null) continue;
-          if (old.tmdbId == null && old.posterPath == null) continue;
-          videos[i] = videos[i].copyWith(
-            kind: kindForGenres(videos[i].kind, old.genres),
-            posterPath: old.posterPath,
-            backdropPath: old.backdropPath,
-            summary: old.summary,
-            rating: old.rating,
-            tmdbId: old.tmdbId,
-            tmdbTitle: old.tmdbTitle,
-            genres: old.genres,
-            cast: old.cast,
-            releaseDate: old.releaseDate,
-            runtimeSec: old.runtimeSec,
-            stillPath: old.stillPath,
-            episodeTitle: old.episodeTitle,
-          );
+      final videos = _collapseDiscStructures(source, result.videos);
+      // 增量扫描：大小和修改时间都没变的文件直接复用上次的条目，
+      // 海报、简介、剧照、集数等刮削结果原封不动；只有新增/变化的文件
+      // 才需要重新计算和写库。
+      final previous = _videosBySource[sourceId] ?? const <ScannedVideo>[];
+      final previousByPath = {
+        for (final video in previous) video.path: video,
+      };
+      var added = 0;
+      var updated = 0;
+      for (var i = 0; i < videos.length; i++) {
+        final fresh = videos[i];
+        final old = previousByPath[fresh.path];
+        if (old == null) {
+          added++;
+          continue;
         }
+        if (_sameEntry(old, fresh)) {
+          videos[i] = old;
+          continue;
+        }
+        updated++;
+        if (old.tmdbId == null && old.posterPath == null) continue;
+        videos[i] = fresh.copyWith(
+          kind: kindForGenres(fresh.kind, old.genres),
+          posterPath: old.posterPath,
+          backdropPath: old.backdropPath,
+          summary: old.summary,
+          rating: old.rating,
+          tmdbId: old.tmdbId,
+          tmdbTitle: old.tmdbTitle,
+          genres: old.genres,
+          cast: old.cast,
+          releaseDate: old.releaseDate,
+          runtimeSec: old.runtimeSec,
+          stillPath: old.stillPath,
+          episodeTitle: old.episodeTitle,
+        );
       }
+      final currentPaths = {for (final video in videos) video.path};
+      var removed = 0;
+      for (final video in previous) {
+        if (!currentPaths.contains(video.path)) removed++;
+      }
+      final fileStructureUnchanged =
+          added == 0 && updated == 0 && removed == 0;
       _videosBySource[sourceId] = videos;
       final now = DateTime.now();
       final index = _sources.indexWhere((item) => item.id == sourceId);
@@ -1085,9 +1198,22 @@ class MediaLibrary extends ChangeNotifier {
         );
       }
       scanStatus = ScanStatus.done;
-      scanProgress = '扫描完成，共发现 ${videos.length} 个视频';
+      final notes = <String>[
+        if (result.truncated) '已达文件数量上限',
+      ];
+      final elapsed = DateTime.now().difference(startedAt);
+      final elapsedText = elapsed.inMilliseconds < 1000
+          ? '${elapsed.inMilliseconds} 毫秒'
+          : '${(elapsed.inMilliseconds / 1000).toStringAsFixed(1)} 秒';
+      final changeText = fileStructureUnchanged
+          ? '，无文件变化'
+          : '，新增 $added / 更新 $updated / 移除 $removed';
+      scanProgress =
+          '扫描完成，共发现 ${videos.length} 个视频'
+          '$changeText，耗时 $elapsedText'
+          '${notes.isEmpty ? '' : '（${notes.join('，')}）'}';
       await _persistSources();
-      await _persistVideos(sourceId);
+      if (!fileStructureUnchanged) await _persistVideos(sourceId);
       // 扫描完成后自动刮削：只补没刮过的条目（已有海报的自动跳过）
       if (autoScrapeAfterScan && !scraping && unscrapedItems().isNotEmpty) {
         unawaited(scrapeAll());
@@ -1103,6 +1229,86 @@ class MediaLibrary extends ChangeNotifier {
       await _persistSources();
     }
     notifyListeners();
+  }
+
+  /// 同一路径的两次扫描结果是否完全等价：文件没变，派生信息也没变。
+  static bool _sameEntry(ScannedVideo a, ScannedVideo b) {
+    if (a.title != b.title || a.kind != b.kind) return false;
+    if (a.sizeBytes != b.sizeBytes) return false;
+    final aModified = a.modified;
+    final bModified = b.modified;
+    if (aModified == null || bModified == null) {
+      return aModified == bModified;
+    }
+    return aModified.millisecondsSinceEpoch ==
+        bModified.millisecondsSinceEpoch;
+  }
+
+  /// 蓝光原盘：`片名/BDMV/STREAM/*.m2ts`。
+  ///
+  /// 同一个 BDMV 只保留体积最大的主片，并改用片名目录命名：
+  /// 否则 STREAM 里几十个片段会被当成几十集，刮削还会拿「STREAM」
+  /// 当剧名去搜，永远匹配不到。菜单、花絮、重复片段不进入媒体库。
+  static List<ScannedVideo> _collapseDiscStructures(
+    MediaSource source,
+    List<ScannedVideo> videos,
+  ) {
+    final groups = <String, List<ScannedVideo>>{};
+    for (final video in videos) {
+      final root = _discRootOf(video.path);
+      if (root == null) continue;
+      groups.putIfAbsent(root, () => []).add(video);
+    }
+    if (groups.isEmpty) return videos;
+
+    final sourceFolder = _lastSegment(
+      source.address.replaceAll('\\', '/').replaceFirst(RegExp(r'/+$'), ''),
+    );
+    final replacement = <String, ScannedVideo>{};
+    final discOfPath = <String, String>{};
+    for (final entry in groups.entries) {
+      final main = entry.value.reduce(
+        (a, b) => b.sizeBytes > a.sizeBytes ? b : a,
+      );
+      final folder = _lastSegment(entry.key);
+      final cleaned = WebDavService.cleanTitle(
+        folder.isEmpty ? sourceFolder : folder,
+      );
+      replacement[entry.key] = ScannedVideo(
+        sourceId: main.sourceId,
+        path: main.path,
+        title: cleaned.isEmpty ? main.title : cleaned,
+        kind: main.kind,
+        sizeBytes: main.sizeBytes,
+        modified: main.modified,
+      );
+      for (final video in entry.value) {
+        discOfPath[video.path] = entry.key;
+      }
+    }
+
+    final emitted = <String>{};
+    final result = <ScannedVideo>[];
+    for (final video in videos) {
+      final disc = discOfPath[video.path];
+      if (disc == null) {
+        result.add(video);
+        continue;
+      }
+      if (!emitted.add(disc)) continue;
+      result.add(replacement[disc]!);
+    }
+    return result;
+  }
+
+  /// 返回蓝光原盘根目录（`.../片名`）；普通文件返回 null。
+  static String? _discRootOf(String path) {
+    final segments = path.split('/');
+    for (var i = segments.length - 2; i >= 0; i--) {
+      if (segments[i].toLowerCase() != 'bdmv') continue;
+      return segments.sublist(0, i).join('/');
+    }
+    return null;
   }
 
   /// 刮削过程文件日志：进程崩溃时也能看到死前最后一步。
@@ -1186,10 +1392,10 @@ class MediaLibrary extends ChangeNotifier {
       if (networkFailedJobs.isNotEmpty) {
         scrapeProgress =
             '${networkFailedJobs.length} 个任务因网络失败，'
-            '等线路恢复后自动重试…';
+            '等线路恢复或限流解除后自动重试…';
         notifyListeners();
         var waited = 0;
-        while (ScraperService.tmdbCoolingDown && waited < 70) {
+        while (ScraperService.tmdbCoolingDown && waited < 120) {
           await Future.delayed(const Duration(seconds: 2));
           waited += 2;
         }
@@ -2134,6 +2340,16 @@ class MediaLibrary extends ChangeNotifier {
       'media',
       'videos',
       'downloads',
+      // 蓝光原盘 / DVD 目录结构：真正的片名在它们上一级。
+      'bdmv',
+      'stream',
+      'video_ts',
+      'audio_ts',
+      'playlist',
+      'clipinf',
+      'auxdata',
+      'certificate',
+      'backup',
     };
     return generic.contains(lower) || lower.length <= 1;
   }

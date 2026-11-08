@@ -567,6 +567,77 @@ class _SettingsPageState extends State<SettingsPage>
             const SizedBox(height: 18),
             Builder(
               builder: (context) {
+                final interval = library.autoScanInterval;
+                final minutes = interval?.inMinutes ?? 0;
+                final dropdownValue =
+                    MediaLibrary.autoScanOptions.contains(minutes)
+                    ? minutes
+                    : 30;
+                final last = library.lastAutoScanAt;
+                return Container(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 10, 8),
+                  decoration: BoxDecoration(
+                    color: context.colors.surface,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: context.colors.border),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '定时增量扫描',
+                              style: TextStyle(
+                                fontSize: 13.5,
+                                color: context.colors.text,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              last == null
+                                  ? '上一轮扫描结束后开始计时，只更新新增或有变化的文件'
+                                  : '上次自动扫描 '
+                                        '${last.hour.toString().padLeft(2, '0')}:'
+                                        '${last.minute.toString().padLeft(2, '0')}，'
+                                        '只更新变化的文件',
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: context.colors.muted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      DropdownButton<int>(
+                        key: const ValueKey('auto-scan-interval'),
+                        value: dropdownValue,
+                        underline: const SizedBox.shrink(),
+                        borderRadius: BorderRadius.circular(10),
+                        items: const [
+                          DropdownMenuItem(value: 0, child: Text('关闭')),
+                          DropdownMenuItem(value: 15, child: Text('每 15 分钟')),
+                          DropdownMenuItem(value: 30, child: Text('每 30 分钟')),
+                          DropdownMenuItem(value: 60, child: Text('每 1 小时')),
+                          DropdownMenuItem(value: 180, child: Text('每 3 小时')),
+                          DropdownMenuItem(value: 360, child: Text('每 6 小时')),
+                          DropdownMenuItem(value: 720, child: Text('每 12 小时')),
+                        ],
+                        onChanged: (value) => library.setAutoScanInterval(
+                          value == null || value <= 0
+                              ? null
+                              : Duration(minutes: value),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 18),
+            Builder(
+              builder: (context) {
                 final unscraped = library.unscrapedItems();
                 return unscraped.isEmpty
                     ? const SizedBox.shrink()

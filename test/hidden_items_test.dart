@@ -195,6 +195,11 @@ void main() {
     expect(WebDavService.isExtraFolder('Extras'), isTrue);
     expect(WebDavService.isExtraFolder('[Extras]'), isTrue);
     expect(WebDavService.isExtraFolder('978'), isFalse);
+    expect(WebDavService.isSystemFolder('@eaDir'), isTrue);
+    expect(WebDavService.isSystemFolder('#recycle'), isTrue);
+    expect(WebDavService.isSystemFolder(r'$RECYCLE.BIN'), isTrue);
+    expect(WebDavService.isSystemFolder('System Volume Information'), isTrue);
+    expect(WebDavService.isSystemFolder('电影'), isFalse);
   });
 
   test('单文件目录只有强花絮标记才被丢弃', () {

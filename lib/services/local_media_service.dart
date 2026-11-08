@@ -8,7 +8,8 @@ import 'webdav_service.dart';
 class LocalMediaService {
   LocalMediaService._();
 
-  static const maxScanDepth = 8;
+  /// 视频数量上限，只用于防止误选到超大目录（如下载盘）时把内存撑爆；
+  /// 目录层级不设上限，整棵树递归（主流媒体库软件的做法）。
   static const maxVideoCount = 20000;
 
   static Future<void> testConnection(MediaSource source) async {
@@ -19,7 +20,7 @@ class LocalMediaService {
     await directory.list(followLinks: false).take(1).toList();
   }
 
-  static Future<List<ScannedVideo>> scan(
+  static Future<ScanResult> scan(
     MediaSource source, {
     void Function(String message)? onProgress,
   }) async {
@@ -30,8 +31,9 @@ class LocalMediaService {
 
     final videos = <ScannedVideo>[];
     final visited = <String>{};
-    final queue = <({Directory directory, MediaKind? kind, int depth})>[
-      (directory: root, kind: null, depth: 0),
+    var truncated = false;
+    final queue = <({Directory directory, MediaKind? kind})>[
+      (directory: root, kind: null),
     ];
 
     while (queue.isNotEmpty) {
@@ -59,20 +61,19 @@ class LocalMediaService {
         if (name.startsWith('.')) continue;
 
         if (entry is Directory) {
-          if (current.depth < maxScanDepth) {
-            queue.add((
-              directory: entry,
-              kind: current.kind ?? WebDavService.matchKind(name),
-              depth: current.depth + 1,
-            ));
-          }
+          if (WebDavService.isSystemFolder(name)) continue;
+          queue.add((
+            directory: entry,
+            kind: current.kind ?? WebDavService.matchKind(name),
+          ));
           continue;
         }
         if (entry is! File || !WebDavService.isVideoFile(name)) continue;
         // 花絮/预告保留：详情页单独分区展示，海报墙不计入正片集数
         if (videos.length >= maxVideoCount) {
           onProgress?.call('已达到扫描上限 $maxVideoCount 个文件，停止深入');
-          return videos;
+          truncated = true;
+          break;
         }
 
         var size = 0;
@@ -95,8 +96,9 @@ class LocalMediaService {
           ),
         );
       }
+      if (truncated) break;
     }
-    return videos;
+    return ScanResult(videos: videos, truncated: truncated);
   }
 
   static String normalizePath(String path) => path.replaceAll('\\', '/');

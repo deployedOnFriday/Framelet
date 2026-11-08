@@ -34,8 +34,9 @@ class WebDavService {
     MediaKind.variety: ['综艺', 'variety', 'show'],
   };
 
-  static const maxScanDepth = 3;
-  static const maxVideoCount = 3000;
+  /// 视频数量上限，只用于防止误选到超大目录时把内存撑爆；
+  /// 目录层级不设上限，整棵树递归（主流媒体库软件的做法）。
+  static const maxVideoCount = 20000;
 
   static const subtitleExtensions = {
     '.srt',
@@ -221,24 +222,25 @@ class WebDavService {
   /// 递归扫描视频文件，返回扁平列表。
   ///
   /// 分类规则：路径上第一段命中关键词的目录决定分类；未命中的默认按电影处理。
-  static Future<List<ScannedVideo>> scan(
+  static Future<ScanResult> scan(
     MediaSource source,
     String password, {
     void Function(String message)? onProgress,
   }) async {
     final client = _client(source, password);
     final videos = <ScannedVideo>[];
+    var truncated = false;
     final root = _normalizeDirectory(source.address, source.directory);
     final visited = <String>{};
     // 根目录读取失败时记录原因：扫出 0 条多半是这里出的问题，
     // 静默吞掉会让用户只看到「0 条」而不知道哪错了。
     var rootError = '';
 
-    // 队列元素：目录路径、已确定分类（null=待定）、当前深度
-    final queue = <(String, MediaKind?, int)>[(root, null, 0)];
+    // 队列元素：目录路径、已确定分类（null=待定）
+    final queue = <(String, MediaKind?)>[(root, null)];
 
     while (queue.isNotEmpty) {
-      final (dirPath, kind, depth) = queue.removeAt(0);
+      final (dirPath, kind) = queue.removeAt(0);
       final key = dirPath.toLowerCase();
       if (visited.contains(key)) continue;
       visited.add(key);
@@ -262,10 +264,9 @@ class WebDavService {
         if (name.isEmpty || path.isEmpty) continue;
 
         if (entry.isDir ?? false) {
+          if (isSystemFolder(name)) continue;
           final childKind = kind ?? matchKind(name);
-          if (depth < maxScanDepth) {
-            queue.add((path, childKind, depth + 1));
-          }
+          queue.add((path, childKind));
           continue;
         }
         if (!isVideoFile(name)) continue;
@@ -273,7 +274,8 @@ class WebDavService {
         // （集数只统计正片，海报墙不会混入花絮）
         if (videos.length >= maxVideoCount) {
           onProgress?.call('已达到扫描上限 $maxVideoCount 个文件，停止深入');
-          return videos;
+          truncated = true;
+          break;
         }
         videos.add(
           ScannedVideo(
@@ -286,6 +288,7 @@ class WebDavService {
           ),
         );
       }
+      if (truncated) break;
     }
 
     // 根目录读不了 + 一无所获：把根因抛出去，别让用户对着 0 条猜。
@@ -296,7 +299,7 @@ class WebDavService {
         '② 账号或密码不对；③ 服务端未开启 WebDAV。',
       );
     }
-    return videos;
+    return ScanResult(videos: videos, truncated: truncated);
   }
 
   static bool isVideoFile(String name) {
@@ -453,6 +456,23 @@ class WebDavService {
       if (base.contains(extra) || lower.contains(extra)) return true;
     }
     return false;
+  }
+
+  /// NAS / 系统自动生成的目录，里面只有缩略图或回收站内容，扫描时直接跳过。
+  static bool isSystemFolder(String name) {
+    final text = name.toLowerCase().trim();
+    if (text.isEmpty) return false;
+    const folders = {
+      '@eadir',
+      '@recently-snapshot',
+      '@recycle',
+      '#recycle',
+      '#snapshot',
+      r'$recycle.bin',
+      'system volume information',
+      'lost+found',
+    };
+    return folders.contains(text);
   }
 
   /// 花絮目录：整目录只放片头片尾、预告、特辑等，不应被聚合成影片。

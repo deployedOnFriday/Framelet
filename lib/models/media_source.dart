@@ -176,6 +176,9 @@ class ScannedVideo {
   /// 是否已刮削（有海报或已匹配 TMDB）。未刮条目仍会以渐变封面展示。
   bool get isScraped => posterPath != null || tmdbId != null;
 
+  /// 文件大小的展示文本，大小未知时返回“未知大小”。
+  String get sizeLabel => _formatSize(sizeBytes);
+
   Map<String, Object?> toJson() => {
     'sourceId': sourceId,
     'path': path,
@@ -291,6 +294,19 @@ class ScannedVideo {
     tmdbId: tmdbId,
     tmdbTitle: tmdbTitle,
   );
+}
+
+/// 一次目录扫描的结果。
+class ScanResult {
+  const ScanResult({
+    required this.videos,
+    this.truncated = false,
+  });
+
+  final List<ScannedVideo> videos;
+
+  /// 是否因为视频数量达到上限而提前结束。
+  final bool truncated;
 }
 
 /// 把扫描到的视频转成 UI 使用的 MediaItem，避免分类页关心文件细节。

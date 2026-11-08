@@ -100,11 +100,6 @@ class _DetailPageState extends State<DetailPage> {
                         source: source,
                         episodes: episodes,
                         isSeries: isSeries,
-                        versions: versions,
-                        selectedVersionPath: selectedVersion?.path,
-                        onVersionSelected: versions.length > 1
-                            ? (path) => setState(() => _versionPath = path)
-                            : null,
                       ),
                       const SizedBox(height: 30),
                       if (isSeries) ...[
@@ -116,6 +111,13 @@ class _DetailPageState extends State<DetailPage> {
                           seasons: seasons,
                           seasonIndex: seasonIndex,
                           onSeasonSelected: onSeasonSelected,
+                        ),
+                      ] else if (versions.length > 1) ...[
+                        _VersionCarousel(
+                          versions: versions,
+                          selectedPath: selectedVersion?.path,
+                          onSelected: (path) =>
+                              setState(() => _versionPath = path),
                         ),
                       ] else
                         const SizedBox(height: 20),
@@ -214,85 +216,6 @@ class _DetailPageState extends State<DetailPage> {
   }
 }
 
-/// 电影多版本切换：4K / 1080p / REMUX 等共用同一张海报与详情页。
-class _VersionPicker extends StatelessWidget {
-  const _VersionPicker({
-    required this.versions,
-    required this.selectedPath,
-    required this.onSelected,
-  });
-
-  final List<ScannedVideo> versions;
-  final String? selectedPath;
-  final ValueChanged<String> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(Icons.layers_outlined, size: 15, color: context.colors.muted),
-        const SizedBox(width: 6),
-        Text(
-          '版本',
-          style: TextStyle(
-            fontSize: 11.5,
-            color: context.colors.muted,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: SizedBox(
-            height: 30,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: versions.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 7),
-              itemBuilder: (context, index) {
-                final version = versions[index];
-                final selected = version.path == selectedPath;
-                return Tooltip(
-                  message: version.path,
-                  child: InkWell(
-                    key: ValueKey('detail-version-${version.path}'),
-                    onTap: () => onSelected(version.path),
-                    borderRadius: BorderRadius.circular(7),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 9),
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: selected
-                            ? context.colors.primary
-                            : context.colors.surface,
-                        borderRadius: BorderRadius.circular(7),
-                        border: Border.all(
-                          color: selected
-                              ? context.colors.primary
-                              : context.colors.border,
-                        ),
-                      ),
-                      child: Text(
-                        MediaLibrary.versionLabelOf(version),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: selected ? Colors.white : context.colors.text,
-                        ),
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 class _HeroSection extends StatelessWidget {
   const _HeroSection({
     required this.title,
@@ -300,9 +223,6 @@ class _HeroSection extends StatelessWidget {
     required this.source,
     required this.episodes,
     required this.isSeries,
-    required this.versions,
-    required this.selectedVersionPath,
-    required this.onVersionSelected,
   });
 
   /// 展示用剧名（多季时是去掉季号的整剧名）。
@@ -311,9 +231,6 @@ class _HeroSection extends StatelessWidget {
   final MediaSource? source;
   final List<ScannedVideo> episodes;
   final bool isSeries;
-  final List<ScannedVideo> versions;
-  final String? selectedVersionPath;
-  final ValueChanged<String>? onVersionSelected;
 
   ScannedVideo _currentEpisode() {
     if (episodes.isEmpty) return video;
@@ -496,17 +413,6 @@ class _HeroSection extends StatelessWidget {
                           ),
                           const SizedBox(height: 16),
                           playButton(context),
-                          if (onVersionSelected != null) ...[
-                            const SizedBox(height: 10),
-                            SizedBox(
-                              width: 280,
-                              child: _VersionPicker(
-                                versions: versions,
-                                selectedPath: selectedVersionPath,
-                                onSelected: onVersionSelected!,
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
@@ -910,6 +816,294 @@ class _EpisodeCarouselState extends State<_EpisodeCarousel> {
             ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// 电影多版本列表：与剧集选集相同的横向卡片，卡片显示版本标签与文件大小。
+class _VersionCarousel extends StatefulWidget {
+  const _VersionCarousel({
+    required this.versions,
+    required this.selectedPath,
+    required this.onSelected,
+  });
+
+  final List<ScannedVideo> versions;
+  final String? selectedPath;
+  final ValueChanged<String> onSelected;
+
+  @override
+  State<_VersionCarousel> createState() => _VersionCarouselState();
+}
+
+class _VersionCarouselState extends State<_VersionCarousel> {
+  final ScrollController _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _scroll(bool forward) {
+    if (!_controller.hasClients) return;
+    final target = (_controller.offset + (forward ? 660 : -660)).clamp(
+      0.0,
+      _controller.position.maxScrollExtent,
+    );
+    _controller.animateTo(
+      target,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  void _play(BuildContext context, ScannedVideo version) {
+    widget.onSelected(version.path);
+    final entry = PlaybackHistory.instance.entryOf(
+      version.sourceId,
+      version.path,
+    );
+    final resume = entry != null && !entry.finished && entry.positionSec > 1;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => PlayerPage(
+          video: version,
+          startPosition: resume ? entry.positionSec : null,
+          episodes: [version],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                '版本',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: context.colors.text,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '共 ${widget.versions.length} 个版本',
+                style: TextStyle(fontSize: 12, color: context.colors.muted),
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  _CircleArrow(
+                    onTap: () => _scroll(false),
+                    icon: Icons.arrow_left,
+                  ),
+                  const SizedBox(width: 10),
+                  _CircleArrow(
+                    onTap: () => _scroll(true),
+                    icon: Icons.arrow_right,
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            height: 166,
+            child: ListView.separated(
+              clipBehavior: Clip.none,
+              controller: _controller,
+              scrollDirection: Axis.horizontal,
+              itemCount: widget.versions.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 16),
+              itemBuilder: (context, index) {
+                final version = widget.versions[index];
+                return _VersionCard(
+                  version: version,
+                  selected: version.path == widget.selectedPath,
+                  onSelected: () => widget.onSelected(version.path),
+                  onPlay: () => _play(context, version),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _VersionCard extends StatelessWidget {
+  const _VersionCard({
+    required this.version,
+    required this.selected,
+    required this.onSelected,
+    required this.onPlay,
+  });
+
+  final ScannedVideo version;
+  final bool selected;
+  final VoidCallback onSelected;
+  final VoidCallback onPlay;
+
+  Widget get _placeholder => const DecoratedBox(
+    decoration: BoxDecoration(
+      gradient: LinearGradient(colors: [Color(0xFF48506A), Color(0xFF252B3D)]),
+    ),
+    child: Center(
+      child: Icon(Icons.movie_outlined, color: Colors.white38, size: 28),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final entry = PlaybackHistory.instance.entryOf(
+      version.sourceId,
+      version.path,
+    );
+    final progress = entry?.progress ?? 0;
+    final thumbnailPath = version.stillPath ?? version.backdropPath;
+    final label = MediaLibrary.versionLabelOf(version);
+    final sizeLabel = version.sizeBytes > 0 ? version.sizeLabel : null;
+    return SizedBox(
+      width: 250,
+      child: Tooltip(
+        message: version.path,
+        child: InkWell(
+          key: ValueKey('detail-version-${version.path}'),
+          onTap: onSelected,
+          borderRadius: BorderRadius.circular(9),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                height: 115,
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(
+                    color: selected
+                        ? context.colors.primary
+                        : Colors.transparent,
+                    width: 2,
+                  ),
+                ),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    if (thumbnailPath != null)
+                      Image.file(
+                        File(thumbnailPath),
+                        fit: BoxFit.cover,
+                        cacheWidth:
+                            (250 *
+                                    (MediaQuery.maybeDevicePixelRatioOf(
+                                          context,
+                                        ) ??
+                                        1))
+                                .round(),
+                        alignment: Alignment.topCenter,
+                        errorBuilder: (context, error, stackTrace) =>
+                            _placeholder,
+                      )
+                    else
+                      _placeholder,
+                    if (selected)
+                      Align(
+                        alignment: Alignment.topRight,
+                        child: Container(
+                          margin: const EdgeInsets.all(6),
+                          padding: const EdgeInsets.all(2),
+                          decoration: const BoxDecoration(
+                            color: Colors.black54,
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.check_rounded,
+                            size: 14,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    Align(
+                      alignment: Alignment.bottomRight,
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Material(
+                          color: Colors.black54,
+                          shape: const CircleBorder(),
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            key: ValueKey(
+                              'detail-version-play-${version.path}',
+                            ),
+                            onTap: onPlay,
+                            child: const SizedBox(
+                              width: 32,
+                              height: 32,
+                              child: Icon(
+                                Icons.play_arrow_rounded,
+                                size: 20,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (progress > 0)
+                      Align(
+                        alignment: Alignment.bottomCenter,
+                        child: LinearProgressIndicator(
+                          value: entry!.finished ? 1 : progress,
+                          minHeight: 3,
+                          backgroundColor: Colors.black26,
+                          valueColor: AlwaysStoppedAnimation(
+                            context.colors.primary,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.3,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  color: selected
+                      ? context.colors.primary
+                      : context.colors.text,
+                ),
+              ),
+              if (sizeLabel != null) ...[
+                const SizedBox(height: 1),
+                Text(
+                  sizeLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    height: 1.2,
+                    color: context.colors.muted,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }

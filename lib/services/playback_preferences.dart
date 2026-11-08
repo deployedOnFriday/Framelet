@@ -34,18 +34,17 @@ class PlaybackPreferences extends ChangeNotifier {
   /// 播放时自动匹配并加载弹幕（需先配置弹幕服务）。
   bool autoLoadDanmaku = false;
 
-  /// 弹幕字号（12–30）。默认对齐 B 站「中」号弹幕。
-  double danmakuFontSize = 25;
+  /// 弹幕字号（12–30）。
+  double danmakuFontSize = 22;
 
   /// 弹幕不透明度（0.3–1）。
-  double danmakuOpacity = 1;
+  double danmakuOpacity = 0.65;
 
   /// 单条弹幕横向滚动时长（秒，4–24）。数值越大越慢。
-  /// B 站大屏默认滚动约 9 秒，这里用 9 秒作为默认值。
-  double danmakuLifetime = 9;
+  double danmakuLifetime = 14;
 
   /// 弹幕轨道行数（3–10）。
-  int danmakuLanes = 7;
+  int danmakuLanes = 6;
 
   /// 每次打开播放器的初始倍速。
   double defaultSpeed = 1.0;
@@ -64,23 +63,43 @@ class PlaybackPreferences extends ChangeNotifier {
           await _store.read('framelet.player.rememberVolume') != '0';
       hardwareDecode = await _store.read('framelet.player.hwdec') != '0';
       autoLoadDanmaku = await _store.read('framelet.player.autoDanmaku') == '1';
-      danmakuFontSize =
-          double.tryParse(
-            await _store.read('framelet.danmaku.fontSize') ?? '',
+      final fontSizeRaw = await _store.read('framelet.danmaku.fontSize');
+      final opacityRaw = await _store.read('framelet.danmaku.opacity');
+      final lifetimeRaw = await _store.read('framelet.danmaku.lifetime');
+      final lanesRaw = await _store.read('framelet.danmaku.lanes');
+      danmakuFontSize = double.tryParse(fontSizeRaw ?? '') ?? 22;
+      danmakuOpacity = double.tryParse(opacityRaw ?? '') ?? 0.65;
+      danmakuLifetime = double.tryParse(lifetimeRaw ?? '') ?? 14;
+      danmakuLanes = int.tryParse(lanesRaw ?? '') ?? 6;
+      // 0.1.31 / 0.1.32 的默认值整体变过一次。只有四项都还是旧默认值
+      // 时才迁移到新默认，避免覆盖用户自己调过的设置。
+      final defaultsVersion =
+          int.tryParse(
+            await _store.read('framelet.danmaku.defaultsVersion') ?? '',
           ) ??
-          25;
-      danmakuOpacity =
-          double.tryParse(
-            await _store.read('framelet.danmaku.opacity') ?? '',
-          ) ??
-          1;
-      danmakuLifetime =
-          double.tryParse(
-            await _store.read('framelet.danmaku.lifetime') ?? '',
-          ) ??
-          9;
-      danmakuLanes =
-          int.tryParse(await _store.read('framelet.danmaku.lanes') ?? '') ?? 7;
+          0;
+      final oldDefaults =
+          (danmakuFontSize == 25 &&
+              danmakuOpacity == 1 &&
+              danmakuLifetime == 9 &&
+              danmakuLanes == 7) ||
+          (danmakuFontSize == 18 &&
+              danmakuOpacity == 1 &&
+              danmakuLifetime == 16 &&
+              danmakuLanes == 7);
+      if (defaultsVersion < 2 && oldDefaults) {
+        danmakuFontSize = 22;
+        danmakuOpacity = 0.65;
+        danmakuLifetime = 14;
+        danmakuLanes = 6;
+        await _store.write('framelet.danmaku.fontSize', '22');
+        await _store.write('framelet.danmaku.opacity', '0.65');
+        await _store.write('framelet.danmaku.lifetime', '14');
+        await _store.write('framelet.danmaku.lanes', '6');
+      }
+      if (defaultsVersion < 2) {
+        await _store.write('framelet.danmaku.defaultsVersion', '2');
+      }
       defaultSpeed =
           double.tryParse(await _store.read('framelet.player.speed') ?? '') ??
           1.0;
@@ -93,9 +112,9 @@ class PlaybackPreferences extends ChangeNotifier {
       if (!speedOptions.contains(defaultSpeed)) defaultSpeed = 1.0;
       if (!seekStepOptions.contains(seekStep)) seekStep = 5;
       if (!rewindOptions.contains(rewindSeconds)) rewindSeconds = 3;
-      if (!danmakuFontSize.isFinite) danmakuFontSize = 25;
-      if (!danmakuOpacity.isFinite) danmakuOpacity = 1;
-      if (!danmakuLifetime.isFinite) danmakuLifetime = 9;
+      if (!danmakuFontSize.isFinite) danmakuFontSize = 22;
+      if (!danmakuOpacity.isFinite) danmakuOpacity = 0.65;
+      if (!danmakuLifetime.isFinite) danmakuLifetime = 14;
       danmakuFontSize = danmakuFontSize.clamp(12.0, 30.0);
       danmakuOpacity = danmakuOpacity.clamp(0.3, 1.0);
       danmakuLifetime = danmakuLifetime.clamp(4.0, 24.0);

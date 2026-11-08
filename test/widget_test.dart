@@ -669,6 +669,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('版本'), findsOneWidget);
+    expect(find.text('3.0 GB'), findsOneWidget);
+    expect(find.text('12.0 GB'), findsWidgets);
     expect(find.textContaining('第 1 季'), findsNothing);
     await tester.tap(
       find.byKey(ValueKey('detail-version-${videos.first.path}')),

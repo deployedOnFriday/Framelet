@@ -30,6 +30,8 @@ void main() async {
     FlutterError.presentError(details);
   };
   await MediaLibrary.instance.load();
+  // 定时增量扫描：间隔在设置页配置（默认 30 分钟，可关闭）。
+  MediaLibrary.instance.startAutoScan();
   await PlaybackHistory.instance.load();
   await PlaybackPreferences.instance.load();
   await ThemeController.instance.load();

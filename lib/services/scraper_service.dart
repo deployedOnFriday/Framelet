@@ -107,8 +107,15 @@ class ScraperService {
   ScraperService._();
 
   static const _userAgent = 'Framelet/0.1 (media library scraper)';
-  static const _requestGap = Duration(milliseconds: 260);
+  /// 全局请求间隔（所有刮削请求共用）。默认约 3.8 请求/秒，
+  /// 触发 429 时自动指数退避，恢复后逐步回到基准值。
+  static const _minRequestGap = Duration(milliseconds: 260);
+  static const _maxRequestGap = Duration(seconds: 3);
+  static const _maxRateLimitWait = Duration(seconds: 60);
+  static Duration _requestGap = _minRequestGap;
   static DateTime _lastRequest = DateTime.fromMillisecondsSinceEpoch(0);
+  static DateTime? _rateLimitedUntil;
+  static int _rateLimitStreak = 0;
 
   /// 刮削过程日志回调（由 MediaLibrary 注入，写入临时目录日志）。
   /// 关键失败（图片下载等）必须经由这里显性化，避免静默丢图。
@@ -232,6 +239,9 @@ class ScraperService {
   static void resetNetworkSettings() {
     ProxyResolver.reset();
     _tmdbOfflineUntil = null;
+    _rateLimitedUntil = null;
+    _rateLimitStreak = 0;
+    _requestGap = _minRequestGap;
     _tvmazeOfflineUntil = null;
     _preferredIp.clear();
     _ipCooldown.clear();
@@ -400,9 +410,14 @@ class ScraperService {
     return result.take(16).toList();
   }
 
-  /// 是否处于离线冷却（此时请求会被短路直接返回失败）。
+  /// 是否处于限流冷却（HTTP 429/503，等待 Retry-After 或指数退避）。
+  static bool get isRateLimited =>
+      _rateLimitedUntil != null && _rateLimitedUntil!.isAfter(DateTime.now());
+
+  /// 是否处于冷却期（离线或限流），此时请求会被短路直接返回失败。
   static bool get tmdbCoolingDown =>
-      _tmdbOfflineUntil != null && _tmdbOfflineUntil!.isAfter(DateTime.now());
+      isRateLimited ||
+      (_tmdbOfflineUntil != null && _tmdbOfflineUntil!.isAfter(DateTime.now()));
 
   /// 通过「国内可用 IP + 域名 SNI」直连 TMDB API。
   ///
@@ -410,6 +425,10 @@ class ScraperService {
   /// 手工完成 TLS（host 参数保证 SNI 与证书校验仍按域名），再由 IP
   /// 建立 TCP 连接，从而绕过污染。
   static Future<String?> _tmdbGet(String pathAndQuery) async {
+    if (isRateLimited) {
+      lastSearchError = 'TMDB 限流冷却中，本轮稍后自动重试';
+      return null;
+    }
     if (_tmdbOfflineUntil != null &&
         _tmdbOfflineUntil!.isAfter(DateTime.now())) {
       return null;
@@ -621,6 +640,11 @@ class ScraperService {
       final request = await client.getUrl(uri).timeout(timeout);
       final response = await request.close().timeout(timeout);
       _lastHttpStatus = response.statusCode;
+      if (response.statusCode == 429 || response.statusCode == 503) {
+        _noteRateLimited(retryAfter: _retryAfterOf(response));
+      } else if (response.statusCode == 200) {
+        _noteRequestOk();
+      }
       if (response.statusCode != 200) {
         try {
           await response.drain<void>();
@@ -650,6 +674,11 @@ class ScraperService {
         final request = await client.getUrl(uri).timeout(timeout);
         final response = await request.close().timeout(timeout);
         _lastHttpStatus = response.statusCode;
+        if (response.statusCode == 429 || response.statusCode == 503) {
+          _noteRateLimited(retryAfter: _retryAfterOf(response));
+        } else if (response.statusCode == 200) {
+          _noteRequestOk();
+        }
         if (response.statusCode != 200) {
           try {
             await response.drain<void>();
@@ -765,6 +794,11 @@ class ScraperService {
       _ipCooldown.remove(result.ip);
     }
     _lastHttpStatus = status ?? 200;
+    if (status == 429 || status == 503) {
+      _noteRateLimited();
+    } else if (status == 200 || status == 206) {
+      _noteRequestOk();
+    }
     return result.bytes;
   }
 
@@ -2125,6 +2159,7 @@ class ScraperService {
     }
 
     if (proxy != null) {
+      await _throttle();
       final bytes = await _httpGetBytes(
         uri,
         proxy: proxy,
@@ -2164,6 +2199,7 @@ class ScraperService {
   /// 非 TMDB 图片（如 TVmaze）的免代理通道：HTTP/IP 直连、
   /// 普通 HTTPS、HTTP 以及图片加速节点逐级兜底。
   static Future<List<int>?> _fetchOtherImage(Uri uri, {String? proxy}) async {
+    await _throttle();
     List<int>? accept(List<int>? bytes) {
       if (bytes == null || bytes.length < 1024 || !_looksLikeImage(bytes)) {
         return null;
@@ -2353,12 +2389,69 @@ class ScraperService {
   }
 
   static Future<void> _throttle() async {
+    // 被限流时全局暂停：等 Retry-After / 退避结束再发下一条请求，
+    // 避免撞上服务端封控（Jellyfin / Emby 也是统一节流而非并发猛拉）。
+    final gate = _rateLimitedUntil;
+    if (gate != null) {
+      final wait = gate.difference(DateTime.now());
+      if (wait > Duration.zero) {
+        final capped = wait > _maxRateLimitWait ? _maxRateLimitWait : wait;
+        onLog?.call('  限流冷却中，暂停 ${capped.inSeconds} 秒');
+        await Future<void>.delayed(capped);
+      }
+      if (_rateLimitedUntil != null &&
+          !_rateLimitedUntil!.isAfter(DateTime.now())) {
+        _rateLimitedUntil = null;
+      }
+    }
     final now = DateTime.now();
     final elapsed = now.difference(_lastRequest);
     if (elapsed < _requestGap) {
       await Future<void>.delayed(_requestGap - elapsed);
     }
     _lastRequest = DateTime.now();
+  }
+
+  /// 收到 429/503 时记录全局冷却，并按指数退避放慢后续请求。
+  static void _noteRateLimited({Duration? retryAfter}) {
+    _rateLimitStreak = (_rateLimitStreak + 1).clamp(1, 5).toInt();
+    final backoff = Duration(
+      seconds: 5 * (1 << (_rateLimitStreak - 1)),
+    );
+    var wait = retryAfter ?? backoff;
+    if (wait > _maxRateLimitWait) wait = _maxRateLimitWait;
+    final until = DateTime.now().add(wait);
+    if (_rateLimitedUntil == null || until.isAfter(_rateLimitedUntil!)) {
+      _rateLimitedUntil = until;
+    }
+    final doubled = _requestGap * 2;
+    _requestGap = doubled > _maxRequestGap ? _maxRequestGap : doubled;
+    lastSearchError = 'TMDB 触发限流，已暂停 ${wait.inSeconds} 秒后自动继续';
+    onLog?.call('  触发限流（429/503），全局暂停 ${wait.inSeconds} 秒');
+  }
+
+  /// 请求成功后逐步恢复基准间隔，避免限流解除后立刻再次撞上。
+  static void _noteRequestOk() {
+    if (_rateLimitStreak == 0) return;
+    _rateLimitStreak = 0;
+    final eased = _requestGap * 0.7;
+    _requestGap = eased < _minRequestGap ? _minRequestGap : eased;
+  }
+
+  /// 解析 Retry-After（秒数或 HTTP 日期），返回服务端要求的等待时长。
+  static Duration? _retryAfterOf(HttpClientResponse response) {
+    final raw = response.headers.value(HttpHeaders.retryAfterHeader);
+    if (raw == null || raw.trim().isEmpty) return null;
+    final seconds = int.tryParse(raw.trim());
+    if (seconds != null) {
+      return seconds <= 0 ? null : Duration(seconds: seconds);
+    }
+    try {
+      final delta = HttpDate.parse(raw.trim()).difference(DateTime.now());
+      return delta > Duration.zero ? delta : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   static String stripHtml(String html) => html

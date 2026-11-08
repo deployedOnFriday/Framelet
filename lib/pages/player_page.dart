@@ -64,6 +64,11 @@ class _PlayerPageState extends State<PlayerPage> {
   StreamSubscription<Track>? _trackSub;
 
   bool _seekedToStart = false;
+
+  /// 续播跳转目标。跳转真正落地前保持加载遮罩，避免闪出片头画面。
+  double? _resumeSeekTarget;
+  Timer? _resumeSeekTimer;
+  static const _resumeSeekTolerance = 3.0;
   double _positionSec = 0;
   double _durationSec = 0;
   double _lastSavedSec = 0;
@@ -169,6 +174,19 @@ class _PlayerPageState extends State<PlayerPage> {
       _positionSec = position.inMilliseconds / 1000;
       // 弹幕层逐帧时钟（ValueNotifier，不触发整页重建）
       _danmakuClock.value = _positionSec;
+      final resumeTarget = _resumeSeekTarget;
+      final resumeThreshold = resumeTarget == null
+          ? null
+          : (resumeTarget <= 5.0
+                ? resumeTarget
+                : resumeTarget - _resumeSeekTolerance);
+      if (resumeThreshold != null && _positionSec >= resumeThreshold) {
+        _resumeSeekTarget = null;
+        _resumeSeekTimer?.cancel();
+        if (mounted && !_mediaReady) {
+          setState(() => _mediaReady = true);
+        }
+      }
       // 每 10 秒自动存档一次进度，应用崩溃/断电也能续播
       if (_durationSec > 0 &&
           _positionSec > 1 &&
@@ -181,7 +199,11 @@ class _PlayerPageState extends State<PlayerPage> {
       if (mounted && second != _lastUiSecond) {
         _lastUiSecond = second;
         setState(() {
-          if (_durationSec > 0 && _positionSec > 1) _mediaReady = true;
+          if (_resumeSeekTarget == null &&
+              _durationSec > 0 &&
+              _positionSec > 1) {
+            _mediaReady = true;
+          }
         });
       }
     });
@@ -258,11 +280,6 @@ class _PlayerPageState extends State<PlayerPage> {
     if (wasZero && _durationSec > 0) {
       _debugLog('视频已就绪，时长 ${_durationSec.toStringAsFixed(1)} 秒');
     }
-    if (mounted) {
-      setState(() {
-        if (_durationSec > 0 && _positionSec > 1) _mediaReady = true;
-      });
-    }
     if (!_seekedToStart && _durationSec > 0) {
       _seekedToStart = true;
       final start = _resumeTarget ?? 0;
@@ -270,8 +287,27 @@ class _PlayerPageState extends State<PlayerPage> {
         // 从上次进度继续，按设置回退若干秒帮助衔接剧情
         final target = (start - PlaybackPreferences.instance.rewindSeconds)
             .clamp(0.0, _durationSec - 5);
-        _player.seek(Duration(milliseconds: (target * 1000).round()));
+        _resumeSeekTarget = target;
+        _resumeSeekTimer?.cancel();
+        // seek 指令不保证立刻出帧；给一个兜底，避免遮罩无限停留。
+        _resumeSeekTimer = Timer(const Duration(milliseconds: 2500), () {
+          if (!mounted || _resumeSeekTarget == null) return;
+          setState(() {
+            _resumeSeekTarget = null;
+            _mediaReady = true;
+          });
+        });
+        unawaited(
+          _player.seek(Duration(milliseconds: (target * 1000).round())),
+        );
       }
+    }
+    if (mounted) {
+      setState(() {
+        if (_resumeSeekTarget == null && _durationSec > 0 && _positionSec > 1) {
+          _mediaReady = true;
+        }
+      });
     }
   }
 
@@ -317,6 +353,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _tracksSub?.cancel();
     _trackSub?.cancel();
     _volumePersistTimer?.cancel();
+    _resumeSeekTimer?.cancel();
     _osdTimer?.cancel();
     _osdMessage.dispose();
     _focusNode.dispose();
@@ -421,6 +458,8 @@ class _PlayerPageState extends State<PlayerPage> {
     if (video.path == _current.path) return;
     await _recordProgress();
     _acceptStreamEvents = false;
+    _resumeSeekTimer?.cancel();
+    _resumeSeekTarget = null;
     setState(() {
       _current = video;
       _positionSec = 0;
@@ -445,6 +484,8 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _open({bool initial = false}) async {
     final generation = ++_openGeneration;
     _acceptStreamEvents = false;
+    _resumeSeekTimer?.cancel();
+    _resumeSeekTarget = null;
     if (_mediaReady && mounted) {
       setState(() => _mediaReady = false);
     }
@@ -1398,10 +1439,10 @@ class _PlayerPageState extends State<PlayerPage> {
                         const Spacer(),
                         TextButton(
                           onPressed: () {
-                            unawaited(prefs.setDanmakuFontSize(25));
-                            unawaited(prefs.setDanmakuOpacity(1));
-                            unawaited(prefs.setDanmakuLifetime(9));
-                            unawaited(prefs.setDanmakuLanes(7));
+                            unawaited(prefs.setDanmakuFontSize(22));
+                            unawaited(prefs.setDanmakuOpacity(0.65));
+                            unawaited(prefs.setDanmakuLifetime(14));
+                            unawaited(prefs.setDanmakuLanes(6));
                             setSheetState(() {});
                           },
                           child: const Text(

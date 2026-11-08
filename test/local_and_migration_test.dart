@@ -76,7 +76,7 @@ void main() {
         username: '',
         kind: MediaSourceKind.local,
       );
-      final videos = await LocalMediaService.scan(source);
+      final videos = (await LocalMediaService.scan(source)).videos;
 
       // 花絮（trailer.mp4）保留入库，详情页单独分区展示；
       // 隐藏文件（.hidden.mp4）仍被跳过。
@@ -99,6 +99,44 @@ void main() {
         videos.where((video) => video.kind == MediaKind.anime),
         hasLength(2),
       );
+    });
+
+    test('藏得很深的影片目录也能扫描到（不设层级上限）', () async {
+      Future<void> createDeepMovie(int levels) async {
+        final segments = List.generate(levels, (index) => 'L${index + 1}');
+        final directory = Directory(
+          '${root.path}${Platform.pathSeparator}'
+          '${segments.join(Platform.pathSeparator)}',
+        );
+        await directory.create(recursive: true);
+        await File(
+          '${directory.path}${Platform.pathSeparator}藏得深.2024.mp4',
+        ).writeAsString('x');
+      }
+
+      // 真实媒体库常见的深层结构必须都能扫到。
+      await createDeepMovie(10);
+      await createDeepMovie(16);
+
+      final source = MediaSource(
+        id: 'local-deep',
+        name: '本地测试',
+        address: root.path,
+        username: '',
+        kind: MediaSourceKind.local,
+      );
+      final result = await LocalMediaService.scan(source);
+
+      expect(result.videos, hasLength(2));
+      expect(
+        result.videos.map((video) => video.path),
+        contains(contains('L1/L2/L3/L4/L5/L6/L7/L8/L9/L10/藏得深.2024.mp4')),
+      );
+      expect(
+        result.videos.map((video) => video.path),
+        contains(contains('L16/藏得深.2024.mp4')),
+      );
+      expect(result.truncated, isFalse);
     });
 
     test('发现同名字幕并按语言标记展示', () async {
@@ -164,6 +202,136 @@ void main() {
       final movies = library.byKind(MediaKind.movie);
       expect(movies, hasLength(1));
       expect(movies.single.posterPath, isNull);
+    });
+
+    test('重复同步未变化的文件走增量路径，文件变化后才更新条目', () async {
+      final video = File('${root.path}${Platform.pathSeparator}电影.mp4');
+      await video.writeAsString('video');
+
+      final library = MediaLibrary(
+        store: _MemoryCredentialStore(),
+        db: MemoryFrameletStore(),
+      )..autoScrapeAfterScan = false;
+      final source = MediaSource(
+        id: 'local-incremental',
+        name: '本地测试',
+        address: root.path,
+        username: '',
+        kind: MediaSourceKind.local,
+      );
+      await library.addOrUpdateSource(source);
+      await library.syncAll();
+
+      final path = LocalMediaService.normalizePath(video.path);
+      final first = library.findVideo(source.id, path);
+      expect(first, isNotNull);
+      expect(library.scanProgress, contains('新增 1'));
+
+      // 文件没变：复用上次的对象，不重新刮削、不重写数据库。
+      await library.syncAll();
+      expect(library.scanProgress, contains('无文件变化'));
+      expect(identical(library.findVideo(source.id, path), first), isTrue);
+
+      // 文件变了：条目被替换，统计为更新。
+      await video.writeAsString('video changed');
+      await library.syncAll();
+      expect(library.scanProgress, contains('更新 1'));
+      expect(identical(library.findVideo(source.id, path), first), isFalse);
+    });
+
+    test('定时扫描间隔可配置、可关闭并持久化', () async {
+      final store = _MemoryCredentialStore();
+      final library = MediaLibrary(store: store, db: MemoryFrameletStore());
+      await library.load();
+      expect(library.autoScanInterval, const Duration(minutes: 30));
+
+      await library.setAutoScanInterval(const Duration(hours: 2));
+      expect(library.autoScanInterval, const Duration(hours: 2));
+      library.stopAutoScan();
+
+      final reopened = MediaLibrary(store: store, db: MemoryFrameletStore());
+      await reopened.load();
+      expect(reopened.autoScanInterval, const Duration(hours: 2));
+
+      await reopened.setAutoScanInterval(null);
+      expect(reopened.autoScanInterval, isNull);
+      reopened.stopAutoScan();
+    });
+
+    test('同一时间只允许一轮扫描，重复触发不会叠加', () async {
+      final video = File('${root.path}${Platform.pathSeparator}电影.mp4');
+      await video.writeAsString('video');
+
+      final library = MediaLibrary(
+        store: _MemoryCredentialStore(),
+        db: MemoryFrameletStore(),
+      )..autoScrapeAfterScan = false;
+      final source = MediaSource(
+        id: 'local-lock',
+        name: '本地测试',
+        address: root.path,
+        username: '',
+        kind: MediaSourceKind.local,
+      );
+      await library.addOrUpdateSource(source);
+
+      final first = library.scan(source.id);
+      expect(library.isScanning, isTrue);
+      // 第二轮被互斥挡掉，同步返回（不会产生第二份扫描任务）。
+      final second = library.scan(source.id);
+      expect(library.isScanning, isTrue);
+      await Future.wait([first, second]);
+      expect(library.isScanning, isFalse);
+      expect(library.byKind(MediaKind.movie), hasLength(1));
+    });
+
+    test('蓝光原盘 BDMV 只保留主片，并用片名目录命名', () async {
+      Future<void> create(String relative, int bytes) async {
+        final file = File('${root.path}${Platform.pathSeparator}$relative');
+        await file.parent.create(recursive: true);
+        await file.writeAsString('x' * bytes);
+      }
+
+      await create('Movies/一代宗师 (2013)/BDMV/STREAM/00000.m2ts', 10);
+      await create('Movies/一代宗师 (2013)/BDMV/STREAM/00001.m2ts', 500);
+      await create('Movies/一代宗师 (2013)/BDMV/STREAM/00002.m2ts', 20);
+      // 同一文件夹里同时有压制版：应合并成一张卡的两个版本。
+      await create('Movies/一代宗师 (2013)/一代宗师.2013.1080p.mkv', 300);
+
+      final library = MediaLibrary(
+        store: _MemoryCredentialStore(),
+        db: MemoryFrameletStore(),
+      )..autoScrapeAfterScan = false;
+      final source = MediaSource(
+        id: 'local-bdmv',
+        name: '本地测试',
+        address: root.path,
+        username: '',
+        kind: MediaSourceKind.local,
+      );
+      await library.addOrUpdateSource(source);
+      await library.syncAll();
+
+      final movies = library.byKind(MediaKind.movie);
+      expect(movies, hasLength(1));
+      expect(movies.single.title, '一代宗师');
+      final versions = library.versionsOf(movies.single);
+      expect(versions, hasLength(2));
+      expect(
+        versions.map((video) => video.path),
+        contains(endsWith('/00001.m2ts')),
+      );
+      expect(
+        versions.map((video) => video.path),
+        contains(endsWith('.mkv')),
+      );
+      final disc = versions.firstWhere(
+        (video) => video.path.endsWith('/00001.m2ts'),
+      );
+      expect(
+        library.findVideo(source.id, disc.path)?.sizeBytes,
+        500,
+      );
     });
 
     test('播放历史能按文件夹找回剧名与集数', () async {
