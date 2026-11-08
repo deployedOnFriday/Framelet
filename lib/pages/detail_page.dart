@@ -27,6 +27,7 @@ class DetailPage extends StatefulWidget {
 
 class _DetailPageState extends State<DetailPage> {
   int _seasonIndex = 0;
+  String? _versionPath;
 
   /// 按季补全简介/首播日期/单集时长；只用于展示，不写回媒体库。
   final Map<String, ({String? overview, String? airDate, double? runtimeSec})>
@@ -43,11 +44,21 @@ class _DetailPageState extends State<DetailPage> {
       builder: (context, _) {
         final library = MediaLibrary.instance;
         final current = library.resolveAggregated(widget.video);
-        final seasons = library.seasonsOf(current);
+        final isMovie = current.kind == MediaKind.movie;
+        final versions = isMovie
+            ? library.versionsOf(current)
+            : const <ScannedVideo>[];
+        final selectedVersion = isMovie ? _selectedVersion(versions) : null;
+        final seasons = isMovie
+            ? <ScannedVideo>[current]
+            : library.seasonsOf(current);
         final seasonIndex = _seasonIndex.clamp(0, seasons.length - 1);
         final season = seasons[seasonIndex];
-        final source = library.sourceById(season.sourceId);
-        final episodes = library.episodesOf(season);
+        final playbackVideo = isMovie ? (selectedVersion ?? current) : season;
+        final source = library.sourceById(playbackVideo.sourceId);
+        final episodes = isMovie
+            ? <ScannedVideo>[playbackVideo]
+            : library.episodesOf(season);
         final isSeries = episodes.length > 1;
         final normalizedTitle = seasons.length > 1
             ? MediaLibrary.normalizeSeriesTitle(current.title)
@@ -56,7 +67,7 @@ class _DetailPageState extends State<DetailPage> {
             ? current.title
             : normalizedTitle;
         final info = _seasonInfo[_seasonKey(season)];
-        final hero = _seasonView(season, current).copyWith(
+        final hero = _seasonView(playbackVideo, current).copyWith(
           summary: info?.overview,
           releaseDate: info?.airDate,
           runtimeSec: info?.runtimeSec,
@@ -89,6 +100,11 @@ class _DetailPageState extends State<DetailPage> {
                         source: source,
                         episodes: episodes,
                         isSeries: isSeries,
+                        versions: versions,
+                        selectedVersionPath: selectedVersion?.path,
+                        onVersionSelected: versions.length > 1
+                            ? (path) => setState(() => _versionPath = path)
+                            : null,
                       ),
                       const SizedBox(height: 30),
                       if (isSeries) ...[
@@ -109,7 +125,7 @@ class _DetailPageState extends State<DetailPage> {
                         const SizedBox(height: 32),
                       ],
                       _FileInfo(
-                        video: season,
+                        video: playbackVideo,
                         source: source,
                         episodes: episodes,
                       ),
@@ -123,6 +139,25 @@ class _DetailPageState extends State<DetailPage> {
         );
       },
     );
+  }
+
+  /// 优先沿用当前选择，其次恢复最近播放过的版本，最后取最高画质。
+  ScannedVideo? _selectedVersion(List<ScannedVideo> versions) {
+    if (versions.isEmpty) return null;
+    final path = _versionPath;
+    if (path != null) {
+      for (final version in versions) {
+        if (version.path == path) return version;
+      }
+    }
+    for (final entry in PlaybackHistory.instance.entries) {
+      for (final version in versions) {
+        if (entry.sourceId == version.sourceId && entry.path == version.path) {
+          return version;
+        }
+      }
+    }
+    return versions.first;
   }
 
   /// 右键菜单：目前提供「隐藏该影片」，隐藏后从海报墙移除。
@@ -179,6 +214,85 @@ class _DetailPageState extends State<DetailPage> {
   }
 }
 
+/// 电影多版本切换：4K / 1080p / REMUX 等共用同一张海报与详情页。
+class _VersionPicker extends StatelessWidget {
+  const _VersionPicker({
+    required this.versions,
+    required this.selectedPath,
+    required this.onSelected,
+  });
+
+  final List<ScannedVideo> versions;
+  final String? selectedPath;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.layers_outlined, size: 15, color: context.colors.muted),
+        const SizedBox(width: 6),
+        Text(
+          '版本',
+          style: TextStyle(
+            fontSize: 11.5,
+            color: context.colors.muted,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: SizedBox(
+            height: 30,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: versions.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 7),
+              itemBuilder: (context, index) {
+                final version = versions[index];
+                final selected = version.path == selectedPath;
+                return Tooltip(
+                  message: version.path,
+                  child: InkWell(
+                    key: ValueKey('detail-version-${version.path}'),
+                    onTap: () => onSelected(version.path),
+                    borderRadius: BorderRadius.circular(7),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 9),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? context.colors.primary
+                            : context.colors.surface,
+                        borderRadius: BorderRadius.circular(7),
+                        border: Border.all(
+                          color: selected
+                              ? context.colors.primary
+                              : context.colors.border,
+                        ),
+                      ),
+                      child: Text(
+                        MediaLibrary.versionLabelOf(version),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: selected ? Colors.white : context.colors.text,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _HeroSection extends StatelessWidget {
   const _HeroSection({
     required this.title,
@@ -186,6 +300,9 @@ class _HeroSection extends StatelessWidget {
     required this.source,
     required this.episodes,
     required this.isSeries,
+    required this.versions,
+    required this.selectedVersionPath,
+    required this.onVersionSelected,
   });
 
   /// 展示用剧名（多季时是去掉季号的整剧名）。
@@ -194,6 +311,9 @@ class _HeroSection extends StatelessWidget {
   final MediaSource? source;
   final List<ScannedVideo> episodes;
   final bool isSeries;
+  final List<ScannedVideo> versions;
+  final String? selectedVersionPath;
+  final ValueChanged<String>? onVersionSelected;
 
   ScannedVideo _currentEpisode() {
     if (episodes.isEmpty) return video;
@@ -376,6 +496,17 @@ class _HeroSection extends StatelessWidget {
                           ),
                           const SizedBox(height: 16),
                           playButton(context),
+                          if (onVersionSelected != null) ...[
+                            const SizedBox(height: 10),
+                            SizedBox(
+                              width: 280,
+                              child: _VersionPicker(
+                                versions: versions,
+                                selectedPath: selectedVersionPath,
+                                onSelected: onVersionSelected!,
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),

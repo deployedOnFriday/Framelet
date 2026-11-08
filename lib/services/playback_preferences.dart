@@ -34,14 +34,15 @@ class PlaybackPreferences extends ChangeNotifier {
   /// 播放时自动匹配并加载弹幕（需先配置弹幕服务）。
   bool autoLoadDanmaku = false;
 
-  /// 弹幕字号（12–30）。
-  double danmakuFontSize = 18;
+  /// 弹幕字号（12–30）。默认对齐 B 站「中」号弹幕。
+  double danmakuFontSize = 25;
 
   /// 弹幕不透明度（0.3–1）。
   double danmakuOpacity = 1;
 
-  /// 单条弹幕横向滚动时长（秒，12–24）。数值越大越慢。
-  double danmakuLifetime = 16;
+  /// 单条弹幕横向滚动时长（秒，4–24）。数值越大越慢。
+  /// B 站大屏默认滚动约 9 秒，这里用 9 秒作为默认值。
+  double danmakuLifetime = 9;
 
   /// 弹幕轨道行数（3–10）。
   int danmakuLanes = 7;
@@ -67,7 +68,7 @@ class PlaybackPreferences extends ChangeNotifier {
           double.tryParse(
             await _store.read('framelet.danmaku.fontSize') ?? '',
           ) ??
-          18;
+          25;
       danmakuOpacity =
           double.tryParse(
             await _store.read('framelet.danmaku.opacity') ?? '',
@@ -77,7 +78,7 @@ class PlaybackPreferences extends ChangeNotifier {
           double.tryParse(
             await _store.read('framelet.danmaku.lifetime') ?? '',
           ) ??
-          16;
+          9;
       danmakuLanes =
           int.tryParse(await _store.read('framelet.danmaku.lanes') ?? '') ?? 7;
       defaultSpeed =
@@ -92,17 +93,12 @@ class PlaybackPreferences extends ChangeNotifier {
       if (!speedOptions.contains(defaultSpeed)) defaultSpeed = 1.0;
       if (!seekStepOptions.contains(seekStep)) seekStep = 5;
       if (!rewindOptions.contains(rewindSeconds)) rewindSeconds = 3;
-      if (!danmakuFontSize.isFinite) danmakuFontSize = 18;
+      if (!danmakuFontSize.isFinite) danmakuFontSize = 25;
       if (!danmakuOpacity.isFinite) danmakuOpacity = 1;
-      if (!danmakuLifetime.isFinite) danmakuLifetime = 16;
+      if (!danmakuLifetime.isFinite) danmakuLifetime = 9;
       danmakuFontSize = danmakuFontSize.clamp(12.0, 30.0);
       danmakuOpacity = danmakuOpacity.clamp(0.3, 1.0);
-      // 旧版 5–15 秒的范围整体偏快；低于 12 秒的旧设置统一提升到 16 秒。
-      if (danmakuLifetime < 12) {
-        danmakuLifetime = 16;
-      } else {
-        danmakuLifetime = danmakuLifetime.clamp(12.0, 24.0);
-      }
+      danmakuLifetime = danmakuLifetime.clamp(4.0, 24.0);
       danmakuLanes = danmakuLanes.clamp(3, 10);
     } catch (_) {
       // 读取失败不影响使用默认值

@@ -274,7 +274,10 @@ class MediaLibrary extends ChangeNotifier {
           // 旧海报会把新海报盖掉，表现为「改了匹配但海报不切换」。
           final base = _mergeAggregatedEntries(existing, video);
           merged[key] = base.copyWith(
-            episodeCount: existing.episodeCount + video.episodeCount,
+            // 电影多版本仍是同一部电影，不能把 4K/1080p 算成“集”。
+            episodeCount: base.kind == MediaKind.movie
+                ? 1
+                : existing.episodeCount + video.episodeCount,
             // 剧名统一用规范化基名（魔幻手机2：傻妞归来 → 魔幻手机）；
             // 电影名不能剥尾部数字（流浪地球2 → 流浪地球）。
             title: base.kind == MediaKind.movie
@@ -339,6 +342,7 @@ class MediaLibrary extends ChangeNotifier {
   /// 判据与 byKind 合并一致：规范化剧名相同即同一部剧的不同季，
   /// 因此《旋风少女》《旋风少女2》即使 TMDB 是两个条目也能归到一起。
   List<ScannedVideo> seasonsOf(ScannedVideo video) {
+    if (video.kind == MediaKind.movie) return [video];
     final key = _seriesMergeKey(video);
     final seasons = <ScannedVideo>[];
     for (final entry in _videosBySource.entries) {
@@ -452,6 +456,147 @@ class MediaLibrary extends ChangeNotifier {
       return _naturalCompare(a.path, b.path);
     });
     return result.isEmpty ? [video] : result;
+  }
+
+  /// 一部电影的全部文件版本（4K / 1080p / REMUX 等）。
+  ///
+  /// 海报墙只展示一张卡；详情页通过这里提供版本切换。版本按分辨率与
+  /// 文件大小排序，默认优先选最高画质。进度仍按 sourceId + path 分开，
+  /// 不把一个版本的播放位置套到另一个版本上。
+  List<ScannedVideo> versionsOf(ScannedVideo video) {
+    final aggregate = resolveAggregated(video);
+    if (aggregate.kind != MediaKind.movie) return [aggregate];
+    final key = _seriesMergeKey(aggregate);
+    final result = <ScannedVideo>[];
+    final seen = <String>{};
+    for (final entry in _videosBySource.entries) {
+      if (!sourceEnabled(entry.key)) continue;
+      for (final item in _aggregated(entry.key)) {
+        if (item.kind != MediaKind.movie) continue;
+        if (_seriesMergeKey(item) != key) continue;
+        final parent = parentPathOf(item.path);
+        final folderFiles = entry.value
+            .where((candidate) => parentPathOf(candidate.path) == parent)
+            .toList();
+        if (folderFiles.isEmpty) continue;
+        final clusters = _clusterMovieFiles(folderFiles);
+        final cluster =
+            clusters
+                .where((files) => files.any((file) => file.path == item.path))
+                .firstOrNull ??
+            <ScannedVideo>[item];
+        for (final file in cluster) {
+          if (WebDavService.isExtraFile(file.title)) continue;
+          if (!seen.add('${file.sourceId}|${file.path}')) continue;
+          result.add(_movieVersionView(file, aggregate));
+        }
+      }
+    }
+    if (result.isEmpty) return [aggregate];
+    result.sort((a, b) {
+      final rank = _versionRank(b).compareTo(_versionRank(a));
+      if (rank != 0) return rank;
+      final size = b.sizeBytes.compareTo(a.sizeBytes);
+      if (size != 0) return size;
+      return _naturalCompare(a.path, b.path);
+    });
+    return result;
+  }
+
+  /// 版本切换按钮上的短标签：4K · HDR · 60fps / 1080p · HEVC。
+  static String versionLabelOf(ScannedVideo video) {
+    final text = '${video.title} ${video.path}'.toLowerCase();
+    final tags = <String>[];
+    if (text.contains('8k') || text.contains('4320p')) {
+      tags.add('8K');
+    } else if (text.contains('4k') || text.contains('2160p')) {
+      tags.add('4K');
+    } else if (text.contains('1440p')) {
+      tags.add('1440p');
+    } else if (text.contains('1080p')) {
+      tags.add('1080p');
+    } else if (text.contains('720p')) {
+      tags.add('720p');
+    } else if (text.contains('480p')) {
+      tags.add('480p');
+    }
+    if (text.contains("director's cut") ||
+        text.contains('directors.cut') ||
+        text.contains('导演剪辑') ||
+        text.contains('导演版')) {
+      tags.add('导演剪辑');
+    } else if (text.contains('extended') || text.contains('加长')) {
+      tags.add('加长版');
+    } else if (text.contains('unrated') || text.contains('未删减')) {
+      tags.add('未删减');
+    } else if (text.contains('imax')) {
+      tags.add('IMAX');
+    }
+    if (text.contains('国粤双语')) {
+      tags.add('国粤双语');
+    } else if (text.contains('粤语')) {
+      tags.add('粤语');
+    } else if (text.contains('国语')) {
+      tags.add('国语');
+    }
+    if (text.contains('dolby vision') ||
+        text.contains('dovi') ||
+        text.contains('杜比视界')) {
+      tags.add('杜比视界');
+    } else if (text.contains('hdr10+')) {
+      tags.add('HDR10+');
+    } else if (text.contains('hdr10') || text.contains('hdr')) {
+      tags.add('HDR');
+    }
+    if (text.contains('remux')) tags.add('REMUX');
+    if (text.contains('120fps') || text.contains('120帧')) {
+      tags.add('120fps');
+    } else if (text.contains('60fps') || text.contains('60帧')) {
+      tags.add('60fps');
+    }
+    if (text.contains('x265') ||
+        text.contains('h265') ||
+        text.contains('hevc')) {
+      tags.add('HEVC');
+    }
+    return tags.isEmpty ? _lastSegment(video.path) : tags.join(' · ');
+  }
+
+  /// 最近播放卡片上的紧凑版本徽标，只保留分辨率标签。
+  static String versionBadgeOf(ScannedVideo video) {
+    final label = versionLabelOf(video);
+    final separator = label.indexOf(' · ');
+    return separator < 0 ? label : label.substring(0, separator);
+  }
+
+  static ScannedVideo _movieVersionView(ScannedVideo file, ScannedVideo movie) {
+    final officialTitle = movie.tmdbTitle?.trim() ?? '';
+    return file.copyWith(
+      title: officialTitle.isNotEmpty ? officialTitle : movie.title,
+      kind: MediaKind.movie,
+      episodeCount: 1,
+      posterPath: movie.posterPath ?? file.posterPath,
+      summary: movie.summary ?? file.summary,
+      rating: movie.rating ?? file.rating,
+      backdropPath: movie.backdropPath ?? file.backdropPath,
+      genres: movie.genres.isEmpty ? file.genres : movie.genres,
+      cast: movie.cast.isEmpty ? file.cast : movie.cast,
+      releaseDate: movie.releaseDate ?? file.releaseDate,
+      runtimeSec: movie.runtimeSec ?? file.runtimeSec,
+      tmdbId: movie.tmdbId ?? file.tmdbId,
+      tmdbTitle: movie.tmdbTitle ?? file.tmdbTitle,
+    );
+  }
+
+  static int _versionRank(ScannedVideo video) {
+    final text = '${video.title} ${video.path}'.toLowerCase();
+    if (text.contains('8k') || text.contains('4320p')) return 4320;
+    if (text.contains('4k') || text.contains('2160p')) return 2160;
+    if (text.contains('1440p')) return 1440;
+    if (text.contains('1080p')) return 1080;
+    if (text.contains('720p')) return 720;
+    if (text.contains('480p')) return 480;
+    return 0;
   }
 
   /// 单集文件所属的聚合条目（按同一媒体源 + 同一文件夹查找）。

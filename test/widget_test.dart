@@ -272,15 +272,9 @@ void main() {
     // 搜索结果层是覆盖层，首页内容仍在树中——断言必须限定在结果网格内
     final grid = find.byKey(const ValueKey('search-results-grid'));
     expect(grid, findsOneWidget);
-    final resultTitle = find.descendant(
-      of: grid,
-      matching: find.text('星际穿越'),
-    );
+    final resultTitle = find.descendant(of: grid, matching: find.text('星际穿越'));
     expect(resultTitle, findsOneWidget);
-    expect(
-      find.descendant(of: grid, matching: find.text('风之谷')),
-      findsNothing,
-    );
+    expect(find.descendant(of: grid, matching: find.text('风之谷')), findsNothing);
 
     final fieldRect = tester.getRect(
       find.byKey(const ValueKey('search-field')),
@@ -612,5 +606,74 @@ void main() {
       find.byType(DetailPage),
       matchesGoldenFile('goldens/detail_page_dark.png'),
     );
+  });
+
+  testWidgets('电影多版本共用一张详情页并可切换播放文件', (tester) async {
+    tester.view.physicalSize = const Size(1440, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final store = MemoryFrameletStore();
+    await store.saveSources([
+      MediaSource(
+        id: 'local',
+        name: '本机媒体库',
+        kind: MediaSourceKind.local,
+        address: 'D:/Media',
+        username: '',
+        connected: true,
+        lastSync: '刚刚',
+      ),
+    ]);
+    const videos = [
+      ScannedVideo(
+        sourceId: 'local',
+        path: '/Media/一代宗师/一代宗师.2013.1080p.mkv',
+        title: '一代宗师.2013.1080p',
+        kind: MediaKind.movie,
+        sizeBytes: 3 * 1024 * 1024 * 1024,
+        tmdbId: 44826,
+        tmdbTitle: '一代宗师',
+      ),
+      ScannedVideo(
+        sourceId: 'local',
+        path: '/Media/一代宗师/一代宗师.2013.2160p.HDR.mkv',
+        title: '一代宗师.2013.2160p.HDR',
+        kind: MediaKind.movie,
+        sizeBytes: 12 * 1024 * 1024 * 1024,
+        tmdbId: 44826,
+        tmdbTitle: '一代宗师',
+      ),
+    ];
+    await store.saveVideos('local', videos);
+    final library = _TestMediaLibrary(
+      store: InMemoryCredentialStore(),
+      db: store,
+    );
+    await library.load();
+    MediaLibrary.instanceForTesting = library;
+    PlaybackHistory.instanceForTesting = PlaybackHistory.withStore(
+      MemoryFrameletStore(),
+    );
+
+    final card = library.byKind(MediaKind.movie).single;
+    expect(card.episodeCount, 1);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.light,
+        home: DetailPage(video: card),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('版本'), findsOneWidget);
+    expect(find.textContaining('第 1 季'), findsNothing);
+    await tester.tap(
+      find.byKey(ValueKey('detail-version-${videos.first.path}')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.textContaining(videos.first.path), findsOneWidget);
   });
 }

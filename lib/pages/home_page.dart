@@ -380,8 +380,11 @@ class _HomePageState extends State<HomePage>
           MediaLibrary.seriesTitleForDisplay(title),
         );
         if (normalized.isNotEmpty) title = normalized;
+        episodeLabel = MediaLibrary.episodeLabelOf(video);
+      } else if (library.versionsOf(aggregate).length > 1) {
+        // 多版本电影在最近播放里用画质标签区分，避免同名卡片看起来重复。
+        episodeLabel = MediaLibrary.versionBadgeOf(video);
       }
-      episodeLabel = MediaLibrary.episodeLabelOf(video);
     }
     return MediaItem(
       title: title,

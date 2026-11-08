@@ -51,7 +51,8 @@ class _DanmakuOverlayState extends State<DanmakuOverlay>
     lowerBound: 0,
     upperBound: 1,
   )..repeat();
-  final Map<String, TextPainter> _painterCache = <String, TextPainter>{};
+  final Map<String, _DanmakuTextPainters> _painterCache =
+      <String, _DanmakuTextPainters>{};
   final Map<String, double> _widthCache = <String, double>{};
 
   List<DanmakuComment>? _layoutComments;
@@ -85,31 +86,48 @@ class _DanmakuOverlayState extends State<DanmakuOverlay>
     super.dispose();
   }
 
-  TextPainter _textPainterFor(String text, int colorValue) {
+  _DanmakuTextPainters _textPaintersFor(String text, int colorValue) {
     final key = '$text\u0000$colorValue\u0000${widget.fontSize}';
-    var painter = _painterCache[key];
-    if (painter != null) return painter;
+    final cached = _painterCache[key];
+    if (cached != null) return cached;
     // 弹幕文本只前进不回头（回退进度条时重建少量即可），超限直接清空
     if (_painterCache.length > 600) _painterCache.clear();
-    final color = colorValue == 0
-        ? Colors.white
-        : Color(0xFF000000 | colorValue);
-    painter = TextPainter(
+    final alpha = widget.opacity.clamp(0.0, 1.0);
+    // B 站解析器约定：0 表示黑色弹幕，配白描边；其余颜色配黑描边。
+    final isBlack = colorValue == 0;
+    final color = isBlack ? Colors.black : Color(0xFF000000 | colorValue);
+    final strokeColor = isBlack ? Colors.white : Colors.black;
+    final baseStyle = TextStyle(
+      fontSize: widget.fontSize,
+      fontWeight: FontWeight.w600,
+    );
+    // B 站弹幕是「实心字 + 1px 纯黑描边」，不是带模糊半径的投影。
+    // 模糊黑影会把小字号文字糊成一团灰边，彩色弹幕也显得发闷。
+    final fill = TextPainter(
       text: TextSpan(
         text: text,
-        style: TextStyle(
-          color: color.withValues(alpha: widget.opacity.clamp(0.0, 1.0)),
-          fontSize: widget.fontSize,
-          fontWeight: FontWeight.w600,
-          shadows: const [
-            Shadow(blurRadius: 3, color: Colors.black87),
-            Shadow(blurRadius: 6, color: Colors.black54),
-          ],
+        style: baseStyle.copyWith(color: color.withValues(alpha: alpha)),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final strokeWidth = (widget.fontSize * 0.06).clamp(1.0, 2.0).toDouble();
+    final stroke = TextPainter(
+      text: TextSpan(
+        text: text,
+        style: baseStyle.copyWith(
+          foreground: Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = strokeWidth
+            ..strokeJoin = StrokeJoin.round
+            ..color = strokeColor.withValues(alpha: alpha),
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    return _painterCache[key] = painter;
+    return _painterCache[key] = _DanmakuTextPainters(
+      fill: fill,
+      stroke: stroke,
+    );
   }
 
   double _measureWidth(String text) {
@@ -168,7 +186,7 @@ class _DanmakuOverlayState extends State<DanmakuOverlay>
             painter: _DanmakuPainter(
               comments: widget.comments,
               clock: widget.clock,
-              painterFor: _textPainterFor,
+              paintersFor: _textPaintersFor,
               laneLayout: _laneLayoutFor(size),
               fontSize: widget.fontSize,
               lifetimeSeconds: widget.lifetimeSeconds,
@@ -186,7 +204,7 @@ class _DanmakuPainter extends CustomPainter {
   _DanmakuPainter({
     required this.comments,
     required this.clock,
-    required this.painterFor,
+    required this.paintersFor,
     required this.laneLayout,
     required this.fontSize,
     required this.lifetimeSeconds,
@@ -196,7 +214,7 @@ class _DanmakuPainter extends CustomPainter {
 
   final List<DanmakuComment> comments;
   final ValueListenable<double> clock;
-  final TextPainter Function(String text, int colorValue) painterFor;
+  final _DanmakuTextPainters Function(String text, int colorValue) paintersFor;
   final DanmakuLaneLayout laneLayout;
   final double fontSize;
   final double lifetimeSeconds;
@@ -232,7 +250,8 @@ class _DanmakuPainter extends CustomPainter {
       final elapsed = position - comment.timeSec;
       final lane = laneLayout.laneOf(i);
       if (lane < 0 || lane >= lanes) continue;
-      final painter = painterFor(comment.text, comment.color & 0xFFFFFF);
+      final textPainters = paintersFor(comment.text, comment.color & 0xFFFFFF);
+      final width = textPainters.width;
 
       if (comment.mode == 4 || comment.mode == 5) {
         // 顶部/底部固定弹幕，停留 4 秒
@@ -243,18 +262,18 @@ class _DanmakuPainter extends CustomPainter {
                     : size.height - 130.0 - lane * laneGap)
                 .clamp(54.0, size.height - 54)
                 .toDouble();
-        painter.paint(canvas, Offset((size.width - painter.width) / 2, top));
+        textPainters.paint(canvas, Offset((size.width - width) / 2, top));
         painted++;
         continue;
       }
 
       // 滚动弹幕：从右缘进入、完全离开视口即消失
       final progress = (elapsed / lifetimeSeconds).clamp(0.0, 1.0);
-      final left = size.width - progress * (size.width + painter.width + 40);
-      if (left + painter.width <= 0) continue;
+      final left = size.width - progress * (size.width + width + 40);
+      if (left + width <= 0) continue;
       final maxTop = (size.height - 90.0).clamp(54.0, size.height).toDouble();
       final top = (74.0 + lane * laneGap).clamp(54.0, maxTop).toDouble();
-      painter.paint(canvas, Offset(left, top));
+      textPainters.paint(canvas, Offset(left, top));
       painted++;
     }
   }
@@ -266,4 +285,19 @@ class _DanmakuPainter extends CustomPainter {
       oldDelegate.fontSize != fontSize ||
       oldDelegate.lifetimeSeconds != lifetimeSeconds ||
       oldDelegate.laneCount != laneCount;
+}
+
+/// 一条弹幕的填充与描边排版结果，绘制时先描边再填实心字。
+class _DanmakuTextPainters {
+  const _DanmakuTextPainters({required this.fill, required this.stroke});
+
+  final TextPainter fill;
+  final TextPainter stroke;
+
+  double get width => fill.width;
+
+  void paint(Canvas canvas, Offset offset) {
+    stroke.paint(canvas, offset);
+    fill.paint(canvas, offset);
+  }
 }

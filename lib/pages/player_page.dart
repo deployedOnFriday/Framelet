@@ -67,11 +67,17 @@ class _PlayerPageState extends State<PlayerPage> {
   double _positionSec = 0;
   double _durationSec = 0;
   double _lastSavedSec = 0;
+  bool _mediaReady = false;
 
   /// 上次触发界面重建的秒数（进度 UI 按秒节流）。
   int _lastUiSecond = -1;
   double _lastThumbnailSec = -100;
   bool _capturingThumbnail = false;
+
+  /// 常驻播放器会保留上一段视频的状态。新文件真正 open 完成前，
+  /// 忽略 position/duration/completed 等旧事件，避免把上一集当成当前集。
+  bool _acceptStreamEvents = false;
+  int _openGeneration = 0;
 
   /// 当前这集的续播位置：切集后按各集自己的历史进度回跳。
   /// 旧版用 widget.startPosition，切到下一集也会被第一集的进度带偏。
@@ -159,6 +165,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _playlist = resolved.length > 1 ? resolved : (provided ?? [widget.video]);
     }
     _positionSub = _player.stream.position.listen((position) {
+      if (!_acceptStreamEvents) return;
       _positionSec = position.inMilliseconds / 1000;
       // 弹幕层逐帧时钟（ValueNotifier，不触发整页重建）
       _danmakuClock.value = _positionSec;
@@ -173,26 +180,14 @@ class _PlayerPageState extends State<PlayerPage> {
       final second = position.inSeconds;
       if (mounted && second != _lastUiSecond) {
         _lastUiSecond = second;
-        setState(() {});
+        setState(() {
+          if (_durationSec > 0 && _positionSec > 1) _mediaReady = true;
+        });
       }
     });
     _durationSub = _player.stream.duration.listen((duration) {
-      final wasZero = _durationSec <= 0;
-      _durationSec = duration.inMilliseconds / 1000;
-      if (wasZero && _durationSec > 0) {
-        _debugLog('视频已就绪，时长 ${_durationSec.toStringAsFixed(1)} 秒');
-      }
-      if (mounted) setState(() {});
-      if (!_seekedToStart && _durationSec > 0) {
-        _seekedToStart = true;
-        final start = _resumeTarget ?? 0;
-        if (start > 1) {
-          // 从上次进度继续，按设置回退若干秒帮助衔接剧情
-          final target = (start - PlaybackPreferences.instance.rewindSeconds)
-              .clamp(0.0, _durationSec - 5);
-          _player.seek(Duration(milliseconds: (target * 1000).round()));
-        }
-      }
+      if (!_acceptStreamEvents) return;
+      _handleDuration(duration);
     });
     _errorSub = _player.stream.error.listen((error) {
       _debugLog('mpv error: $error');
@@ -202,7 +197,12 @@ class _PlayerPageState extends State<PlayerPage> {
     });
     // 播完自动连播：记录完播进度后切下一集
     _completedSub = _player.stream.completed.listen((completed) async {
-      if (!completed || _advancing || _durationSec <= 0) return;
+      if (!_acceptStreamEvents ||
+          !completed ||
+          _advancing ||
+          _durationSec <= 0) {
+        return;
+      }
       await _recordProgress(finished: true);
       if (_hasNext && PlaybackPreferences.instance.autoPlayNext) {
         _advancing = true;
@@ -221,7 +221,12 @@ class _PlayerPageState extends State<PlayerPage> {
     });
     // 暂停时立即存档
     _playingSub = _player.stream.playing.listen((playing) async {
-      if (playing || _durationSec <= 0 || _positionSec <= 1) return;
+      if (!_acceptStreamEvents ||
+          playing ||
+          _durationSec <= 0 ||
+          _positionSec <= 1) {
+        return;
+      }
       await _recordProgress();
       await _captureThumbnail();
     });
@@ -245,6 +250,29 @@ class _PlayerPageState extends State<PlayerPage> {
     // 默认倍速来自 设置 → 播放
     _speed = PlaybackPreferences.instance.defaultSpeed;
     _open(initial: true);
+  }
+
+  void _handleDuration(Duration duration) {
+    final wasZero = _durationSec <= 0;
+    _durationSec = duration.inMilliseconds / 1000;
+    if (wasZero && _durationSec > 0) {
+      _debugLog('视频已就绪，时长 ${_durationSec.toStringAsFixed(1)} 秒');
+    }
+    if (mounted) {
+      setState(() {
+        if (_durationSec > 0 && _positionSec > 1) _mediaReady = true;
+      });
+    }
+    if (!_seekedToStart && _durationSec > 0) {
+      _seekedToStart = true;
+      final start = _resumeTarget ?? 0;
+      if (start > 1) {
+        // 从上次进度继续，按设置回退若干秒帮助衔接剧情
+        final target = (start - PlaybackPreferences.instance.rewindSeconds)
+            .clamp(0.0, _durationSec - 5);
+        _player.seek(Duration(milliseconds: (target * 1000).round()));
+      }
+    }
   }
 
   /// 启动时恢复上次的音量与静音状态（「记住音量」开启时）。
@@ -392,13 +420,16 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _switchTo(ScannedVideo video, {String? osd}) async {
     if (video.path == _current.path) return;
     await _recordProgress();
+    _acceptStreamEvents = false;
     setState(() {
       _current = video;
       _positionSec = 0;
       _durationSec = 0;
       _lastSavedSec = 0;
       _lastThumbnailSec = -100;
+      _lastUiSecond = -1;
       _seekedToStart = false;
+      _mediaReady = false;
       _errorMessage = null;
       _probeResult = null;
       _danmakuComments = const [];
@@ -412,6 +443,11 @@ class _PlayerPageState extends State<PlayerPage> {
   }
 
   Future<void> _open({bool initial = false}) async {
+    final generation = ++_openGeneration;
+    _acceptStreamEvents = false;
+    if (_mediaReady && mounted) {
+      setState(() => _mediaReady = false);
+    }
     _resumeTarget = initial
         ? (widget.startPosition ?? _resumePositionOf(_current))
         : _resumePositionOf(_current);
@@ -435,6 +471,7 @@ class _PlayerPageState extends State<PlayerPage> {
         source,
         _current.path,
       );
+      if (!mounted || generation != _openGeneration) return;
       url = playTarget.url;
       final auth = WebDavService.authHeader(source.username, authPassword);
       _probe(url, auth);
@@ -468,6 +505,10 @@ class _PlayerPageState extends State<PlayerPage> {
 
     try {
       await _player.open(Media(url.toString(), httpHeaders: headers));
+      if (!mounted || generation != _openGeneration) return;
+      _acceptStreamEvents = true;
+      final duration = _player.state.duration;
+      if (duration > Duration.zero) _handleDuration(duration);
       await _player.setRate(_speed);
       _debugLog('open() 调用完成');
       unawaited(_loadSubtitleFiles(source, authPassword));
@@ -477,9 +518,13 @@ class _PlayerPageState extends State<PlayerPage> {
         unawaited(_loadDanmaku());
       }
     } catch (error) {
+      if (generation == _openGeneration) _acceptStreamEvents = false;
       _debugLog('open() 异常: $error');
-      if (mounted) {
-        setState(() => _errorMessage = MediaLibrary.describeError(error));
+      if (mounted && generation == _openGeneration) {
+        setState(() {
+          _mediaReady = false;
+          _errorMessage = MediaLibrary.describeError(error);
+        });
       }
     }
   }
@@ -729,7 +774,9 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 截取当前暂停帧并写入播放历史，供最近播放卡片展示。
   Future<void> _captureThumbnail() async {
-    if (!mounted || _durationSec <= 0 || _positionSec <= 1) return;
+    if (!mounted || !_mediaReady || _durationSec <= 0 || _positionSec <= 1) {
+      return;
+    }
     if (_capturingThumbnail) return;
     final position = _positionSec;
     if ((position - _lastThumbnailSec).abs() < 3) return;
@@ -739,6 +786,7 @@ class _PlayerPageState extends State<PlayerPage> {
     try {
       final bytes = await _player.screenshot(format: 'image/jpeg');
       if (bytes == null || bytes.isEmpty) return;
+      if (!mounted || videoPath != _current.path) return;
       final path = await ThumbnailService.save(bytes, sourceId, videoPath);
       if (path == null) return;
       _lastThumbnailSec = position;
@@ -1350,9 +1398,9 @@ class _PlayerPageState extends State<PlayerPage> {
                         const Spacer(),
                         TextButton(
                           onPressed: () {
-                            unawaited(prefs.setDanmakuFontSize(18));
+                            unawaited(prefs.setDanmakuFontSize(25));
                             unawaited(prefs.setDanmakuOpacity(1));
-                            unawaited(prefs.setDanmakuLifetime(16));
+                            unawaited(prefs.setDanmakuLifetime(9));
                             unawaited(prefs.setDanmakuLanes(7));
                             setSheetState(() {});
                           },
@@ -1390,9 +1438,9 @@ class _PlayerPageState extends State<PlayerPage> {
                       label: '滚动时长（越大越慢）',
                       valueLabel:
                           '${prefs.danmakuLifetime.toStringAsFixed(0)} 秒/屏',
-                      min: 12,
+                      min: 4,
                       max: 24,
-                      divisions: 12,
+                      divisions: 20,
                       value: prefs.danmakuLifetime,
                       onChanged: (value) =>
                           unawaited(prefs.setDanmakuLifetime(value)),
@@ -1693,106 +1741,112 @@ class _PlayerPageState extends State<PlayerPage> {
               ),
             ),
           ),
-          if (_durationSec <= 0)
+          if (!_mediaReady && _errorMessage == null)
             const Positioned.fill(
-              child: IgnorePointer(
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 34,
-                        height: 34,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2.6,
-                          color: Colors.white54,
+              child: ColoredBox(
+                color: Colors.black,
+                child: IgnorePointer(
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 34,
+                          height: 34,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.6,
+                            color: Colors.white54,
+                          ),
                         ),
-                      ),
-                      SizedBox(height: 16),
-                      Text(
-                        '正在打开视频…',
-                        style: TextStyle(color: Colors.white54, fontSize: 13),
-                      ),
-                    ],
+                        SizedBox(height: 16),
+                        Text(
+                          '正在打开视频…',
+                          style: TextStyle(color: Colors.white54, fontSize: 13),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
             ),
-          if (_errorMessage != null && _durationSec <= 0)
+          if (_errorMessage != null && !_mediaReady)
             Positioned.fill(
-              child: Center(
-                child: Container(
-                  constraints: BoxConstraints(
-                    maxWidth: 560,
-                    maxHeight: MediaQuery.of(context).size.height * 0.75,
-                  ),
-                  margin: const EdgeInsets.symmetric(horizontal: 40),
-                  padding: const EdgeInsets.all(24),
-                  decoration: BoxDecoration(
-                    color: Colors.black87,
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(color: Colors.white24),
-                  ),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.error_outline_rounded,
-                          color: Colors.redAccent,
-                          size: 40,
-                        ),
-                        const SizedBox(height: 14),
-                        const Text(
-                          '播放失败',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 17,
-                            fontWeight: FontWeight.w600,
+              child: ColoredBox(
+                color: Colors.black,
+                child: Center(
+                  child: Container(
+                    constraints: BoxConstraints(
+                      maxWidth: 560,
+                      maxHeight: MediaQuery.of(context).size.height * 0.75,
+                    ),
+                    margin: const EdgeInsets.symmetric(horizontal: 40),
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.error_outline_rounded,
+                            color: Colors.redAccent,
+                            size: 40,
                           ),
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          _errorMessage!,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 13,
-                            height: 1.6,
-                          ),
-                        ),
-                        if (_probeResult != null) ...[
                           const SizedBox(height: 14),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: Colors.white10,
-                              borderRadius: BorderRadius.circular(8),
+                          const Text(
+                            '播放失败',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
                             ),
-                            child: Text(
-                              '地址自检：$_probeResult',
-                              style: const TextStyle(
-                                color: Colors.amberAccent,
-                                fontSize: 12,
-                                height: 1.5,
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            _errorMessage!,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 13,
+                              height: 1.6,
+                            ),
+                          ),
+                          if (_probeResult != null) ...[
+                            const SizedBox(height: 14),
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: Colors.white10,
+                                borderRadius: BorderRadius.circular(8),
                               ),
+                              child: Text(
+                                '地址自检：$_probeResult',
+                                style: const TextStyle(
+                                  color: Colors.amberAccent,
+                                  fontSize: 12,
+                                  height: 1.5,
+                                ),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 16),
+                          Text(
+                            _probeLooksLikeWebPage
+                                ? '服务器返回的是网页而不是视频文件：请检查媒体源地址'
+                                      '是否为 WebDAV 地址（AList 通常以 /dav 结尾）。'
+                                : '请检查媒体源密码是否变更，或稍后重试',
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: Colors.white38,
+                              fontSize: 12,
                             ),
                           ),
                         ],
-                        const SizedBox(height: 16),
-                        Text(
-                          _probeLooksLikeWebPage
-                              ? '服务器返回的是网页而不是视频文件：请检查媒体源地址'
-                                    '是否为 WebDAV 地址（AList 通常以 /dav 结尾）。'
-                              : '请检查媒体源密码是否变更，或稍后重试',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white38,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),

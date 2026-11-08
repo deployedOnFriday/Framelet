@@ -123,6 +123,12 @@ void main() {
     expect(MediaLibrary.aggregate(_mergedMovieVideos()).length, greaterThan(1));
     final cards = library.byKind(MediaKind.movie);
     expect(cards, hasLength(1));
+    expect(cards.single.episodeCount, 1);
+    expect(library.seasonsOf(cards.single), hasLength(1));
+    final versions = library.versionsOf(cards.single);
+    expect(versions, hasLength(3));
+    expect(versions.first.path, contains('2160p'));
+    expect(MediaLibrary.versionLabelOf(versions.first), contains('4K'));
 
     await library.hideItem(cards.single, displayName: '长安的荔枝');
     expect(library.byKind(MediaKind.movie), isEmpty);
