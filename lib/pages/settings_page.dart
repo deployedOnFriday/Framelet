@@ -241,7 +241,10 @@ class _SettingsPageState extends State<SettingsPage>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: TextStyle(fontSize: 13.5, color: context.colors.text)),
+                Text(
+                  title,
+                  style: TextStyle(fontSize: 13.5, color: context.colors.text),
+                ),
                 const SizedBox(height: 2),
                 Text(
                   subtitle,
@@ -275,9 +278,15 @@ class _SettingsPageState extends State<SettingsPage>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(title, style: TextStyle(fontSize: 13.5, color: context.colors.text)),
+          Text(
+            title,
+            style: TextStyle(fontSize: 13.5, color: context.colors.text),
+          ),
           const SizedBox(height: 2),
-          Text(subtitle, style: TextStyle(fontSize: 11.5, color: context.colors.muted)),
+          Text(
+            subtitle,
+            style: TextStyle(fontSize: 11.5, color: context.colors.muted),
+          ),
           const SizedBox(height: 12),
           Wrap(
             spacing: 8,
@@ -301,8 +310,9 @@ class _SettingsPageState extends State<SettingsPage>
                     color: option.value == current
                         ? context.colors.primary
                         : context.colors.muted,
-                    fontWeight:
-                        option.value == current ? FontWeight.w600 : FontWeight.w400,
+                    fontWeight: option.value == current
+                        ? FontWeight.w600
+                        : FontWeight.w400,
                   ),
                   onSelected: (_) => onChanged(option.value),
                 ),
@@ -1006,79 +1016,21 @@ class _SettingsPageState extends State<SettingsPage>
                 padding: EdgeInsets.symmetric(vertical: 48),
                 child: Center(child: Text('还没有媒体源，点击右上角添加')),
               ),
-            _buildHiddenItems(context, library),
+            _buildHiddenEntry(library),
           ],
         );
       },
     );
   }
 
-  /// 已隐藏影片管理：逐条「恢复显示」。无隐藏条目时不占位。
-  Widget _buildHiddenItems(BuildContext context, MediaLibrary library) {
+  /// 已隐藏影片入口：只显示摘要卡片，点进去才是逐条恢复的二级页面，
+  /// 与未匹配内容保持一致，避免隐藏多了把媒体源设置铺满。
+  Widget _buildHiddenEntry(MediaLibrary library) {
     final hidden = library.hiddenItems;
     if (hidden.isEmpty) return const SizedBox.shrink();
-    return Container(
-      margin: const EdgeInsets.only(top: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: context.colors.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: context.colors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '已隐藏影片（${hidden.length}）',
-            style: TextStyle(
-              fontSize: 13.5,
-              fontWeight: FontWeight.w700,
-              color: context.colors.text,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '这些条目不显示在海报墙、也不参与刮削，点「恢复」即可重新显示',
-            style: TextStyle(fontSize: 11.5, color: context.colors.muted),
-          ),
-          const SizedBox(height: 10),
-          ...hidden.entries.map(
-            (entry) => Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      entry.value,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        color: context.colors.text,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  SizedBox(
-                    height: 30,
-                    child: OutlinedButton(
-                      onPressed: () =>
-                          MediaLibrary.instance.unhideItem(entry.key),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: context.colors.primary,
-                        side: BorderSide(color: context.colors.primary),
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        textStyle: const TextStyle(fontSize: 12),
-                      ),
-                      child: const Text('恢复'),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: _HiddenEntry(count: hidden.length),
     );
   }
 
@@ -1409,6 +1361,152 @@ class _SettingsPageState extends State<SettingsPage>
   }
 }
 
+/// 已隐藏影片入口：与未匹配内容同样的摘要卡片，点进去逐条恢复。
+class _HiddenEntry extends StatelessWidget {
+  const _HiddenEntry({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: context.colors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: context.colors.border),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => Navigator.of(context)
+            .push(MaterialPageRoute<void>(builder: (_) => const _HiddenPage())),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '已隐藏影片（$count）',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                        color: context.colors.text,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '这些条目不显示在海报墙、最近播放与未匹配列表，点进去可恢复显示',
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: context.colors.muted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 10),
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 22,
+                color: context.colors.muted,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 已隐藏影片二级页：逐条「恢复显示」，恢复后实时从列表消失。
+class _HiddenPage extends StatelessWidget {
+  const _HiddenPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('已隐藏影片')),
+      body: AnimatedBuilder(
+        animation: MediaLibrary.instance,
+        builder: (context, _) {
+          final hidden = MediaLibrary.instance.hiddenItems;
+          if (hidden.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.visibility_rounded,
+                    size: 44,
+                    color: context.colors.muted,
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    '没有隐藏的影片',
+                    style: TextStyle(
+                      fontSize: 13.5,
+                      color: context.colors.muted,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+          return ListView.separated(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            itemCount: hidden.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 8),
+            itemBuilder: (context, index) {
+              final entry = hidden.entries.elementAt(index);
+              return Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: context.colors.surface,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: context.colors.border),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        entry.value,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: context.colors.text,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    SizedBox(
+                      height: 34,
+                      child: OutlinedButton.icon(
+                        onPressed: () =>
+                            MediaLibrary.instance.unhideItem(entry.key),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: context.colors.primary,
+                          side: BorderSide(color: context.colors.primary),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          textStyle: const TextStyle(fontSize: 12.5),
+                        ),
+                        icon: const Icon(Icons.visibility_rounded, size: 16),
+                        label: const Text('恢复'),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
 /// 未匹配内容入口：只显示一条摘要卡片，点进去才是逐条匹配的二级页面，
 /// 避免几十个未匹配条目把刮削设置页铺满。
 class _UnmatchedEntry extends StatelessWidget {
@@ -1426,11 +1524,9 @@ class _UnmatchedEntry extends StatelessWidget {
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => const _UnmatchedPage(),
-          ),
-        ),
+        onTap: () => Navigator.of(
+          context,
+        ).push(MaterialPageRoute<void>(builder: (_) => const _UnmatchedPage())),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
@@ -1584,10 +1680,7 @@ class _UnmatchedPage extends StatelessWidget {
                           padding: const EdgeInsets.symmetric(horizontal: 12),
                           textStyle: const TextStyle(fontSize: 12.5),
                         ),
-                        icon: const Icon(
-                          Icons.manage_search_rounded,
-                          size: 16,
-                        ),
+                        icon: const Icon(Icons.manage_search_rounded, size: 16),
                         label: const Text('匹配'),
                       ),
                     ),
@@ -1738,10 +1831,7 @@ class _MediaSourceCard extends StatelessWidget {
               ),
               Text(
                 source.enabled ? '显示' : '已隐藏',
-                style: TextStyle(
-                  fontSize: 10,
-                  color: context.colors.muted,
-                ),
+                style: TextStyle(fontSize: 10, color: context.colors.muted),
               ),
             ],
           ),
@@ -2402,9 +2492,7 @@ class _UpdateCardState extends State<_UpdateCard> {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(content: Text('安装程序已启动，按向导完成升级即可')),
-      );
+      ..showSnackBar(const SnackBar(content: Text('安装程序已启动，按向导完成升级即可')));
   }
 
   void _openReleasePage() {
@@ -2443,10 +2531,7 @@ class _UpdateCardState extends State<_UpdateCard> {
           ),
           const SizedBox(height: 8),
           if (_error != null)
-            Text(
-              _error!,
-              style: TextStyle(fontSize: 12, color: colors.danger),
-            ),
+            Text(_error!, style: TextStyle(fontSize: 12, color: colors.danger)),
           if (_status != null)
             Text(
               _status!,

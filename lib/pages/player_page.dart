@@ -110,8 +110,10 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _muted = false;
   Timer? _volumePersistTimer;
 
-  // OSD 提示（倍速/音量/快进快退/连播）
-  String? _osdMessage;
+  // OSD 提示（倍速/音量/快进快退/连播/弹幕匹配结果）。
+  // 必须用 ValueNotifier：media_kit 全屏会把 controls 复制到一个新路由，
+  // 页面级 setState 不会重建那棵子树，只有共享的 Listenable 能同步过去。
+  final ValueNotifier<String?> _osdMessage = ValueNotifier<String?>(null);
   Timer? _osdTimer;
 
   /// 自动连播进行中，防止 completed 重复触发。
@@ -276,6 +278,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _trackSub?.cancel();
     _volumePersistTimer?.cancel();
     _osdTimer?.cancel();
+    _osdMessage.dispose();
     _focusNode.dispose();
     // 常驻播放器：只停播、不销毁（见 PlayerHost）。mpv 的 render
     // context 释放与 terminate 都是同步 FFI，逐次销毁正是退出卡顿
@@ -589,7 +592,10 @@ class _PlayerPageState extends State<PlayerPage> {
         _debugLog('弹幕搜索完成: ${candidates.length} 个源');
         if (!mounted) return;
         if (candidates.isEmpty) {
-          _showOsd('没有找到「$query」第 $episodeNumber 集的弹幕');
+          _showOsd(
+            '没有找到「$query」第 $episodeNumber 集的弹幕',
+            duration: const Duration(seconds: 4),
+          );
           return;
         }
         setState(() => _danmakuCandidates = candidates);
@@ -628,13 +634,20 @@ class _PlayerPageState extends State<PlayerPage> {
             : coverageHint ??
                   '弹幕已匹配「${selected.animeTitle} · ${selected.episodeTitle}」'
                       ' · ${comments.length} 条',
+        duration: comments.isEmpty
+            ? const Duration(seconds: 4)
+            : const Duration(milliseconds: 1800),
       );
     } on DanmakuException catch (error) {
       _debugLog('弹幕加载失败: ${error.message}');
-      if (mounted) _showOsd(error.message);
+      if (mounted) {
+        _showOsd(error.message, duration: const Duration(seconds: 4));
+      }
     } catch (error) {
       _debugLog('弹幕加载异常: $error');
-      if (mounted) _showOsd('弹幕加载失败：$error');
+      if (mounted) {
+        _showOsd('弹幕加载失败：$error', duration: const Duration(seconds: 4));
+      }
     } finally {
       if (mounted) setState(() => _loadingDanmaku = false);
     }
@@ -729,12 +742,15 @@ class _PlayerPageState extends State<PlayerPage> {
   // OSD 提示
   // ---------------------------------------------------------------------------
 
-  void _showOsd(String message) {
+  void _showOsd(
+    String message, {
+    Duration duration = const Duration(milliseconds: 1800),
+  }) {
     _osdTimer?.cancel();
     if (!mounted) return;
-    setState(() => _osdMessage = message);
-    _osdTimer = Timer(const Duration(milliseconds: 1600), () {
-      if (mounted) setState(() => _osdMessage = null);
+    _osdMessage.value = message;
+    _osdTimer = Timer(duration, () {
+      if (mounted) _osdMessage.value = null;
     });
   }
 
@@ -1537,35 +1553,87 @@ class _PlayerPageState extends State<PlayerPage> {
     if (!_danmakuEnabled || _danmakuComments.isEmpty) {
       return const SizedBox.shrink();
     }
-    final last = _danmakuComments.last.timeSec;
-    if (_positionSec > last + 1) {
-      return IgnorePointer(
-        child: Align(
-          alignment: Alignment.topCenter,
-          child: Container(
-            margin: const EdgeInsets.only(top: 84),
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(
-              color: Colors.black54,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              '当前进度暂无弹幕 · 该集弹幕止于 ${_clockText(last)}',
-              style: const TextStyle(color: Colors.white54, fontSize: 12),
-            ),
-          ),
-        ),
-      );
-    }
     final prefs = PlaybackPreferences.instance;
-    // Canvas 绘制：TextPainter 缓存 + ticker 驱动，不随播放页整页重建
-    return DanmakuOverlay(
-      comments: _danmakuComments,
-      clock: _danmakuClock,
-      fontSize: prefs.danmakuFontSize,
-      opacity: prefs.danmakuOpacity,
-      lifetimeSeconds: prefs.danmakuLifetime,
-      laneCount: prefs.danmakuLanes,
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Canvas 绘制：TextPainter 缓存 + ticker 驱动，不随播放页整页重建
+        DanmakuOverlay(
+          comments: _danmakuComments,
+          clock: _danmakuClock,
+          fontSize: prefs.danmakuFontSize,
+          opacity: prefs.danmakuOpacity,
+          lifetimeSeconds: prefs.danmakuLifetime,
+          laneCount: prefs.danmakuLanes,
+        ),
+        // 进度越过最后一颗弹幕时的解释：用共享时钟驱动，全屏路由里
+        // 也能随播放进度出现，而不是停在进入全屏那一刻的状态。
+        ValueListenableBuilder<double>(
+          valueListenable: _danmakuClock,
+          builder: (context, position, _) {
+            final last = _danmakuComments.last.timeSec;
+            if (position <= last + 1) return const SizedBox.shrink();
+            return IgnorePointer(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Container(
+                  margin: const EdgeInsets.only(top: 84),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '当前进度暂无弹幕 · 该集弹幕止于 ${_clockText(last)}',
+                    style: const TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  /// OSD 放进 Video 的 controls 子树：media_kit 全屏时只复制 controls，
+  /// 页面级 Stack 上的提示在全屏里看不到。
+  Widget _buildOsdOverlay() {
+    return Positioned(
+      top: 72,
+      left: 0,
+      right: 0,
+      child: ValueListenableBuilder<String?>(
+        valueListenable: _osdMessage,
+        builder: (context, message, _) {
+          if (message == null) return const SizedBox.shrink();
+          return IgnorePointer(
+            child: Center(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black54,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  message,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
     );
   }
 
@@ -1602,6 +1670,7 @@ class _PlayerPageState extends State<PlayerPage> {
                           Positioned.fill(
                             child: MaterialDesktopVideoControls(state),
                           ),
+                          _buildOsdOverlay(),
                         ],
                       ),
               ),
@@ -1712,35 +1781,6 @@ class _PlayerPageState extends State<PlayerPage> {
                 ),
               ),
             ),
-          // OSD 提示：音量/倍速/快进快退/连播
-          if (_osdMessage != null)
-            Positioned(
-              top: 64,
-              left: 0,
-              right: 0,
-              child: IgnorePointer(
-                child: Center(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 8,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black54,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Text(
-                      _osdMessage!,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
           // 顶部标题栏：固定在顶部，避免被 StackFit.expand 拉到全屏居中
           Positioned(
             top: 0,
@@ -1798,6 +1838,9 @@ class _PlayerPageState extends State<PlayerPage> {
     final multi = _playlist.length > 1;
     return MaterialDesktopVideoControlsThemeData(
       keyboardShortcuts: const {},
+      // 内建点击播放/暂停默认关闭；这里开启后，点击画面中间（避开底部
+      // 进度条区域）即可暂停/继续，普通与全屏共用同一套主题。
+      playAndPauseOnTap: true,
       bottomButtonBar: [
         if (multi)
           _ControlIconButton(

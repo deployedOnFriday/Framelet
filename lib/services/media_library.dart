@@ -113,43 +113,128 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   // ---------------------------------------------------------------------------
-  // 影片隐藏：按条目粒度「不显示、不刮削」，与源级开关互补。
-  // 键为 'sourceId|聚合条目 path'，持久化到 app_meta.hidden_items。
+  // 影片隐藏：按「海报卡」粒度隐藏，与源级开关互补。
+  //
+  // 隐藏键必须与 byKind 的展示合并键（_seriesMergeKey）一致：同一张海报
+  // 可能由同目录多个文件 / 多条聚合条目合并而来（例如片头片尾被刮成同一个
+  // TMDB 条目）。只按某条聚合条目的 path 隐藏，重扫或重新聚类后其余条目
+  // 仍会把同一张卡刷回首页。
   // ---------------------------------------------------------------------------
 
-  final Map<String, String> _hiddenItems = {}; // key -> 显示名
+  /// 隐藏键 -> 显示名（新格式，键为 _seriesMergeKey）。
+  final Map<String, String> _hiddenCards = {};
 
-  bool _isHidden(ScannedVideo video) =>
-      _hiddenItems.containsKey('${video.sourceId}|${video.path}');
+  /// 旧版按 'sourceId|path' 隐藏的记录，启动迁移后合并进 _hiddenCards。
+  final Map<String, String> _legacyHiddenPaths = {};
+
+  bool _isHidden(ScannedVideo video) {
+    if (_hiddenCards.containsKey(_seriesMergeKey(video))) return true;
+    return _legacyHiddenPaths.containsKey('${video.sourceId}|${video.path}');
+  }
+
+  /// 某条原始视频是否属于已隐藏的海报卡（首页最近播放等入口使用）。
+  bool isHiddenVideo(ScannedVideo video) =>
+      _isHidden(video) || _isHidden(aggregateOf(video));
 
   /// 已隐藏影片（key -> 显示名），供设置页管理列表。
-  Map<String, String> get hiddenItems => Map.unmodifiable(_hiddenItems);
+  Map<String, String> get hiddenItems =>
+      Map.unmodifiable({..._legacyHiddenPaths, ..._hiddenCards});
 
-  Future<void> hideItem(ScannedVideo video) async {
-    final key = '${video.sourceId}|${video.path}';
-    if (_hiddenItems.containsKey(key)) return;
-    _hiddenItems[key] = video.title;
-    await _db.saveMeta('hidden_items', jsonEncode(_hiddenItems));
+  Future<void> hideItem(ScannedVideo video, {String? displayName}) async {
+    final key = _seriesMergeKey(video);
+    if (_hiddenCards.containsKey(key)) return;
+    final name = (displayName ?? '').trim().isEmpty
+        ? video.title
+        : displayName!.trim();
+    _hiddenCards[key] = name;
+    await _db.saveMeta('hidden_cards', jsonEncode(_hiddenCards));
     notifyListeners();
   }
 
   Future<void> unhideItem(String key) async {
-    if (_hiddenItems.remove(key) == null) return;
-    await _db.saveMeta('hidden_items', jsonEncode(_hiddenItems));
+    final removed = _hiddenCards.remove(key) ?? _legacyHiddenPaths.remove(key);
+    if (removed == null) return;
+    await _db.saveMeta('hidden_cards', jsonEncode(_hiddenCards));
+    await _db.saveMeta('hidden_items', jsonEncode(_legacyHiddenPaths));
     notifyListeners();
   }
 
   Future<void> _loadHiddenItems() async {
-    final raw = await _db.loadMeta('hidden_items');
-    if (raw == null || raw.isEmpty) return;
     try {
-      final map = jsonDecode(raw) as Map<String, Object?>;
-      _hiddenItems
-        ..clear()
-        ..addAll(map.map((k, v) => MapEntry(k, v as String)));
+      final raw = await _db.loadMeta('hidden_cards');
+      if (raw != null && raw.isNotEmpty) {
+        final map = jsonDecode(raw) as Map<String, Object?>;
+        _hiddenCards
+          ..clear()
+          ..addAll(map.map((k, v) => MapEntry(k, v as String)));
+      }
+      final legacy = await _db.loadMeta('hidden_items');
+      if (legacy != null && legacy.isNotEmpty) {
+        final map = jsonDecode(legacy) as Map<String, Object?>;
+        _legacyHiddenPaths
+          ..clear()
+          ..addAll(map.map((k, v) => MapEntry(k, v as String)));
+      }
     } catch (_) {
       // 配置损坏时从空开始，不影响其余功能。
     }
+  }
+
+  /// 把旧版「按文件路径隐藏」迁移成「按海报卡隐藏」。
+  ///
+  /// 必须等 videos 读入后才能知道每条路径对应哪个合并键；找不到对应
+  /// 条目的旧记录原样保留，宁可继续生效也不丢用户的隐藏操作。
+  Future<void> _migrateLegacyHiddenPaths() async {
+    if (_legacyHiddenPaths.isEmpty) return;
+    var changed = false;
+    for (final entry in Map<String, String>.of(_legacyHiddenPaths).entries) {
+      final separator = entry.key.indexOf('|');
+      if (separator <= 0) continue;
+      final sourceId = entry.key.substring(0, separator);
+      final path = entry.key.substring(separator + 1);
+      final videos = _videosBySource[sourceId] ?? const <ScannedVideo>[];
+      if (videos.isEmpty) continue;
+      final raw = videos.where((video) => video.path == path).firstOrNull;
+      // 旧版可能把片头片尾当成影片隐藏了。现在这类文件已不再进入
+      // 媒体库，保留隐藏记录只会在设置里留下一个并不存在的条目。
+      if (raw != null && _isExtraGroup(parentPathOf(raw.path), [raw])) {
+        _legacyHiddenPaths.remove(entry.key);
+        changed = true;
+        continue;
+      }
+      final aggregated = aggregate(videos);
+      final targetParent = parentPathOf(path);
+      final candidates = aggregated.where((item) {
+        if (item.path == path) return true;
+        if (parentPathOf(item.path) != targetParent) return false;
+        if (raw == null) return false;
+        // 同一张卡可能由多个聚合条目合并：优先按 TMDB 身份找齐，
+        // 没有 TMDB 时再退回合并键 / 标题匹配。
+        if (raw.tmdbId != null && item.tmdbId == raw.tmdbId) return true;
+        return _seriesMergeKey(item) == _seriesMergeKey(raw) ||
+            item.title == raw.title;
+      }).toList();
+      if (candidates.isEmpty) {
+        final sameFolder = aggregated
+            .where((item) => parentPathOf(item.path) == targetParent)
+            .toList();
+        if (sameFolder.length == 1) candidates.add(sameFolder.single);
+      }
+      for (final item in candidates) {
+        _hiddenCards.putIfAbsent(
+          _seriesMergeKey(item),
+          () => entry.value.trim().isEmpty ? item.title : entry.value,
+        );
+      }
+      if (candidates.isNotEmpty) {
+        _legacyHiddenPaths.remove(entry.key);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    await _db.saveMeta('hidden_cards', jsonEncode(_hiddenCards));
+    await _db.saveMeta('hidden_items', jsonEncode(_legacyHiddenPaths));
+    notifyListeners();
   }
 
   /// 按 sourceId + 路径精确查找原始扫描条目（用于从播放历史续播）。
@@ -259,6 +344,7 @@ class MediaLibrary extends ChangeNotifier {
     for (final entry in _videosBySource.entries) {
       if (!sourceEnabled(entry.key)) continue;
       for (final item in _aggregated(entry.key)) {
+        if (_isHidden(item)) continue;
         if (_seriesMergeKey(item) == key) seasons.add(item);
       }
     }
@@ -518,6 +604,7 @@ class MediaLibrary extends ChangeNotifier {
       _videosBySource.addAll(await _db.loadVideos());
       notifyListeners();
       await _migrateKinds();
+      await _migrateLegacyHiddenPaths();
     } catch (_) {
       // 配置损坏时宁可重新添加，也不让应用崩溃。
     }
@@ -950,8 +1037,7 @@ class MediaLibrary extends ChangeNotifier {
           waited += 2;
         }
         if (!ScraperService.tmdbCoolingDown) {
-          scrapeProgress =
-              '线路恢复，自动重试 ${networkFailedJobs.length} 个任务…';
+          scrapeProgress = '线路恢复，自动重试 ${networkFailedJobs.length} 个任务…';
           notifyListeners();
           for (final job in networkFailedJobs) {
             // 首轮已计入进度，重试前先扣回，避免重复计数
@@ -1003,214 +1089,214 @@ class MediaLibrary extends ChangeNotifier {
   Future<bool> _processScrapeJob(
     ({ScannedVideo representative, List<ScannedVideo> group}) job,
   ) async {
-        scrapeProgress = '正在匹配「${job.representative.title}」…';
-        _scrapeLog(
-          '任务 $scrapeDone+: ${job.representative.title}（${job.group.length} 集）',
+    scrapeProgress = '正在匹配「${job.representative.title}」…';
+    _scrapeLog(
+      '任务 $scrapeDone+: ${job.representative.title}（${job.group.length} 集）',
+    );
+    notifyListeners();
+
+    final parsed = ScraperService.parseTitle(job.representative.title);
+    final preferTv =
+        job.group.length > 1 || job.representative.kind != MediaKind.movie;
+    final isSeriesJob = job.group.length > 1;
+    final seasonNumber = seasonOf(job.representative);
+    var matched = false;
+
+    // 候选评估：拉详情 + 目标季集数据，满足要求才算命中。
+    // TMDB 上存在残缺的重复条目（如「旋风少女2」只登记了 1 季 1 集，
+    // 而主条目「旋风少女」自带两季）——精确同名反而先命中它们，
+    // 表现为多季拆成多个条目、整季集标题与剧照拉空。
+    // 剧集因此要求目标季能拉到集数据；拉不到只记为保底候选，
+    // 由外层换下一个查询词（通常是剥掉季号的主名）重试。
+    ScrapeResult? best;
+    ScrapeResult? firstUsable;
+    var episodeInfos = const <int, ({String? title, String? stillUrl})>{};
+    String? seasonOverview;
+    String? seasonAirDate;
+    double? seasonRuntimeSec;
+
+    Future<void> consider(int tmdbId, String mediaType) async {
+      _scrapeLog('  拉取详情 tmdbId=$tmdbId');
+      final details = await ScraperService.fetchTmdbDetails(
+        mediaType: mediaType,
+        id: tmdbId,
+      );
+      if (details == null) return;
+      firstUsable ??= details;
+      if (best != null) return;
+      if (details.mediaType == 'tv') {
+        _scrapeLog('  拉取季剧照 season=$seasonNumber');
+        final episodes = await ScraperService.fetchEpisodeStills(
+          tvId: details.tmdbId ?? tmdbId,
+          seasonNumber: seasonNumber,
         );
-        notifyListeners();
+        if (isSeriesJob && episodes.isEmpty) return;
+        // 每季简介不同，优先写季简介；拉不到再退回整剧简介。
+        final seasonDetails = await ScraperService.fetchSeasonDetails(
+          tvId: details.tmdbId ?? tmdbId,
+          seasonNumber: seasonNumber,
+        );
+        episodeInfos = episodes;
+        seasonOverview = seasonDetails?.overview;
+        seasonAirDate = seasonDetails?.airDate;
+        seasonRuntimeSec = seasonDetails?.runtimeSec;
+      }
+      best = details;
+    }
 
-        final parsed = ScraperService.parseTitle(job.representative.title);
-        final preferTv =
-            job.group.length > 1 || job.representative.kind != MediaKind.movie;
-        final isSeriesJob = job.group.length > 1;
-        final seasonNumber = seasonOf(job.representative);
-        var matched = false;
+    // 1) 既有匹配优先复用（路径 {tmdbid-NNN} 或上次刮削的 tmdbId），
+    //    重扫时海报与条目保持稳定
+    final cachedId = job.representative.tmdbId;
+    if (cachedId != null) {
+      _scrapeLog('  复用既有 tmdbId=$cachedId');
+      await consider(cachedId, isSeriesJob ? 'tv' : 'movie');
+    }
+    // 2) TMDB 搜索（中文片名与电影覆盖最好），逐个查询词尝试。
+    //    三个来源按置信度排序：条目标题 → 文件名 → 祖先目录名，
+    //    已试过的查询词不重复请求。
+    final triedQueries = <String>{};
+    Future<bool> searchQuery(String query, int? year) async {
+      final q = query.trim();
+      if (q.isEmpty || !triedQueries.add(q)) return false;
+      final hit = await ScraperService.searchTmdb(
+        q,
+        year: year,
+        preferTv: preferTv,
+      );
+      if (hit?.tmdbId == null) return false;
+      await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
+      return best != null;
+    }
 
-        // 候选评估：拉详情 + 目标季集数据，满足要求才算命中。
-        // TMDB 上存在残缺的重复条目（如「旋风少女2」只登记了 1 季 1 集，
-        // 而主条目「旋风少女」自带两季）——精确同名反而先命中它们，
-        // 表现为多季拆成多个条目、整季集标题与剧照拉空。
-        // 剧集因此要求目标季能拉到集数据；拉不到只记为保底候选，
-        // 由外层换下一个查询词（通常是剥掉季号的主名）重试。
-        ScrapeResult? best;
-        ScrapeResult? firstUsable;
-        var episodeInfos = const <int, ({String? title, String? stillUrl})>{};
-        String? seasonOverview;
-        String? seasonAirDate;
-        double? seasonRuntimeSec;
-
-        Future<void> consider(int tmdbId, String mediaType) async {
-          _scrapeLog('  拉取详情 tmdbId=$tmdbId');
-          final details = await ScraperService.fetchTmdbDetails(
-            mediaType: mediaType,
-            id: tmdbId,
-          );
-          if (details == null) return;
-          firstUsable ??= details;
-          if (best != null) return;
-          if (details.mediaType == 'tv') {
-            _scrapeLog('  拉取季剧照 season=$seasonNumber');
-            final episodes = await ScraperService.fetchEpisodeStills(
-              tvId: details.tmdbId ?? tmdbId,
-              seasonNumber: seasonNumber,
-            );
-            if (isSeriesJob && episodes.isEmpty) return;
-            // 每季简介不同，优先写季简介；拉不到再退回整剧简介。
-            final seasonDetails = await ScraperService.fetchSeasonDetails(
-              tvId: details.tmdbId ?? tmdbId,
-              seasonNumber: seasonNumber,
-            );
-            episodeInfos = episodes;
-            seasonOverview = seasonDetails?.overview;
-            seasonAirDate = seasonDetails?.airDate;
-            seasonRuntimeSec = seasonDetails?.runtimeSec;
-          }
-          best = details;
-        }
-
-        // 1) 既有匹配优先复用（路径 {tmdbid-NNN} 或上次刮削的 tmdbId），
-        //    重扫时海报与条目保持稳定
-        final cachedId = job.representative.tmdbId;
-        if (cachedId != null) {
-          _scrapeLog('  复用既有 tmdbId=$cachedId');
-          await consider(cachedId, isSeriesJob ? 'tv' : 'movie');
-        }
-        // 2) TMDB 搜索（中文片名与电影覆盖最好），逐个查询词尝试。
-        //    三个来源按置信度排序：条目标题 → 文件名 → 祖先目录名，
-        //    已试过的查询词不重复请求。
-        final triedQueries = <String>{};
-        Future<bool> searchQuery(String query, int? year) async {
-          final q = query.trim();
-          if (q.isEmpty || !triedQueries.add(q)) return false;
-          final hit = await ScraperService.searchTmdb(
-            q,
-            year: year,
-            preferTv: preferTv,
-          );
-          if (hit?.tmdbId == null) return false;
-          await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
-          return best != null;
-        }
-
-        if (best == null) {
-          for (final query in parsed.queries) {
-            if (await searchQuery(query, parsed.year)) break;
-          }
-        }
-        // 2.5) 文件名兜底：目录名常带序号/标签噪音（「24 黑寡妇 Black
-        // Widow MA」），正式发布的文件名（Black.Widow.2021.2160p…）反而
-        // 是 guessit 式的干净来源。仅在前面的查询词全部落空时才试。
-        if (best == null) {
-          final segments = job.representative.path.split(RegExp(r'[\\/]'));
-          final baseName = segments.last;
-          final fromFile = ScraperService.parseTitle(baseName);
-          for (final query in fromFile.queries) {
-            if (await searchQuery(query, fromFile.year ?? parsed.year)) break;
-          }
-          // 2.6) 祖先目录兜底：网盘常见「/网盘/片名/标签子目录/文件.mkv」
-          //      结构（挽救计划/英语中字/…、变相怪杰(1994) 4K/…），真正的
-          //      片名往往在上级目录名里。从最深一层往上逐个试。
-          if (best == null && segments.length > 1) {
-            for (final dir in segments.reversed.skip(1)) {
-              if (best != null) break;
-              if (dir.isEmpty) continue;
-              final fromDir = ScraperService.parseTitle(dir);
-              for (final query in fromDir.queries) {
-                if (await searchQuery(query, fromDir.year ?? parsed.year)) {
-                  break;
-                }
-              }
+    if (best == null) {
+      for (final query in parsed.queries) {
+        if (await searchQuery(query, parsed.year)) break;
+      }
+    }
+    // 2.5) 文件名兜底：目录名常带序号/标签噪音（「24 黑寡妇 Black
+    // Widow MA」），正式发布的文件名（Black.Widow.2021.2160p…）反而
+    // 是 guessit 式的干净来源。仅在前面的查询词全部落空时才试。
+    if (best == null) {
+      final segments = job.representative.path.split(RegExp(r'[\\/]'));
+      final baseName = segments.last;
+      final fromFile = ScraperService.parseTitle(baseName);
+      for (final query in fromFile.queries) {
+        if (await searchQuery(query, fromFile.year ?? parsed.year)) break;
+      }
+      // 2.6) 祖先目录兜底：网盘常见「/网盘/片名/标签子目录/文件.mkv」
+      //      结构（挽救计划/英语中字/…、变相怪杰(1994) 4K/…），真正的
+      //      片名往往在上级目录名里。从最深一层往上逐个试。
+      if (best == null && segments.length > 1) {
+        for (final dir in segments.reversed.skip(1)) {
+          if (best != null) break;
+          if (dir.isEmpty) continue;
+          final fromDir = ScraperService.parseTitle(dir);
+          for (final query in fromDir.queries) {
+            if (await searchQuery(query, fromDir.year ?? parsed.year)) {
+              break;
             }
           }
         }
-        // 3) TVmaze 兜底（无 TMDB Key 或 TMDB 不可达）
-        var result = best ?? firstUsable;
-        if (result == null) {
-          for (final query in parsed.queries) {
-            result = await ScraperService.search(query, year: parsed.year);
-            if (result != null) break;
-          }
-        }
+      }
+    }
+    // 3) TVmaze 兜底（无 TMDB Key 或 TMDB 不可达）
+    var result = best ?? firstUsable;
+    if (result == null) {
+      for (final query in parsed.queries) {
+        result = await ScraperService.search(query, year: parsed.year);
+        if (result != null) break;
+      }
+    }
 
-        final episodeStillPaths = <int, String>{};
-        if (result != null) {
-          final scraped = result;
-          // 先落海报与详情，让条目立即可见（isScraped 依赖 posterPath
-          // 或 tmdbId）。老流程把全部集剧照下载完才写库，中途关应用/
-          // 断网会让整条进度全丢（龙门镖局事故）。
-          String? posterPath;
-          if (scraped.posterUrl != null) {
-            final identity = scraped.tmdbId != null
-                ? 'tmdb_${scraped.tmdbId}'
-                : 'name_${scraped.name}_${scraped.year ?? ''}';
-            posterPath = await ScraperService.downloadPoster(
-              scraped.posterUrl!,
-              cacheKey:
-                  '${job.representative.kind.name}_'
-                  '${scraped.mediaType ?? 'item'}_$identity',
-            );
-          }
-          final scrapedBackdrop = await _downloadBackdrop(scraped);
-          if (posterPath != null ||
-              scraped.summary != null ||
-              scraped.rating != null ||
-              scraped.tmdbId != null) {
-            if (posterPath != null || scraped.tmdbId != null) {
-              scrapeMatched += job.group.length;
-              matched = true;
-            }
-            for (final member in job.group) {
-              final episodeNumber = episodeNumberOfVideo(member);
-              _updateVideo(
-                member.sourceId,
-                member.path,
-                (video) => video.copyWith(
-                  posterPath: posterPath,
-                  summary: seasonOverview ?? scraped.summary,
-                  rating: scraped.rating,
-                  backdropPath: scrapedBackdrop,
-                  genres: scraped.genres,
-                  cast: scraped.cast,
-                  releaseDate: seasonAirDate ?? scraped.releaseDate,
-                  runtimeSec: seasonRuntimeSec ?? scraped.runtimeSec,
-                  episodeTitle: episodeInfos[episodeNumber]?.title,
-                  tmdbId: scraped.tmdbId,
-                  // TMDB 官方名落库：聚合层与海报墙的展示名都取它
-                  tmdbTitle: scraped.name.trim().isEmpty
-                      ? null
-                      : scraped.name.trim(),
-                  kind: kindForGenres(video.kind, scraped.genres),
-                ),
-              );
-            }
-            await _persistVideos(job.representative.sourceId);
-          }
+    final episodeStillPaths = <int, String>{};
+    if (result != null) {
+      final scraped = result;
+      // 先落海报与详情，让条目立即可见（isScraped 依赖 posterPath
+      // 或 tmdbId）。老流程把全部集剧照下载完才写库，中途关应用/
+      // 断网会让整条进度全丢（龙门镖局事故）。
+      String? posterPath;
+      if (scraped.posterUrl != null) {
+        final identity = scraped.tmdbId != null
+            ? 'tmdb_${scraped.tmdbId}'
+            : 'name_${scraped.name}_${scraped.year ?? ''}';
+        posterPath = await ScraperService.downloadPoster(
+          scraped.posterUrl!,
+          cacheKey:
+              '${job.representative.kind.name}_'
+              '${scraped.mediaType ?? 'item'}_$identity',
+        );
+      }
+      final scrapedBackdrop = await _downloadBackdrop(scraped);
+      if (posterPath != null ||
+          scraped.summary != null ||
+          scraped.rating != null ||
+          scraped.tmdbId != null) {
+        if (posterPath != null || scraped.tmdbId != null) {
+          scrapeMatched += job.group.length;
+          matched = true;
         }
-
-        // 剧照逐张下载、逐张落库（断点续传）：中断后重刮时
-        // downloadPoster 的本地缓存会命中已下载的，只补缺失的。
-        for (final entry in episodeInfos.entries) {
-          final stillUrl = entry.value.stillUrl;
-          if (stillUrl == null) continue;
-          final path = await ScraperService.downloadPoster(
-            stillUrl,
-            cacheKey: 'still_${result?.tmdbId}_s${seasonNumber}e${entry.key}',
-          );
-          if (path == null) continue;
-          episodeStillPaths[entry.key] = path;
-          for (final member in job.group) {
-            if (episodeNumberOfVideo(member) != entry.key) continue;
-            _updateVideo(
-              member.sourceId,
-              member.path,
-              (video) => video.copyWith(stillPath: path),
-            );
-          }
-          await _persistVideos(job.representative.sourceId);
-        }
-
-        if (result == null) {
-          _scrapeLog(
-            '  未匹配：${job.representative.title}'
-            '${ScraperService.lastError.isEmpty ? '' : '（${ScraperService.lastError}）'}',
+        for (final member in job.group) {
+          final episodeNumber = episodeNumberOfVideo(member);
+          _updateVideo(
+            member.sourceId,
+            member.path,
+            (video) => video.copyWith(
+              posterPath: posterPath,
+              summary: seasonOverview ?? scraped.summary,
+              rating: scraped.rating,
+              backdropPath: scrapedBackdrop,
+              genres: scraped.genres,
+              cast: scraped.cast,
+              releaseDate: seasonAirDate ?? scraped.releaseDate,
+              runtimeSec: seasonRuntimeSec ?? scraped.runtimeSec,
+              episodeTitle: episodeInfos[episodeNumber]?.title,
+              tmdbId: scraped.tmdbId,
+              // TMDB 官方名落库：聚合层与海报墙的展示名都取它
+              tmdbTitle: scraped.name.trim().isEmpty
+                  ? null
+                  : scraped.name.trim(),
+              kind: kindForGenres(video.kind, scraped.genres),
+            ),
           );
         }
+        await _persistVideos(job.representative.sourceId);
+      }
+    }
 
-        scrapeDone += job.group.length;
-        _scrapeLog('  完成 $scrapeDone/$scrapeTotal');
-        scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal 个条目';
-        notifyListeners();
-        return matched;
+    // 剧照逐张下载、逐张落库（断点续传）：中断后重刮时
+    // downloadPoster 的本地缓存会命中已下载的，只补缺失的。
+    for (final entry in episodeInfos.entries) {
+      final stillUrl = entry.value.stillUrl;
+      if (stillUrl == null) continue;
+      final path = await ScraperService.downloadPoster(
+        stillUrl,
+        cacheKey: 'still_${result?.tmdbId}_s${seasonNumber}e${entry.key}',
+      );
+      if (path == null) continue;
+      episodeStillPaths[entry.key] = path;
+      for (final member in job.group) {
+        if (episodeNumberOfVideo(member) != entry.key) continue;
+        _updateVideo(
+          member.sourceId,
+          member.path,
+          (video) => video.copyWith(stillPath: path),
+        );
+      }
+      await _persistVideos(job.representative.sourceId);
+    }
+
+    if (result == null) {
+      _scrapeLog(
+        '  未匹配：${job.representative.title}'
+        '${ScraperService.lastError.isEmpty ? '' : '（${ScraperService.lastError}）'}',
+      );
+    }
+
+    scrapeDone += job.group.length;
+    _scrapeLog('  完成 $scrapeDone/$scrapeTotal');
+    scrapeProgress = '已刮削 $scrapeDone / $scrapeTotal 个条目';
+    notifyListeners();
+    return matched;
   }
 
   /// 刮削任务列表：与展示聚合同规则分组，组内文件一起刮削。
@@ -1218,8 +1304,9 @@ class MediaLibrary extends ChangeNotifier {
   /// representative 必须用聚合条目——它的 title 是从目录名推导出的剧名
   /// （如「成何体统」）；group.first 的 title 是原始文件名（如「01~4K」），
   /// 拿它去搜索永远搜不到。
-  List<({ScannedVideo representative, List<ScannedVideo> group})>
-  _scrapeJobsOf(Map<String, List<ScannedVideo>> videosBySource) {
+  List<({ScannedVideo representative, List<ScannedVideo> group})> _scrapeJobsOf(
+    Map<String, List<ScannedVideo>> videosBySource,
+  ) {
     final jobs = <({ScannedVideo representative, List<ScannedVideo> group})>[];
     for (final entry in videosBySource.entries) {
       // 「显示并刮削」关闭的源不参与刮削
@@ -1236,7 +1323,10 @@ class MediaLibrary extends ChangeNotifier {
         // 第 2 集起的组拿原始文件名（02~）搜索必然失败。
         grouped.putIfAbsent(parentPathOf(video.path), () => []).add(video);
       }
-      for (final group in grouped.values) {
+      for (final entry in grouped.entries) {
+        final group = entry.value;
+        // 花絮目录 / 纯花絮组不刮削，也不占海报墙条目。
+        if (_isExtraGroup(entry.key, group)) continue;
         // 聚合条目的 path 等于组内第一个文件的 path，据此找回聚合标题。
         final representative = byPath[group.first.path] ?? group.first;
         // 已隐藏的影片不参与刮削
@@ -1520,6 +1610,10 @@ class MediaLibrary extends ChangeNotifier {
     for (final entry in byFolder.entries) {
       final group = entry.value
         ..sort((a, b) => _naturalCompare(a.path, b.path));
+      // 整组都是片头片尾/预告/花絮时，直接不进入媒体库展示与刮削。
+      // 旧实现「没有正片就保留花絮」会把 [片头片尾] 目录当成一部影片，
+      // 甚至拿去匹配 TMDB，导致海报墙出现莫名其妙的条目。
+      if (_isExtraGroup(entry.key, group)) continue;
       // 展示名优先用 TMDB 官方名，缺失时用清洗后的文件夹名
       final tmdbTitle = group
           .firstWhere(
@@ -1595,11 +1689,9 @@ class MediaLibrary extends ChangeNotifier {
           .where((c) => !WebDavService.isExtraFile(c.first.title))
           .toList();
       final effective = mains.isNotEmpty ? mains : clusters;
-      final folderIsTitle = effective.length == 1 &&
-          _sameTitleLoose(
-            _parsedName(effective.first.first),
-            folderTitle,
-          );
+      final folderIsTitle =
+          effective.length == 1 &&
+          _sameTitleLoose(_parsedName(effective.first.first), folderTitle);
       for (final cluster in effective) {
         final first = cluster.first;
         final ownTitle = first.tmdbTitle?.trim() ?? '';
@@ -1640,9 +1732,7 @@ class MediaLibrary extends ChangeNotifier {
   /// 年份缺失视为通配：同名即同一部（多版本常只有部分文件带年份）；
   /// 同名但年份不同是不同的片（续集/重拍版），按年份拆开。
   /// 返回 ≥1 个聚类，每个聚类是同一部影片的版本集合。
-  static List<List<ScannedVideo>> _clusterMovieFiles(
-    List<ScannedVideo> group,
-  ) {
+  static List<List<ScannedVideo>> _clusterMovieFiles(List<ScannedVideo> group) {
     final parsedCache = <ScannedVideo, ({String name, int? year})>{};
     for (final video in group) {
       final parsed = ScraperService.parseTitle(video.title);
@@ -1654,10 +1744,12 @@ class MediaLibrary extends ChangeNotifier {
     final byName = <String, List<ScannedVideo>>{};
     for (final video in group) {
       final name = parsedCache[video]!.name.trim().toLowerCase();
-      byName.putIfAbsent(
-        name.isEmpty ? 'file:${video.title.toLowerCase()}' : name,
-        () => [],
-      ).add(video);
+      byName
+          .putIfAbsent(
+            name.isEmpty ? 'file:${video.title.toLowerCase()}' : name,
+            () => [],
+          )
+          .add(video);
     }
     final clusters = <List<ScannedVideo>>[];
     for (final sameName in byName.values) {
@@ -1752,6 +1844,19 @@ class MediaLibrary extends ChangeNotifier {
         .where((base) => base.isNotEmpty)
         .toSet();
     return bases.length == 1;
+  }
+
+  /// 整组文件是否都属于花絮：位于花絮目录，或每个文件名都是花絮类型。
+  static bool _isExtraGroup(String parentPath, List<ScannedVideo> group) {
+    if (WebDavService.isExtraFolder(_lastSegment(parentPath))) return true;
+    if (group.length >= 2 &&
+        group.every((video) => WebDavService.isExtraFile(video.title))) {
+      return true;
+    }
+    // 单文件目录只有强花絮标记才丢弃，避免《Interview》这类正常片名
+    // 因为弱关键词被整个吞掉。
+    return group.length == 1 &&
+        WebDavService.isDefiniteExtraFile(group.single.title);
   }
 
   static String _stripTrailingNumber(String title) {

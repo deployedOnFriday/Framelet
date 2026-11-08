@@ -133,9 +133,8 @@ class _HomePageState extends State<HomePage>
                           children: [
                             SectionHeader(
                               title: '最近播放',
-                              onViewAll: () => _showMessage(
-                                '最近播放完整记录将在媒体库接入后开放',
-                              ),
+                              onViewAll: () =>
+                                  _showMessage('最近播放完整记录将在媒体库接入后开放'),
                             ),
                             const SizedBox(height: 12),
                             _buildRecentGrid(history),
@@ -319,8 +318,15 @@ class _HomePageState extends State<HomePage>
   }
 
   List<HistoryEntry> _recentEntries() {
+    final library = MediaLibrary.instance;
     return PlaybackHistory.instance.entries
         .where((entry) => !entry.finished)
+        // 已隐藏的影片不再出现在首页「最近播放」里，否则同步后又像
+        // 没隐藏成功一样被刷回首页。
+        .where((entry) {
+          final video = library.findVideo(entry.sourceId, entry.path);
+          return video == null || !library.isHiddenVideo(video);
+        })
         .take(3)
         .toList();
   }

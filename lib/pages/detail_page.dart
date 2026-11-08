@@ -9,6 +9,7 @@ import '../services/media_library.dart';
 import '../services/playback_history.dart';
 import '../services/scraper_service.dart';
 import '../services/webdav_service.dart';
+import '../widgets/hide_media_action.dart';
 import '../widgets/match_dialog.dart';
 import 'player_page.dart';
 
@@ -130,35 +131,13 @@ class _DetailPageState extends State<DetailPage> {
     Offset globalPosition,
     ScannedVideo target,
   ) async {
-    final overlay = Overlay.of(context).context.findRenderObject();
-    if (overlay is! RenderBox) return;
-    final action = await showMenu<String>(
+    await showMediaContextMenu(
       context: context,
-      color: _isDark(context) ? const Color(0xFF1F1F1F) : Colors.white,
-      position: RelativeRect.fromRect(
-        Rect.fromPoints(globalPosition, globalPosition),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        PopupMenuItem<String>(
-          value: 'hide',
-          height: 40,
-          child: Row(
-            children: [
-              Icon(
-                Icons.visibility_off_rounded,
-                size: 17,
-                color: context.colors.muted,
-              ),
-              const SizedBox(width: 8),
-              const Text('隐藏该影片', style: TextStyle(fontSize: 13)),
-            ],
-          ),
-        ),
-      ],
+      globalPosition: globalPosition,
+      video: target,
+      displayName: target.title,
+      popOnHidden: true,
     );
-    if (action != 'hide' || !context.mounted) return;
-    await _hideCurrent(context, target);
   }
 
   /// 季详情优先，缺失字段回退到整剧条目。
@@ -197,39 +176,6 @@ class _DetailPageState extends State<DetailPage> {
         );
       });
     });
-  }
-
-  /// 隐藏当前影片：海报墙/未匹配列表/自动刮削都不再包含它，
-  /// 可在 设置→媒体源管理→已隐藏影片 恢复。
-  Future<void> _hideCurrent(BuildContext context, ScannedVideo target) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('隐藏该影片'),
-        content: Text(
-          '「${target.title}」将不再显示在海报墙，也不参与自动刮削。\n'
-          '文件不会被删除，可在 设置 → 媒体源管理 → 已隐藏影片 恢复显示。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('隐藏'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !context.mounted) return;
-    final messenger = ScaffoldMessenger.maybeOf(context);
-    await MediaLibrary.instance.hideItem(target);
-    if (!context.mounted) return;
-    messenger
-      ?..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('已隐藏，可在设置中恢复')));
-    Navigator.of(context).maybePop();
   }
 }
 
@@ -1053,12 +999,13 @@ class _EpisodeCard extends StatelessWidget {
                         Image.file(
                           File(thumbnailPath),
                           fit: BoxFit.cover,
-                          cacheWidth: (200 *
-                                  (MediaQuery.maybeDevicePixelRatioOf(
-                                        context,
-                                      ) ??
-                                      1))
-                              .round(),
+                          cacheWidth:
+                              (200 *
+                                      (MediaQuery.maybeDevicePixelRatioOf(
+                                            context,
+                                          ) ??
+                                          1))
+                                  .round(),
                           alignment: Alignment.topCenter,
                           errorBuilder: (context, error, stackTrace) =>
                               _placeholder,
@@ -1332,12 +1279,13 @@ class _ExtraCard extends StatelessWidget {
                     ? Image.file(
                         File(posterPath!),
                         fit: BoxFit.cover,
-                        cacheWidth: (150 *
-                                (MediaQuery.maybeDevicePixelRatioOf(
-                                      context,
-                                    ) ??
-                                    1))
-                            .round(),
+                        cacheWidth:
+                            (150 *
+                                    (MediaQuery.maybeDevicePixelRatioOf(
+                                          context,
+                                        ) ??
+                                        1))
+                                .round(),
                         color: Colors.black.withValues(alpha: 0.25),
                         colorBlendMode: BlendMode.darken,
                         errorBuilder: (_, _, _) => ColoredBox(

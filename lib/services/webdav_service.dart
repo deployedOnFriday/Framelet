@@ -395,10 +395,111 @@ class WebDavService {
       'preview',
       'interview',
       'making',
+      'opening',
+      'ending',
+      'creditless',
+      'clean opening',
+      'clean ending',
+      '主题曲',
+      '片头曲',
+      '片尾曲',
     ];
     final base = cleanTitle(name).toLowerCase();
     for (final extra in extras) {
       if (base.contains(extra) || lower.contains(extra)) return true;
+    }
+    // OP / ED / PV / CM 只认「[OP]」「OP01」「ED 2」这类写法，
+    // 不能把 Ed Wood、Red 之类的正常片名误判成花絮。
+    final abbreviated =
+        RegExp(
+          r'[\[\(（](op|ed|pv|cm)[\]\)）]',
+          caseSensitive: false,
+        ).hasMatch(base) ||
+        RegExp(
+          r'(^|[^a-z])(op|ed|pv|cm)[\s._-]*\d{1,3}([^a-z]|$)',
+          caseSensitive: false,
+        ).hasMatch(base) ||
+        const {'op', 'ed', 'pv', 'cm'}.contains(base);
+    if (abbreviated) {
+      return true;
+    }
+    return false;
+  }
+
+  /// 强花絮标记：即使孤立成组也能确定不是正片（片头/片尾/NCOP 等）。
+  ///
+  /// 与 [isExtraFile] 分开是为了避免把《Interview》《Extras》这类
+  /// 正常片名单文件误删——这些弱关键词只在同目录还有正片时才当花絮。
+  static bool isDefiniteExtraFile(String name) {
+    final lower = name.toLowerCase();
+    const strong = [
+      '片头',
+      '片尾',
+      '预告',
+      '花絮',
+      '特辑',
+      '彩蛋',
+      '幕后',
+      '制作特辑',
+      '主题曲',
+      '片头曲',
+      '片尾曲',
+      'ncop',
+      'nced',
+      'creditless',
+    ];
+    final base = cleanTitle(name).toLowerCase();
+    for (final extra in strong) {
+      if (base.contains(extra) || lower.contains(extra)) return true;
+    }
+    return false;
+  }
+
+  /// 花絮目录：整目录只放片头片尾、预告、特辑等，不应被聚合成影片。
+  static bool isExtraFolder(String name) {
+    final text = name.toLowerCase().trim();
+    if (text.isEmpty) return false;
+    final normalized = text
+        .replaceAll(RegExp(r'[\[\]()（）._\-\s]+'), ' ')
+        .trim();
+    const folders = [
+      '片头片尾',
+      '片头',
+      '片尾',
+      '花絮',
+      '特典',
+      '特辑',
+      '预告',
+      '彩蛋',
+      '幕后',
+      '制作特辑',
+      '主题曲',
+      'extras',
+      'extra',
+      'featurettes',
+      'featurette',
+      'trailers',
+      'trailer',
+      'samples',
+      'ncop',
+      'nced',
+      'opening',
+      'ending',
+      'creditless',
+    ];
+    for (final folder in folders) {
+      // 中文目录直接包含判断；英文目录按完整单词匹配，避免
+      // 「Extraordinary」这类正常片名被 "extra" 误伤。
+      final ascii = RegExp(r'^[a-z&]+$').hasMatch(folder);
+      if (ascii) {
+        if (normalized == folder ||
+            RegExp('^${RegExp.escape(folder)}\\s*\\d{1,3}\$')
+                .hasMatch(normalized)) {
+          return true;
+        }
+      } else if (text.contains(folder)) {
+        return true;
+      }
     }
     return false;
   }
