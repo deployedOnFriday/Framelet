@@ -402,8 +402,7 @@ class ScraperService {
 
   /// 是否处于离线冷却（此时请求会被短路直接返回失败）。
   static bool get tmdbCoolingDown =>
-      _tmdbOfflineUntil != null &&
-      _tmdbOfflineUntil!.isAfter(DateTime.now());
+      _tmdbOfflineUntil != null && _tmdbOfflineUntil!.isAfter(DateTime.now());
 
   /// 通过「国内可用 IP + 域名 SNI」直连 TMDB API。
   ///
@@ -550,7 +549,9 @@ class ScraperService {
     // 带了则原样转发。且响应带 max-age=3600 的缓存头，偶发 404 会被
     // 缓存一小时——因此剥离应用的 key 并加时间戳参数防缓存命中。
     final qIndex = pathAndQuery.indexOf('?');
-    final basePath = qIndex < 0 ? pathAndQuery : pathAndQuery.substring(0, qIndex);
+    final basePath = qIndex < 0
+        ? pathAndQuery
+        : pathAndQuery.substring(0, qIndex);
     final params = <String>[];
     if (qIndex >= 0) {
       for (final pair in pathAndQuery.substring(qIndex + 1).split('&')) {
@@ -758,9 +759,7 @@ class ScraperService {
     final status = result.status;
     if (status != null && status != 200 && status != 206) {
       _preferredIp.remove(host);
-      _ipCooldown[result.ip] = DateTime.now().add(
-        const Duration(minutes: 3),
-      );
+      _ipCooldown[result.ip] = DateTime.now().add(const Duration(minutes: 3));
     } else {
       _preferredIp[host] = result.ip;
       _ipCooldown.remove(result.ip);
@@ -978,6 +977,12 @@ class ScraperService {
     const junkPattern =
         r'^(1080p|720p|2160p|4k|8k|uhd|x264|x265|h264|h265|hevc|avc|aac|ac3|eac3|dts|flac|truehd|bluray|blu-ray|bdrip|webrip|web-dl|webdl|hdtv|remux|hdr10?|hdr|dv|dolby|atmos|ddp?\d{1,2}(\.1)?|dd\+|imax|(re)?upscale(2160|1080|720)?p?|10bits?|8bits?|50fps|60fps|120fps|60帧|120帧|proper|repack|extended|uncut|cr|ubweb|nf|amzn|dsnp|hmax|atvp|max|sdr|hevc10|高码|高bitrate|hq|web|multi|french|german|italian|spanish|russian|korean|japanese|mandarin|cantonese|dualaudio|inter)$';
     final junk = RegExp(junkPattern, caseSensitive: false);
+    // 中文网盘目录常见的发布标签。它们不是片名，必须在切词阶段就丢掉，
+    // 否则「嫁金钗 杜比视界」「… 全30集」会原样进入 TMDB 查询。
+    final chineseJunk = RegExp(
+      r'^(全集|完整版|全\d{1,4}集|共\d{1,4}集|完结|已完结|杜比视界|杜比全景声|杜比音效|国粤双语|国粤|国语|粤语|双语|中字|中英字幕|简繁|简体|繁体|内封|内嵌|外挂|无损|原盘|蓝光|高码|高码率)$',
+      caseSensitive: false,
+    );
 
     // 目录名开头的粘连年份（「1995-玩具总动员1」）：剥离并记为年份。
     // 仅处理 -/_ 粘连——点分隔的发布名是「片名在前」（2012.2009.1080p
@@ -995,14 +1000,20 @@ class ScraperService {
       r'字幕|简体|繁体|中字|英字|双语|国语|国粤|粤语|普通话|内封|内嵌|外挂|杜比|全景声|原盘|无损|高码|DIY|简繁',
       caseSensitive: false,
     );
+    // 年份先于括号清理提取：(2026) 是年份，不能被当作标题噪音丢掉。
+    final parentheticalYears = RegExp(r'[（(]\s*((?:19|20)\d{2})\s*[）)]')
+        .allMatches(text)
+        .map((match) => int.tryParse(match.group(1)!))
+        .whereType<int>()
+        .toList();
+    final parentheticalYear = parentheticalYears.isEmpty
+        ? null
+        : parentheticalYears.last;
     final bracketNames = RegExp(r'[\[【]([^\]】]+)[\]】]')
         .allMatches(text)
         .map((m) => m.group(1)!.trim())
         .where(
-          (s) =>
-              s.isNotEmpty &&
-              !bracketLabel.hasMatch(s) &&
-              !junk.hasMatch(s),
+          (s) => s.isNotEmpty && !bracketLabel.hasMatch(s) && !junk.hasMatch(s),
         )
         .toList();
     text = text.replaceAll(RegExp(r'[\[【][^\]】]*[\]】]'), ' ');
@@ -1021,7 +1032,7 @@ class ScraperService {
     );
 
     // 文件名里的独立年份 token 更可信，覆盖目录名剥出的粘连年份
-    int? year = leadingYear;
+    int? year = leadingYear ?? parentheticalYear;
     final yearTokens = <int>[];
     // (token 原始下标, 清洗后的标题词)——供位置规则变体使用
     final cleaned = <(int, String)>[];
@@ -1041,7 +1052,12 @@ class ScraperService {
         titleEnd ??= i;
         continue;
       }
-      if (junk.hasMatch(token) || episode.hasMatch(token)) {
+      final mixedCjkLatin =
+          cjk.hasMatch(token) && RegExp(r'[A-Za-z0-9]').hasMatch(token);
+      if (junk.hasMatch(token) ||
+          chineseJunk.hasMatch(token) ||
+          episode.hasMatch(token) ||
+          (!mixedCjkLatin && bracketLabel.hasMatch(token))) {
         titleEnd ??= i;
         continue;
       }
@@ -1065,7 +1081,7 @@ class ScraperService {
       }
       // 中英粘连单 token（挽救计划4K英语中字）：按 CJK↔拉丁边界拆子词，
       // 技术/标签子词剔除，其余子词无缝拼回（「哆啦A梦」拆完原样还原）
-      if (cjk.hasMatch(token) && RegExp(r'[A-Za-z0-9]').hasMatch(token)) {
+      if (mixedCjkLatin) {
         final subs = token
             .split(cjkBoundary)
             .where((s) => s.isNotEmpty)
@@ -1076,6 +1092,7 @@ class ScraperService {
           final isTrailingDigit =
               RegExp(r'^\d{1,2}$').hasMatch(sub) && s == subs.length - 1;
           if (junk.hasMatch(sub) ||
+              chineseJunk.hasMatch(sub) ||
               bracketLabel.hasMatch(sub) ||
               episode.hasMatch(sub) ||
               isTrailingDigit) {
@@ -1088,6 +1105,10 @@ class ScraperService {
           continue;
         }
         cleaned.add((i, kept.join()));
+        continue;
+      }
+      if (bracketLabel.hasMatch(token)) {
+        titleEnd ??= i;
         continue;
       }
       cleaned.add((i, token));
@@ -1118,9 +1139,7 @@ class ScraperService {
     // 逐层生成更干净的变体，全名命中不了时还有后路。
     final variants = <String>[];
     // 「英语中字」「中英字幕」这类整串都是标签的词拿去搜索只会命中噪音
-    final pureLabelTail = RegExp(
-      r'(中字|字幕|国粤|国语|粤语|双语|简体|繁体|普通话)$',
-    );
+    final pureLabelTail = RegExp(r'(中字|字幕|国粤|国语|粤语|双语|简体|繁体|普通话)$');
     void addVariant(String q) {
       final t = q.trim();
       if (t.length < 2) return; // 单字符查询噪音太大
@@ -1795,10 +1814,7 @@ class ScraperService {
 
   static String _lastImageChannel = '';
 
-  static String _imageProxyUrl(
-    Uri uri, {
-    String host = 'images.weserv.nl',
-  }) {
+  static String _imageProxyUrl(Uri uri, {String host = 'images.weserv.nl'}) {
     final width = RegExp(r'/t/p/(w\d+)/').firstMatch(uri.path)?.group(1);
     final query = <String>[
       'url=${Uri.encodeQueryComponent(uri.toString())}',
@@ -2003,13 +2019,22 @@ class ScraperService {
           retries: 1,
         );
       case _chBunnySni:
-        return _sniGetBytes(_imageCdnHost, path, maxBytes: maxBytes, image: true);
+        return _sniGetBytes(
+          _imageCdnHost,
+          path,
+          maxBytes: maxBytes,
+          image: true,
+        );
       case _chPlainHttp:
         return _plainHttpImageViaIp(uri);
       case _chSni:
         return _sniGetBytes(_imageHost, path, maxBytes: maxBytes, image: true);
       case _chHttps:
-        return _httpGetBytes(uri, timeout: const Duration(seconds: 10), retries: 1);
+        return _httpGetBytes(
+          uri,
+          timeout: const Duration(seconds: 10),
+          retries: 1,
+        );
       case _chHttp:
         return _httpGetBytes(
           uri.replace(scheme: 'http'),
@@ -2123,7 +2148,12 @@ class ScraperService {
     for (final channel in order) {
       await _throttle();
       bytes = accept(
-        await _runImageChannel(channel, uri: uri, path: path, maxBytes: maxBytes),
+        await _runImageChannel(
+          channel,
+          uri: uri,
+          path: path,
+          maxBytes: maxBytes,
+        ),
         channel,
       );
       if (bytes != null) return bytes;

@@ -138,6 +138,22 @@ void main() {
       expect(result.first.episodeCount, 12);
       expect(result.first.kind, MediaKind.anime);
     });
+
+    test('网盘目录的年份与发布标签不会进入展示标题', () {
+      final show = [
+        for (var i = 28; i <= 30; i++)
+          video(
+            '/夸克网盘/movie/嫁金钗 (2026) 4K HDR杜比视界 全30集/$i HDR.mkv',
+            '$i',
+            kind: MediaKind.series,
+          ),
+      ];
+      final result = MediaLibrary.aggregate(show);
+      expect(result, hasLength(1));
+      expect(result.single.title, '嫁金钗');
+      expect(result.single.kind, MediaKind.series);
+      expect(result.single.episodeCount, 3);
+    });
   });
 
   group('季号识别', () {
@@ -210,6 +226,10 @@ void main() {
       final title = WebDavService.cleanTitle('某剧.S01E01.1080p.WEB-DL.mkv');
       expect(title, contains('S01E01'));
       expect(title, isNot(contains('1080p')));
+    });
+
+    test('网盘目录年份与中文发布标签被清洗', () {
+      expect(WebDavService.cleanTitle('嫁金钗 (2026) 4K HDR杜比视界 全30集'), '嫁金钗');
     });
   });
 
@@ -331,10 +351,7 @@ void main() {
         video('/夸克网盘/我的收藏/疯狂的石头.2006.1080p', '疯狂的石头.2006.1080p'),
       ]);
       expect(result, hasLength(2));
-      expect(
-        result.map((v) => v.title),
-        containsAll(['流浪地球', '疯狂的石头']),
-      );
+      expect(result.map((v) => v.title), containsAll(['流浪地球', '疯狂的石头']));
     });
 
     test('同名不同年份是不同的片（续集/重拍版）', () {

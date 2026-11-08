@@ -979,6 +979,19 @@ class MediaLibrary extends ChangeNotifier {
 
     try {
       final jobs = _scrapeJobsOf(_videosBySource);
+      if (!force) {
+        // 未完成的条目优先。旧实现严格按媒体源顺序排队：前面有 500+
+        // 条已刮削的条目时，应用中途退出会让后面的新内容一直轮不到。
+        // 已完成条目只用于补 tmdbTitle，放到队列末尾即可。
+        jobs.sort((a, b) {
+          final aComplete = _scrapeJobComplete(a);
+          final bComplete = _scrapeJobComplete(b);
+          if (aComplete != bComplete) return aComplete ? 1 : -1;
+          final aTime = a.representative.modified?.millisecondsSinceEpoch ?? 0;
+          final bTime = b.representative.modified?.millisecondsSinceEpoch ?? 0;
+          return bTime.compareTo(aTime);
+        });
+      }
 
       // 进度按「条目数」统计而非任务数：一个 40 集的剧是 1 个任务
       // 却是 40 个条目，任务进度会与「待匹配」统计严重对不上
@@ -992,18 +1005,8 @@ class MediaLibrary extends ChangeNotifier {
       final networkFailedJobs =
           <({ScannedVideo representative, List<ScannedVideo> group})>[];
       for (final job in jobs) {
-        final target = job.group.firstWhere(
-          (v) => v.posterPath != null,
-          orElse: () => job.representative,
-        );
-        final isSeriesJob = job.group.length > 1;
-        final hasPoster = _imageExists(target.posterPath);
-        final hasBackdrop = _imageExists(target.backdropPath);
-        final stillComplete =
-            !isSeriesJob ||
-            job.group.where((v) => _imageExists(v.stillPath)).length >=
-                ((job.group.length + 1) ~/ 2);
-        if (!force && hasPoster && hasBackdrop && stillComplete) {
+        final complete = _scrapeJobComplete(job);
+        if (!force && complete) {
           final episodes = job.group.length;
           scrapeDone += episodes;
           scrapeMatched += episodes;
@@ -1082,6 +1085,27 @@ class MediaLibrary extends ChangeNotifier {
     }
     await _persistVideos(job.representative.sourceId);
     notifyListeners();
+  }
+
+  /// 已有完整海报/背景/剧照的任务是否可以直接跳过。
+  ///
+  /// 与 scrapeAll 的跳过条件保持一致，排序和主循环各调用一次，
+  /// 避免「排序认为完成、实际处理又重刮」的分叉。
+  bool _scrapeJobComplete(
+    ({ScannedVideo representative, List<ScannedVideo> group}) job,
+  ) {
+    final target = job.group.firstWhere(
+      (video) => video.posterPath != null,
+      orElse: () => job.representative,
+    );
+    final isSeriesJob = job.group.length > 1;
+    final hasPoster = _imageExists(target.posterPath);
+    final hasBackdrop = _imageExists(target.backdropPath);
+    final stillComplete =
+        !isSeriesJob ||
+        job.group.where((video) => _imageExists(video.stillPath)).length >=
+            ((job.group.length + 1) ~/ 2);
+    return hasPoster && hasBackdrop && stillComplete;
   }
 
   /// 单个刮削任务：解析查询词 → 复用/搜索 TMDB → TVmaze 兜底 → 落库
@@ -1798,6 +1822,10 @@ class MediaLibrary extends ChangeNotifier {
   /// 清洗文件夹名作为展示标题：剥掉尾部的年份/画质/码率等杂质。
   /// 清洗后为空（全是杂质）时返回 null。
   static String? _cleanFolderTitle(String raw) {
+    // 展示标题保留季号（唐朝诡事录3），不要套用搜索用的「剥尾号」变体。
+    // cleanTitle 已负责年份/画质/杜比/全N集等发布标签。
+    final cleaned = WebDavService.cleanTitle(raw).trim();
+    if (cleaned.isNotEmpty) return cleaned;
     var title = raw.trim();
     title = title
         .replaceAll(RegExp(r'[（(]\s*(19|20)\d{2}\s*[）)]\s*$'), '')

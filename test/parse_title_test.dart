@@ -118,7 +118,9 @@ void main() {
     });
 
     test('语言标签（MULTI.FRENCH）剥出干净片名', () {
-      final parsed = ScraperService.parseTitle('Hoppers 2026.MULTI.FRENCH.2160p');
+      final parsed = ScraperService.parseTitle(
+        'Hoppers 2026.MULTI.FRENCH.2160p',
+      );
       expect(parsed.queries, contains('Hoppers'));
       expect(parsed.year, 2026);
     });
@@ -126,6 +128,13 @@ void main() {
     test('数字开头的中文片名不误伤（24城记）', () {
       final parsed = ScraperService.parseTitle('24城记');
       expect(parsed.queries.first, '24城记');
+    });
+
+    test('网盘目录的年份与中文发布标签被剥离', () {
+      final parsed = ScraperService.parseTitle('嫁金钗 (2026) 4K HDR杜比视界 全30集');
+      expect(parsed.queries.first, '嫁金钗');
+      expect(parsed.queries, contains('嫁金钗'));
+      expect(parsed.year, 2026);
     });
   });
 }

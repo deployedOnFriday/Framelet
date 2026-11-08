@@ -644,17 +644,33 @@ class WebDavService {
     if (trailing != null && !_isEpisodeToken(trailing.group(1)!)) {
       title = title.substring(0, trailing.start);
     }
+    // 网盘目录名常把年份、语言、杜比和「全30集」直接粘在片名后。
+    // 先去掉明确是年份的括号，再清掉这些发布标签；不要整段删除括号，
+    // 否则「玩具总动员（上）」这类真正的片名会被误伤。
     title = title
-        .replaceAll(RegExp(r'[-_～~\s]*(全集|完整版|全\d{1,3}集|完结)$'), '')
+        .replaceAll(
+          RegExp(r'[（(]\s*(19|20)\d{2}\s*[）)]', caseSensitive: false),
+          ' ',
+        )
+        .replaceAll(RegExp(r'[\[\]【】]'), ' ')
         .trim();
     title = title
         .replaceAll(
           RegExp(
-            r'[-.\s]*\b(1080p|720p|2160p|4k|x264|x265|h\.?264|h\.?265|hevc|aac|flac|bluray|web-?dl|hdr)\b[-.\s]*',
+            r'[-.\s]*(1080p|720p|2160p|4k|8k|x264|x265|h\.?264|h\.?265|hevc|aac|flac|bluray|web-?dl|webrip|hdtv|remux|hdr10?\+?|hdr|dv|dolby|atmos|ddp?\d{1,2}(\.1)?|dd\+|imax|10bits?|8bits?|50fps|60fps|120fps|60帧|120帧|高码|高码率|hq|sdr)[-.\s]*',
             caseSensitive: false,
           ),
           ' ',
         )
+        .replaceAll(
+          RegExp(
+            r'(全集|完整版|全\d{1,4}集|共\d{1,4}集|完结|已完结|杜比视界|杜比全景声|杜比音效|国粤双语|国粤|国语|粤语|双语|中字|中英字幕|简繁|简体|繁体|内封|内嵌|外挂|无损|原盘|蓝光)',
+            caseSensitive: false,
+          ),
+          ' ',
+        )
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .replaceAll(RegExp(r'^[\s._\-~～]+|[\s._\-~～]+$'), '')
         .trim();
     if (title.isEmpty && bracket != null && bracket.trim().isNotEmpty) {
       title = bracket.trim();
