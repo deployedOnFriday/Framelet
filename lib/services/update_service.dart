@@ -21,10 +21,11 @@ class UpdateService {
   /// GitHub Release 资产加速前缀。只拼接 GitHub 官方下载地址，
   /// 不经过任何账号信息。
   static const _mirrors = <String>[
-    'https://ghfast.top/',
-    'https://gh-proxy.com/',
-    'https://ghproxy.net/',
-    'https://ghproxy.cc/',
+    'https://gh.monlor.com/',
+    'https://gh.meali.top/',
+    'https://ghgo.de5.net/',
+    'https://gh.chjina.com/',
+    'https://ghpxy.hwinzniej.top/',
   ];
 
   static Future<String?> _activeProxy() =>
@@ -130,37 +131,59 @@ class UpdateService {
     for (final mirror in _mirrors) '$mirror$url',
   ];
 
-  /// 并发探测每个下载线路的首字节耗时，返回最快的一条。
-  static Future<String?> _pickFastest(List<String> urls, String? proxy) async {
+  /// 并发探测每个下载线路的首字节耗时，按从快到慢返回可用线路。
+  static Future<List<({String url, int ms, bool ranged})>> _probeCandidates(
+    List<String> urls,
+    String? proxy,
+  ) async {
     final results = await Future.wait(
       urls.map((url) async {
-        final watch = Stopwatch()..start();
-        HttpClient? client;
-        try {
-          client = _httpClient(proxy);
-          final request = await client
-              .getUrl(Uri.parse(url))
-              .timeout(const Duration(seconds: 5));
-          request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
-          request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
-          final response = await request.close().timeout(
-            const Duration(seconds: 5),
-          );
-          final ok = response.statusCode == 200 || response.statusCode == 206;
-          try {
-            await response.drain<void>().timeout(const Duration(seconds: 3));
-          } catch (_) {}
-          return ok ? (url: url, ms: watch.elapsedMilliseconds) : null;
-        } catch (_) {
-          return null;
-        } finally {
-          client?.close(force: true);
-        }
+        final ranged = await _probeLatency(url, proxy, ranged: true);
+        final plain = ranged == null
+            ? await _probeLatency(url, proxy, ranged: false)
+            : null;
+        final probe = ranged ?? plain;
+        if (probe == null) return null;
+        return (url: url, ms: probe.ms, ranged: ranged?.status == 206);
       }),
     );
-    final valid = results.whereType<({String url, int ms})>().toList()
-      ..sort((a, b) => a.ms.compareTo(b.ms));
-    return valid.isEmpty ? null : valid.first.url;
+    final valid =
+        results.whereType<({String url, int ms, bool ranged})>().toList()
+          ..sort((a, b) => a.ms.compareTo(b.ms));
+    return valid;
+  }
+
+  /// 测速只等首个数据块就断开：部分镜像会忽略 Range 直接返回 200，
+  /// 若用 drain() 会把整个安装包拖完，测速反而变成全量下载。
+  static Future<({int ms, int status})?> _probeLatency(
+    String url,
+    String? proxy, {
+    required bool ranged,
+  }) async {
+    final watch = Stopwatch()..start();
+    HttpClient? client;
+    try {
+      client = _httpClient(proxy);
+      final request = await client
+          .getUrl(Uri.parse(url))
+          .timeout(const Duration(seconds: 5));
+      if (ranged) {
+        request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+      }
+      request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
+      final response = await request.close().timeout(
+        const Duration(seconds: 5),
+      );
+      if (response.statusCode != 200 && response.statusCode != 206) {
+        return null;
+      }
+      await response.first.timeout(const Duration(seconds: 5));
+      return (ms: watch.elapsedMilliseconds, status: response.statusCode);
+    } catch (_) {
+      return null;
+    } finally {
+      client?.close(force: true);
+    }
   }
 
   /// 下载安装包到临时目录，返回落盘路径。
@@ -176,17 +199,17 @@ class UpdateService {
     final candidates = _candidateUrls(asset.url);
 
     onStatus?.call('正在测速下载线路…');
-    var fastest = await _pickFastest(candidates, proxy);
-    if (fastest == null && proxy != null) {
+    var probes = await _probeCandidates(candidates, proxy);
+    if (probes.isEmpty && proxy != null) {
       if ((proxyAddress ?? '').trim().isEmpty) {
         ProxyResolver.disableSystemProxy();
       }
       proxy = null;
-      fastest = await _pickFastest(candidates, proxy);
+      probes = await _probeCandidates(candidates, proxy);
     }
     final ordered = <String>[
-      ?fastest,
-      ...candidates.where((url) => url != fastest),
+      for (final probe in probes) probe.url,
+      ...candidates.where((url) => !probes.any((probe) => probe.url == url)),
     ];
 
     final file = File('${Directory.systemTemp.path}/${asset.name}');
@@ -195,7 +218,7 @@ class UpdateService {
     } catch (_) {}
 
     final total = asset.size;
-    if (total >= 8 * 1024 * 1024) {
+    if (total >= 8 * 1024 * 1024 && probes.any((probe) => probe.ranged)) {
       onStatus?.call('正在多线程下载 ${asset.name}…');
       final ok = await _downloadSegmented(
         file,
@@ -216,7 +239,14 @@ class UpdateService {
     }
 
     onStatus?.call('正在下载 ${asset.name}…');
-    final ok = await _downloadSingle(file, ordered, total, proxy, onProgress);
+    final ok = await _downloadSingle(
+      file,
+      ordered,
+      total,
+      proxy,
+      onProgress,
+      asset.name,
+    );
     if (ok &&
         file.existsSync() &&
         file.lengthSync() >= 1024 &&
@@ -375,6 +405,7 @@ class UpdateService {
     int total,
     String? proxy,
     void Function(double progress)? onProgress,
+    String name,
   ) async {
     for (final url in urls) {
       HttpClient? client;
@@ -412,7 +443,8 @@ class UpdateService {
         await sink.close();
         sink = null;
         if (expected > 0 && received != expected) continue;
-        if (received >= 1024) return true;
+        // 镜像可能用 200 返回 HTML 错误页，头校验不过就换下一家。
+        if (received >= 1024 && _validInstaller(file, name)) return true;
       } catch (_) {
         // 换下一条线路
       } finally {
