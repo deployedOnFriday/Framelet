@@ -319,16 +319,47 @@ class _HomePageState extends State<HomePage>
 
   List<HistoryEntry> _recentEntries() {
     final library = MediaLibrary.instance;
-    return PlaybackHistory.instance.entries
-        .where((entry) => !entry.finished)
-        // 已隐藏的影片不再出现在首页「最近播放」里，否则同步后又像
-        // 没隐藏成功一样被刷回首页。
-        .where((entry) {
-          final video = library.findVideo(entry.sourceId, entry.path);
-          return video == null || !library.isHiddenVideo(video);
-        })
-        .take(3)
-        .toList();
+    final result = <HistoryEntry>[];
+    final seen = <String>{};
+    for (final entry in PlaybackHistory.instance.entries) {
+      final video = library.findVideo(entry.sourceId, entry.path);
+      // 先按作品去重再判断完播：如果最新一集已看完，不应让更早
+      // 没看完的那集顶上来。
+      if (!seen.add(_recentGroupKey(entry, video))) continue;
+      if (entry.finished) continue;
+      // 已隐藏的影片不再出现在首页「最近播放」里，否则同步后又像
+      // 没隐藏成功一样被刷回首页。
+      if (video != null && library.isHiddenVideo(video)) continue;
+      // 播放历史按集/版本保存（各自独立续播），但首页同一部作品只展示
+      // 最新一条，否则连播几集或多版本电影会让整排都是同一部片。
+      result.add(entry);
+      if (result.length >= 3) break;
+    }
+    return result;
+  }
+
+  /// 最近播放的去重键：同一部剧 / 同一部电影（含多版本）只留最新一条。
+  String _recentGroupKey(HistoryEntry entry, ScannedVideo? video) {
+    if (video == null) return '${entry.sourceId}|${entry.path}';
+    final library = MediaLibrary.instance;
+    final aggregate = library.resolveAggregated(video);
+    if (video.kind == MediaKind.movie) {
+      final tmdbId = video.tmdbId ?? aggregate.tmdbId;
+      if (tmdbId != null) {
+        return 'movie|${video.sourceId}|tmdb|$tmdbId';
+      }
+      final rawTitle = (video.tmdbTitle ?? aggregate.tmdbTitle ?? '').trim();
+      if (rawTitle.isNotEmpty) {
+        return 'movie|${video.sourceId}|title|${rawTitle.toLowerCase()}';
+      }
+      return '${video.sourceId}|${video.path}';
+    }
+    final rawTitle = (aggregate.tmdbTitle ?? aggregate.title).trim();
+    final title = MediaLibrary.normalizeSeriesTitle(
+      MediaLibrary.seriesTitleForDisplay(rawTitle),
+    );
+    final key = title.isEmpty ? rawTitle : title;
+    return 'series|${aggregate.sourceId}|${key.toLowerCase()}';
   }
 
   @override
@@ -442,7 +473,18 @@ class _HomePageState extends State<HomePage>
 
   Future<void> _removeRecent(HistoryEntry entry) async {
     final title = _historyItem(entry).title;
-    final removal = PlaybackHistory.instance.remove(entry.sourceId, entry.path);
+    final library = MediaLibrary.instance;
+    final key = _recentGroupKey(
+      entry,
+      library.findVideo(entry.sourceId, entry.path),
+    );
+    // 卡片代表的是一整部剧：移除时把同组各集的进度一起清掉，
+    // 否则下一集会在卡片消失后立刻顶上来。
+    final removal = PlaybackHistory.instance.removeWhere(
+      (item) =>
+          _recentGroupKey(item, library.findVideo(item.sourceId, item.path)) ==
+          key,
+    );
     if (mounted) setState(() {});
     await removal;
     if (!mounted) return;

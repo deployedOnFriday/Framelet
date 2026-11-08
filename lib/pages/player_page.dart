@@ -492,6 +492,13 @@ class _PlayerPageState extends State<PlayerPage> {
     _resumeTarget = initial
         ? (widget.startPosition ?? _resumePositionOf(_current))
         : _resumePositionOf(_current);
+    // 让 mpv 在加载时就落在续播点，而不是先解码片头再 seek。
+    // 只靠打开后的 seek 会闪出一帧片头；先设置 start 后，解码出的
+    // 第一帧就是续播位置。
+    final resumeStart = _resumeStartOf(_resumeTarget);
+    if (resumeStart != null) {
+      _resumeSeekTarget = resumeStart.inMilliseconds / 1000;
+    }
     final library = MediaLibrary.instance;
     final source = library.sourceById(_current.sourceId);
     final password = library.passwordOf(_current.sourceId);
@@ -542,10 +549,40 @@ class _PlayerPageState extends State<PlayerPage> {
       } catch (error) {
         _debugLog('设置硬件解码失败: $error');
       }
+      // 网络流内存预读：标准给足日常缓冲，弱网再放大前向/后向缓存，
+      // 用更多内存换更长的抗卡顿时长。改动下次打开生效。
+      final prefs = PlaybackPreferences.instance;
+      final (
+        cacheMb,
+        backCacheMb,
+        readaheadSecs,
+      ) = switch (prefs.networkCacheMode) {
+        NetworkCacheMode.standard => (512, 128, 180),
+        NetworkCacheMode.weak => (1024, 256, 600),
+        NetworkCacheMode.custom => (
+          prefs.customCacheMb,
+          prefs.customBackCacheMb,
+          prefs.customReadaheadSecs,
+        ),
+      };
+      final cacheProperties = <String, String>{
+        'demuxer-max-bytes': '${cacheMb * 1024 * 1024}',
+        'demuxer-max-back-bytes': '${backCacheMb * 1024 * 1024}',
+        'demuxer-readahead-secs': '$readaheadSecs',
+      };
+      for (final property in cacheProperties.entries) {
+        try {
+          await platform.setProperty(property.key, property.value);
+        } catch (error) {
+          _debugLog('设置 ${property.key} 失败: $error');
+        }
+      }
     }
 
     try {
-      await _player.open(Media(url.toString(), httpHeaders: headers));
+      await _player.open(
+        Media(url.toString(), httpHeaders: headers, start: resumeStart),
+      );
       if (!mounted || generation != _openGeneration) return;
       _acceptStreamEvents = true;
       final duration = _player.state.duration;
@@ -568,6 +605,15 @@ class _PlayerPageState extends State<PlayerPage> {
         });
       }
     }
+  }
+
+  /// 续播起点（已按设置回退），无有效进度时返回 null。
+  Duration? _resumeStartOf(double? resumeTarget) {
+    if (resumeTarget == null || resumeTarget <= 1) return null;
+    final start = (resumeTarget - PlaybackPreferences.instance.rewindSeconds)
+        .clamp(0.0, double.infinity);
+    if (start <= 1) return null;
+    return Duration(milliseconds: (start * 1000).round());
   }
 
   Future<void> _loadSubtitleFiles(MediaSource source, String password) async {

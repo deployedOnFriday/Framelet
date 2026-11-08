@@ -384,6 +384,163 @@ void main() {
     expect(find.text('最近播放'), findsNothing);
   });
 
+  testWidgets('首页最近播放同一部作品只显示最新一条', (tester) async {
+    tester.view.physicalSize = const Size(1440, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(() {
+      tester.view.resetPhysicalSize();
+      tester.view.resetDevicePixelRatio();
+    });
+    final store = MemoryFrameletStore();
+    await store.saveSources([
+      MediaSource(
+        id: 'local',
+        name: '本机媒体库',
+        kind: MediaSourceKind.local,
+        address: 'D:/Media',
+        username: '',
+        connected: true,
+        lastSync: '刚刚',
+      ),
+    ]);
+    await store.saveVideos('local', const [
+      ScannedVideo(
+        sourceId: 'local',
+        path: r'D:\Media\成何体统\S01E01.mkv',
+        title: '成何体统.S01E01',
+        kind: MediaKind.series,
+        tmdbId: 9001,
+        tmdbTitle: '成何体统',
+      ),
+      ScannedVideo(
+        sourceId: 'local',
+        path: r'D:\Media\成何体统\S01E02.mkv',
+        title: '成何体统.S01E02',
+        kind: MediaKind.series,
+        tmdbId: 9001,
+        tmdbTitle: '成何体统',
+      ),
+      ScannedVideo(
+        sourceId: 'local',
+        path: r'D:\Media\一代宗师\一代宗师.2013.1080p.mkv',
+        title: '一代宗师.2013.1080p',
+        kind: MediaKind.movie,
+        tmdbId: 44826,
+        tmdbTitle: '一代宗师',
+      ),
+      ScannedVideo(
+        sourceId: 'local',
+        path: r'D:\Media\一代宗师\一代宗师.2013.2160p.mkv',
+        title: '一代宗师.2013.2160p',
+        kind: MediaKind.movie,
+        tmdbId: 44826,
+        tmdbTitle: '一代宗师',
+      ),
+    ]);
+    final library = _TestMediaLibrary(
+      store: InMemoryCredentialStore(),
+      db: store,
+    );
+    await library.load();
+    MediaLibrary.instanceForTesting = library;
+    PlaybackHistory.instanceForTesting = PlaybackHistory.withStore(
+      MemoryFrameletStore(),
+    );
+    await tester.pumpWidget(const FrameletApp());
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    await PlaybackHistory.instance.record(
+      HistoryEntry(
+        sourceId: 'local',
+        path: r'D:\Media\成何体统\S01E01.mkv',
+        title: '成何体统.S01E01',
+        kind: MediaKind.series,
+        positionSec: 300,
+        durationSec: 2520,
+        updatedAtMs: now - 1,
+      ),
+    );
+    await PlaybackHistory.instance.record(
+      HistoryEntry(
+        sourceId: 'local',
+        path: r'D:\Media\成何体统\S01E02.mkv',
+        title: '成何体统.S01E02',
+        kind: MediaKind.series,
+        positionSec: 1200,
+        durationSec: 2520,
+        updatedAtMs: now - 2,
+      ),
+    );
+    await PlaybackHistory.instance.record(
+      HistoryEntry(
+        sourceId: 'local',
+        path: r'D:\Media\一代宗师\一代宗师.2013.1080p.mkv',
+        title: '一代宗师.2013.1080p',
+        kind: MediaKind.movie,
+        positionSec: 600,
+        durationSec: 7800,
+        updatedAtMs: now - 1,
+      ),
+    );
+    await PlaybackHistory.instance.record(
+      HistoryEntry(
+        sourceId: 'local',
+        path: r'D:\Media\一代宗师\一代宗师.2013.2160p.mkv',
+        title: '一代宗师.2013.2160p',
+        kind: MediaKind.movie,
+        positionSec: 1200,
+        durationSec: 7800,
+        updatedAtMs: now,
+      ),
+    );
+    await tester.pump();
+
+    // 两集剧 + 两个版本电影 → 最近播放只留「最新一集」和「最新版本」。
+    expect(find.byType(RecentPlaybackCard), findsNWidgets(2));
+    final seriesCard = find.ancestor(
+      of: find.text('成何体统'),
+      matching: find.byType(RecentPlaybackCard),
+    );
+    final movieCard = find.ancestor(
+      of: find.text('一代宗师'),
+      matching: find.byType(RecentPlaybackCard),
+    );
+    expect(
+      find.descendant(of: seriesCard, matching: find.text('第 2 集')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: movieCard, matching: find.text('4K')),
+      findsOneWidget,
+    );
+
+    await tester.tapAt(
+      tester.getCenter(seriesCard),
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('从最近播放移除'));
+    await tester.pumpAndSettle();
+
+    // 移除一部剧时只清掉它的各集，电影卡片仍在。
+    expect(find.byType(RecentPlaybackCard), findsOneWidget);
+    expect(PlaybackHistory.instance.entries, hasLength(2));
+
+    await tester.tapAt(
+      tester.getCenter(movieCard),
+      kind: PointerDeviceKind.mouse,
+      buttons: kSecondaryMouseButton,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('从最近播放移除'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('最近播放'), findsNothing);
+    expect(PlaybackHistory.instance.entries, isEmpty);
+  });
+
   testWidgets('首页白玉横卡黄金截图', (tester) async {
     await _pumpApp(tester);
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -503,6 +660,62 @@ void main() {
       find.byType(FrameletApp),
       matchesGoldenFile('goldens/settings_page.png'),
     );
+  });
+
+  testWidgets('播放设置提供标准、弱网与自定义网络缓存', (tester) async {
+    await _pumpApp(tester);
+    await tester.tap(find.byKey(const ValueKey('nav-settings')));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.byKey(const ValueKey('settings-tab-2')));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('网络缓存'), findsOneWidget);
+    final standardChip = find.byKey(
+      const ValueKey('playback-cache-NetworkCacheMode.standard'),
+    );
+    final weakChip = find.byKey(
+      const ValueKey('playback-cache-NetworkCacheMode.weak'),
+    );
+    final customChip = find.byKey(
+      const ValueKey('playback-cache-NetworkCacheMode.custom'),
+    );
+    expect(standardChip, findsOneWidget);
+    expect(weakChip, findsOneWidget);
+    expect(customChip, findsOneWidget);
+    expect(
+      find.descendant(of: standardChip, matching: find.text('标准')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: weakChip, matching: find.text('弱网')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: customChip, matching: find.text('自定义')),
+      findsOneWidget,
+    );
+
+    await tester.ensureVisible(customChip);
+    await tester.pumpAndSettle();
+    await tester.tap(customChip);
+    await tester.pumpAndSettle();
+    expect(find.text('自定义网络缓存'), findsOneWidget);
+    expect(find.byKey(const ValueKey('cache-custom-forward')), findsOneWidget);
+    expect(find.byKey(const ValueKey('cache-custom-back')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('cache-custom-readahead')),
+      findsOneWidget,
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('cache-custom-forward')),
+      '100',
+    );
+    await tester.tap(find.byKey(const ValueKey('cache-custom-save')));
+    await tester.pumpAndSettle();
+    expect(find.text('范围 128–2048'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('cache-custom-cancel')));
+    await tester.pumpAndSettle();
+    expect(find.text('自定义网络缓存'), findsNothing);
   });
 
   testWidgets('深色模式首页黄金截图', (tester) async {

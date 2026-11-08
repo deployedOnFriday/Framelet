@@ -2,6 +2,9 @@ import 'package:flutter/foundation.dart';
 
 import 'credential_store.dart';
 
+/// 网络流播放的内存预读档位。
+enum NetworkCacheMode { standard, weak, custom }
+
 /// 播放偏好：自动连播、默认倍速、快进步长、续播回退、硬件解码等。
 ///
 /// 启动时在 main() 里 load() 一次，之后设置页修改立即持久化。
@@ -30,6 +33,14 @@ class PlaybackPreferences extends ChangeNotifier {
 
   /// 硬件解码；关闭后走软解，兼容性更好但 CPU 占用更高。
   bool hardwareDecode = true;
+
+  /// 网络缓存档位：标准 / 弱网 / 自定义。
+  NetworkCacheMode networkCacheMode = NetworkCacheMode.standard;
+
+  /// 自定义档位：前向缓存、后向缓存（MB）与预读时长（秒）。
+  int customCacheMb = 768;
+  int customBackCacheMb = 192;
+  int customReadaheadSecs = 300;
 
   /// 播放时自动匹配并加载弹幕（需先配置弹幕服务）。
   bool autoLoadDanmaku = false;
@@ -62,6 +73,33 @@ class PlaybackPreferences extends ChangeNotifier {
       rememberVolume =
           await _store.read('framelet.player.rememberVolume') != '0';
       hardwareDecode = await _store.read('framelet.player.hwdec') != '0';
+      final cacheModeName = await _store.read('framelet.player.cacheMode');
+      final legacyWeak = await _store.read('framelet.player.weakCache') == '1';
+      networkCacheMode = switch (cacheModeName) {
+        'weak' => NetworkCacheMode.weak,
+        'custom' => NetworkCacheMode.custom,
+        'standard' => NetworkCacheMode.standard,
+        _ => legacyWeak ? NetworkCacheMode.weak : NetworkCacheMode.standard,
+      };
+      customCacheMb =
+          (int.tryParse(
+                    await _store.read('framelet.player.cacheMaxMb') ?? '',
+                  ) ??
+                  768)
+              .clamp(128, 2048);
+      customBackCacheMb =
+          (int.tryParse(
+                    await _store.read('framelet.player.cacheBackMb') ?? '',
+                  ) ??
+                  192)
+              .clamp(32, 1024);
+      customReadaheadSecs =
+          (int.tryParse(
+                    await _store.read('framelet.player.cacheReadaheadSecs') ??
+                        '',
+                  ) ??
+                  300)
+              .clamp(30, 1800);
       autoLoadDanmaku = await _store.read('framelet.player.autoDanmaku') == '1';
       final fontSizeRaw = await _store.read('framelet.danmaku.fontSize');
       final opacityRaw = await _store.read('framelet.danmaku.opacity');
@@ -135,6 +173,34 @@ class PlaybackPreferences extends ChangeNotifier {
 
   Future<void> setHardwareDecode(bool value) =>
       _saveBool('framelet.player.hwdec', value, (v) => hardwareDecode = v);
+
+  Future<void> setNetworkCacheMode(NetworkCacheMode mode) async {
+    networkCacheMode = mode;
+    await _store.write('framelet.player.cacheMode', mode.name);
+    notifyListeners();
+  }
+
+  Future<void> setCustomNetworkCache({
+    required int cacheMb,
+    required int backCacheMb,
+    required int readaheadSecs,
+  }) async {
+    customCacheMb = cacheMb.clamp(128, 2048);
+    customBackCacheMb = backCacheMb.clamp(32, 1024);
+    customReadaheadSecs = readaheadSecs.clamp(30, 1800);
+    networkCacheMode = NetworkCacheMode.custom;
+    await _store.write('framelet.player.cacheMaxMb', '$customCacheMb');
+    await _store.write('framelet.player.cacheBackMb', '$customBackCacheMb');
+    await _store.write(
+      'framelet.player.cacheReadaheadSecs',
+      '$customReadaheadSecs',
+    );
+    await _store.write(
+      'framelet.player.cacheMode',
+      NetworkCacheMode.custom.name,
+    );
+    notifyListeners();
+  }
 
   Future<void> setAutoLoadDanmaku(bool value) => _saveBool(
     'framelet.player.autoDanmaku',

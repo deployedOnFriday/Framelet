@@ -31,6 +31,9 @@ class _SettingsPageState extends State<SettingsPage>
   final _danmakuBaseUrlController = TextEditingController();
   final _danmakuAppIdController = TextEditingController();
   final _danmakuAppSecretController = TextEditingController();
+  final _cacheMaxController = TextEditingController();
+  final _cacheBackController = TextEditingController();
+  final _cacheReadaheadController = TextEditingController();
   bool _scrapeFieldsFilled = false;
   bool _danmakuFieldsFilled = false;
   bool _obscureDanmakuSecret = true;
@@ -94,6 +97,9 @@ class _SettingsPageState extends State<SettingsPage>
     _danmakuBaseUrlController.dispose();
     _danmakuAppIdController.dispose();
     _danmakuAppSecretController.dispose();
+    _cacheMaxController.dispose();
+    _cacheBackController.dispose();
+    _cacheReadaheadController.dispose();
     super.dispose();
   }
 
@@ -194,6 +200,33 @@ class _SettingsPageState extends State<SettingsPage>
                 onChanged: prefs.setRewindSeconds,
               ),
               _divider(),
+              _chipRow<NetworkCacheMode>(
+                keyPrefix: 'playback-cache',
+                title: '网络缓存',
+                subtitle: switch (prefs.networkCacheMode) {
+                  NetworkCacheMode.standard =>
+                    '标准：前向 512MB / 后向 128MB，预读 180 秒',
+                  NetworkCacheMode.weak => '弱网：前向 1GB / 后向 256MB，预读 600 秒',
+                  NetworkCacheMode.custom =>
+                    '自定义：前向 ${prefs.customCacheMb}MB / '
+                        '后向 ${prefs.customBackCacheMb}MB，'
+                        '预读 ${prefs.customReadaheadSecs} 秒',
+                },
+                options: const [
+                  (value: NetworkCacheMode.standard, label: '标准'),
+                  (value: NetworkCacheMode.weak, label: '弱网'),
+                  (value: NetworkCacheMode.custom, label: '自定义'),
+                ],
+                current: prefs.networkCacheMode,
+                onChanged: (mode) {
+                  if (mode == NetworkCacheMode.custom) {
+                    _editNetworkCache();
+                  } else {
+                    prefs.setNetworkCacheMode(mode);
+                  }
+                },
+              ),
+              _divider(),
               _playbackSwitch(
                 key: 'playback-hwdec',
                 title: '硬件解码',
@@ -206,6 +239,125 @@ class _SettingsPageState extends State<SettingsPage>
         ],
       ),
     );
+  }
+
+  Future<void> _editNetworkCache() async {
+    final prefs = PlaybackPreferences.instance;
+    _cacheMaxController.text = '${prefs.customCacheMb}';
+    _cacheBackController.text = '${prefs.customBackCacheMb}';
+    _cacheReadaheadController.text = '${prefs.customReadaheadSecs}';
+    final formKey = GlobalKey<FormState>();
+
+    String? validate(String? raw, int min, int max) {
+      final value = int.tryParse((raw ?? '').trim());
+      if (value == null) return '请输入整数';
+      if (value < min || value > max) return '范围 $min–$max';
+      return null;
+    }
+
+    final result =
+        await showDialog<({int cacheMb, int backMb, int readaheadSecs})>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('自定义网络缓存'),
+            content: SizedBox(
+              width: 380,
+              child: Form(
+                key: formKey,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      '前向缓存决定能提前存多少内容，后向缓存决定能往回看多少；'
+                      '预读时长限制低码率视频实际能填多久。',
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 12.5,
+                        height: 1.6,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      key: const ValueKey('cache-custom-forward'),
+                      controller: _cacheMaxController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: '前向缓存（MB）',
+                        helperText: '128–2048',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      validator: (value) => validate(value, 128, 2048),
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      key: const ValueKey('cache-custom-back'),
+                      controller: _cacheBackController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: '后向缓存（MB）',
+                        helperText: '32–1024',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      validator: (value) => validate(value, 32, 1024),
+                    ),
+                    const SizedBox(height: 12),
+                    TextFormField(
+                      key: const ValueKey('cache-custom-readahead'),
+                      controller: _cacheReadaheadController,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: '预读时长（秒）',
+                        helperText: '30–1800',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      validator: (value) => validate(value, 30, 1800),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      '建议 8GB 内存前向不超过 512MB，16GB 不超过 1–2GB。',
+                      style: TextStyle(
+                        color: context.colors.muted,
+                        fontSize: 11.5,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                key: const ValueKey('cache-custom-cancel'),
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                key: const ValueKey('cache-custom-save'),
+                onPressed: () {
+                  if (!(formKey.currentState?.validate() ?? false)) return;
+                  Navigator.of(context).pop((
+                    cacheMb: int.parse(_cacheMaxController.text.trim()),
+                    backMb: int.parse(_cacheBackController.text.trim()),
+                    readaheadSecs: int.parse(
+                      _cacheReadaheadController.text.trim(),
+                    ),
+                  ));
+                },
+                child: const Text('保存'),
+              ),
+            ],
+          ),
+        );
+    if (result == null) return;
+    await prefs.setCustomNetworkCache(
+      cacheMb: result.cacheMb,
+      backCacheMb: result.backMb,
+      readaheadSecs: result.readaheadSecs,
+    );
+    if (!mounted) return;
+    _showMessage('已应用自定义网络缓存');
   }
 
   Widget _playbackCard({required List<Widget> children}) {
