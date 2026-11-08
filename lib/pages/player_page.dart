@@ -1516,27 +1516,7 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   Widget build(BuildContext context) {
     return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.space): _togglePlay,
-        const SingleActivator(LogicalKeyboardKey.keyK): _togglePlay,
-        const SingleActivator(LogicalKeyboardKey.mediaPlayPause): _togglePlay,
-        SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
-            _seekBy(-PlaybackPreferences.instance.seekStep),
-        SingleActivator(LogicalKeyboardKey.arrowRight): () =>
-            _seekBy(PlaybackPreferences.instance.seekStep),
-        const SingleActivator(LogicalKeyboardKey.keyJ): () => _seekBy(-10),
-        const SingleActivator(LogicalKeyboardKey.keyL): () => _seekBy(10),
-        const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
-            _changeVolume(5),
-        const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
-            _changeVolume(-5),
-        const SingleActivator(LogicalKeyboardKey.keyM): _toggleMute,
-        const SingleActivator(LogicalKeyboardKey.keyF): _toggleFullscreen,
-        const SingleActivator(LogicalKeyboardKey.f11): _toggleFullscreen,
-        const SingleActivator(LogicalKeyboardKey.escape): _onEscape,
-        const SingleActivator(LogicalKeyboardKey.keyN): _nextEpisode,
-        const SingleActivator(LogicalKeyboardKey.keyP): _prevEpisode,
-      },
+      bindings: _shortcutBindings,
       child: Focus(
         focusNode: _focusNode,
         autofocus: true,
@@ -1548,6 +1528,31 @@ class _PlayerPageState extends State<PlayerPage> {
       ),
     );
   }
+
+  /// 播放快捷键。页面层与 controls 层共用同一份：
+  /// media_kit 全屏会新建只包含 Video 的路由，页面上的
+  /// CallbackShortcuts 不在那棵子树里，只有 controls 的
+  /// keyboardShortcuts 能跟过去。
+  Map<ShortcutActivator, VoidCallback> get _shortcutBindings => {
+    const SingleActivator(LogicalKeyboardKey.space): _togglePlay,
+    const SingleActivator(LogicalKeyboardKey.keyK): _togglePlay,
+    const SingleActivator(LogicalKeyboardKey.mediaPlayPause): _togglePlay,
+    SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+        _seekBy(-PlaybackPreferences.instance.seekStep),
+    SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+        _seekBy(PlaybackPreferences.instance.seekStep),
+    const SingleActivator(LogicalKeyboardKey.keyJ): () => _seekBy(-10),
+    const SingleActivator(LogicalKeyboardKey.keyL): () => _seekBy(10),
+    const SingleActivator(LogicalKeyboardKey.arrowUp): () => _changeVolume(5),
+    const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+        _changeVolume(-5),
+    const SingleActivator(LogicalKeyboardKey.keyM): _toggleMute,
+    const SingleActivator(LogicalKeyboardKey.keyF): _toggleFullscreen,
+    const SingleActivator(LogicalKeyboardKey.f11): _toggleFullscreen,
+    const SingleActivator(LogicalKeyboardKey.escape): _onEscape,
+    const SingleActivator(LogicalKeyboardKey.keyN): _nextEpisode,
+    const SingleActivator(LogicalKeyboardKey.keyP): _prevEpisode,
+  };
 
   Widget _buildDanmakuOverlay() {
     if (!_danmakuEnabled || _danmakuComments.isEmpty) {
@@ -1837,7 +1842,7 @@ class _PlayerPageState extends State<PlayerPage> {
     final subtitleTracks = _realSubtitleTracks;
     final multi = _playlist.length > 1;
     return MaterialDesktopVideoControlsThemeData(
-      keyboardShortcuts: const {},
+      keyboardShortcuts: _shortcutBindings,
       // 内建点击播放/暂停默认关闭；这里开启后，点击画面中间（避开底部
       // 进度条区域）即可暂停/继续，普通与全屏共用同一套主题。
       playAndPauseOnTap: true,

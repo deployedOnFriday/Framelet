@@ -131,31 +131,36 @@ class UpdateService {
     for (final mirror in _mirrors) '$mirror$url',
   ];
 
-  /// 并发探测每个下载线路的首字节耗时，按从快到慢返回可用线路。
-  static Future<List<({String url, int ms, bool ranged})>> _probeCandidates(
+  /// 并发探测每个下载线路的实际吞吐（首 192KB），按从快到慢返回。
+  ///
+  /// 不能只看首字节延迟：部分镜像响应很快但持续下载只有几十 KB/s，
+  /// 按延迟排序会把它们排到前面，反而拖慢整个安装包下载。
+  static Future<List<({String url, int bps, bool ranged})>> _probeCandidates(
     List<String> urls,
     String? proxy,
   ) async {
     final results = await Future.wait(
       urls.map((url) async {
-        final ranged = await _probeLatency(url, proxy, ranged: true);
-        final plain = ranged == null
-            ? await _probeLatency(url, proxy, ranged: false)
-            : null;
+        final ranged = await _probeOnce(url, proxy, ranged: true);
+        final plain = ranged != null
+            ? null
+            : await _probeOnce(url, proxy, ranged: false);
         final probe = ranged ?? plain;
         if (probe == null) return null;
-        return (url: url, ms: probe.ms, ranged: ranged?.status == 206);
+        return (url: url, bps: probe.bps, ranged: ranged?.status == 206);
       }),
     );
     final valid =
-        results.whereType<({String url, int ms, bool ranged})>().toList()
-          ..sort((a, b) => a.ms.compareTo(b.ms));
+        results.whereType<({String url, int bps, bool ranged})>().toList()
+          ..sort((a, b) => b.bps.compareTo(a.bps));
     return valid;
   }
 
-  /// 测速只等首个数据块就断开：部分镜像会忽略 Range 直接返回 200，
-  /// 若用 drain() 会把整个安装包拖完，测速反而变成全量下载。
-  static Future<({int ms, int status})?> _probeLatency(
+  static const _probeBytes = 192 * 1024;
+  static const _probeWindow = Duration(seconds: 2);
+
+  /// 读一小段就断开，既不整包下载也能反映真实吞吐（bps）。
+  static Future<({int bps, int status})?> _probeOnce(
     String url,
     String? proxy, {
     required bool ranged,
@@ -168,7 +173,10 @@ class UpdateService {
           .getUrl(Uri.parse(url))
           .timeout(const Duration(seconds: 5));
       if (ranged) {
-        request.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+        request.headers.set(
+          HttpHeaders.rangeHeader,
+          'bytes=0-${_probeBytes - 1}',
+        );
       }
       request.headers.set(HttpHeaders.acceptEncodingHeader, 'identity');
       final response = await request.close().timeout(
@@ -177,8 +185,14 @@ class UpdateService {
       if (response.statusCode != 200 && response.statusCode != 206) {
         return null;
       }
-      await response.first.timeout(const Duration(seconds: 5));
-      return (ms: watch.elapsedMilliseconds, status: response.statusCode);
+      var bytes = 0;
+      await for (final chunk in response.timeout(const Duration(seconds: 5))) {
+        bytes += chunk.length;
+        if (bytes >= _probeBytes || watch.elapsed >= _probeWindow) break;
+      }
+      if (bytes < 16 * 1024) return null;
+      final seconds = math.max(watch.elapsedMilliseconds, 1) / 1000;
+      return (bps: (bytes / seconds).round(), status: response.statusCode);
     } catch (_) {
       return null;
     } finally {
@@ -218,7 +232,9 @@ class UpdateService {
     } catch (_) {}
 
     final total = asset.size;
-    if (total >= 8 * 1024 * 1024 && probes.any((probe) => probe.ranged)) {
+    // 只有最快线路本身支持 Range 才拆段：否则会退到「能分段但很慢」
+    // 的镜像上，反而不如单连接跑满最快线路。
+    if (total >= 8 * 1024 * 1024 && probes.isNotEmpty && probes.first.ranged) {
       onStatus?.call('正在多线程下载 ${asset.name}…');
       final ok = await _downloadSegmented(
         file,
