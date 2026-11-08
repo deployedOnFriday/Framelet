@@ -119,7 +119,9 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 自动连播进行中，防止 completed 重复触发。
   bool _advancing = false;
 
-  List<ScannedVideo> get _playlist => widget.episodes ?? const [];
+  /// 播放列表。调用方没传或只传了单集时，从媒体库按当前文件反查整组，
+  /// 避免从「最近播放」打开第 N 集时上一集/下一集/选集全部消失。
+  late final List<ScannedVideo> _playlist;
 
   int get _currentIndex {
     final index = _playlist.indexWhere((v) => v.path == _current.path);
@@ -146,6 +148,16 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void initState() {
     super.initState();
+    final provided = widget.episodes;
+    if (provided != null && provided.length > 1) {
+      _playlist = provided;
+    } else {
+      final library = MediaLibrary.instance;
+      final resolved = library.episodesOf(
+        library.resolveAggregated(widget.video),
+      );
+      _playlist = resolved.length > 1 ? resolved : (provided ?? [widget.video]);
+    }
     _positionSub = _player.stream.position.listen((position) {
       _positionSec = position.inMilliseconds / 1000;
       // 弹幕层逐帧时钟（ValueNotifier，不触发整页重建）

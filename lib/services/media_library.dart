@@ -429,7 +429,6 @@ class MediaLibrary extends ChangeNotifier {
   /// 只按「同一媒体源 + 同一文件夹」收集，不再比较 kind——
   /// 旧缓存里组内文件的分类可能与聚合条目不一致，按 kind 过滤会漏掉整部剧。
   List<ScannedVideo> episodesOf(ScannedVideo video) {
-    if (video.episodeCount <= 1) return [video];
     final parent = parentPathOf(video.path);
     final result = <ScannedVideo>[];
     for (final videos in _videosBySource.values) {
@@ -440,6 +439,11 @@ class MediaLibrary extends ChangeNotifier {
         result.add(candidate);
       }
     }
+    if (result.length <= 1) return [video];
+    // 调用方可能拿的是任意一集原始文件，episodeCount 仍是 1；
+    // 只要同目录文件看起来是剧集，就返回整组，播放器的上一集/
+    // 下一集与详情页选集才不会因为入口不同而消失。
+    if (video.episodeCount <= 1 && !_isSeriesGroup(result)) return [video];
     // 正片排前、花絮排后；同类按自然顺序
     result.sort((a, b) {
       final aExtra = WebDavService.isExtraFile(a.title) ? 1 : 0;
@@ -458,9 +462,14 @@ class MediaLibrary extends ChangeNotifier {
     final videos = _videosBySource[video.sourceId];
     if (videos == null || videos.isEmpty) return video;
     final parent = parentPathOf(video.path);
-    for (final item in _aggregated(video.sourceId)) {
-      if (parentPathOf(item.path) == parent) return item;
-    }
+    final sameFolder = _aggregated(video.sourceId)
+        .where((item) => parentPathOf(item.path) == parent)
+        .toList();
+    if (sameFolder.length == 1) return sameFolder.single;
+    final series = sameFolder
+        .where((item) => item.kind != MediaKind.movie)
+        .toList();
+    if (series.length == 1) return series.single;
     return video;
   }
 
@@ -1367,9 +1376,22 @@ class MediaLibrary extends ChangeNotifier {
   ScannedVideo resolveAggregated(ScannedVideo video) {
     final videos = _videosBySource[video.sourceId];
     if (videos == null || videos.isEmpty) return video;
-    for (final item in _aggregated(video.sourceId)) {
+    final aggregated = _aggregated(video.sourceId);
+    for (final item in aggregated) {
       if (item.path == video.path) return item;
     }
+    // 播放历史记录的是用户实际点开的那一集，可能不是聚合代表文件
+    // （例如从第 29 集续播）。同一文件夹只有一个聚合条目时，它必然
+    // 就是这部剧；多部电影同目录时聚合条目会多于一个，不能硬套。
+    final parent = parentPathOf(video.path);
+    final sameFolder = aggregated
+        .where((item) => parentPathOf(item.path) == parent)
+        .toList();
+    if (sameFolder.length == 1) return sameFolder.single;
+    final series = sameFolder
+        .where((item) => item.kind != MediaKind.movie)
+        .toList();
+    if (series.length == 1) return series.single;
     return video;
   }
 
@@ -1856,11 +1878,13 @@ class MediaLibrary extends ChangeNotifier {
     if (group.any((video) => WebDavService.looksLikeEpisode(video.title))) {
       return true;
     }
-    // 纯数字文件名（1.mkv、14~4K.mp4）在 ≥3 个文件时视为剧集
+    // 纯数字文件名（1.mkv、14~4K.mp4、28 HDR.mkv）在 ≥3 个文件时
+    // 视为剧集。用 cleanTitle 再判断一次，兼容旧缓存里带画质尾巴的标题。
     if (group.length >= 3 &&
         group.every(
-          (video) =>
-              RegExp(r'^\d{1,3}\s*[~\-_.]*\s*$').hasMatch(video.title.trim()),
+          (video) => WebDavService.looksLikeBareEpisode(
+            WebDavService.cleanTitle(video.title),
+          ),
         )) {
       return true;
     }

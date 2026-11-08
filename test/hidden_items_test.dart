@@ -208,4 +208,25 @@ void main() {
     expect(MediaLibrary.aggregate([interview]), hasLength(1));
     expect(MediaLibrary.aggregate([opening]), isEmpty);
   });
+
+  test('从任意一集打开仍能拿到整季列表（上一集/下一集/选集）', () async {
+    const folder = '/夸克网盘/movie/嫁金钗 (2026) 4K HDR杜比视界 全30集';
+    final videos = [
+      for (var i = 28; i <= 30; i++)
+        ScannedVideo(
+          sourceId: _sourceId,
+          path: '$folder/$i HDR.mkv',
+          title: '$i HDR',
+          kind: MediaKind.series,
+        ),
+    ];
+    final library = await _load(await _storeWith(videos));
+    final second = library.findVideo(_sourceId, '$folder/29 HDR.mkv')!;
+
+    final aggregate = library.resolveAggregated(second);
+    expect(aggregate.title, '嫁金钗');
+    expect(aggregate.episodeCount, 3);
+    expect(library.episodesOf(second), hasLength(3));
+    expect(library.episodesOf(aggregate), hasLength(3));
+  });
 }

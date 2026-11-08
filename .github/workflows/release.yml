@@ -131,9 +131,12 @@ jobs:
   release:
     needs: [windows, android, macos]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # 任一平台因网络/依赖下载失败时，不要让整次发布彻底没有 Release；
+    # 先把已成功平台的产物发出去，失败的平台后续单独重跑即可补传。
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           merge-multiple: true
       - name: Create release
@@ -144,4 +147,5 @@ jobs:
             framelet-windows-x64-portable.zip
             framelet-android.apk
             framelet-macos.dmg
+          fail_on_unmatched_files: false
           generate_release_notes: true
