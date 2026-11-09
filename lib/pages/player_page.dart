@@ -112,8 +112,14 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 当前播放的条目（可切集）
   late ScannedVideo _current = widget.video;
-  double _speed = 1.0;
+
+  /// 倍速用 ValueNotifier 共享：media_kit 全屏会复制 controls 子树，
+  /// 页面级 setState 不会重建全屏里的倍速按钮。
+  final ValueNotifier<double> _speed = ValueNotifier<double>(1.0);
   static const _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+
+  /// 顶栏标题同样用共享通知：全屏控制层里的标题要能随切集更新。
+  final ValueNotifier<String> _title = ValueNotifier<String>('');
 
   // 音量状态（mpv 音量 0-100）
   double _volume = 100;
@@ -270,7 +276,8 @@ class _PlayerPageState extends State<PlayerPage> {
     });
     _restoreVolume();
     // 默认倍速来自 设置 → 播放
-    _speed = PlaybackPreferences.instance.defaultSpeed;
+    _speed.value = PlaybackPreferences.instance.defaultSpeed;
+    _title.value = _headerTitle;
     _open(initial: true);
   }
 
@@ -279,6 +286,9 @@ class _PlayerPageState extends State<PlayerPage> {
     _durationSec = duration.inMilliseconds / 1000;
     if (wasZero && _durationSec > 0) {
       _debugLog('视频已就绪，时长 ${_durationSec.toStringAsFixed(1)} 秒');
+      // 默认倍速在 open 后立即设置时，mpv 可能尚未接收媒体；时长就绪
+      // 后再补一次，确保每次开播都按用户设置的速度播放。
+      unawaited(_applySpeed(_speed.value, showOsd: false));
     }
     if (!_seekedToStart && _durationSec > 0) {
       _seekedToStart = true;
@@ -356,6 +366,8 @@ class _PlayerPageState extends State<PlayerPage> {
     _resumeSeekTimer?.cancel();
     _osdTimer?.cancel();
     _osdMessage.dispose();
+    _speed.dispose();
+    _title.dispose();
     _focusNode.dispose();
     // 常驻播放器：只停播、不销毁（见 PlayerHost）。mpv 的 render
     // context 释放与 terminate 都是同步 FFI，逐次销毁正是退出卡顿
@@ -404,6 +416,13 @@ class _PlayerPageState extends State<PlayerPage> {
     await _videoKey.currentState?.toggleFullscreen();
   }
 
+  Future<void> _exitPlayer() async {
+    await _captureThumbnail();
+    if (!mounted) return;
+    _refocus();
+    Navigator.of(context).maybePop();
+  }
+
   Future<void> _onEscape() async {
     if (_videoKey.currentState?.isFullscreen() ?? false) {
       await _videoKey.currentState?.exitFullscreen();
@@ -434,10 +453,59 @@ class _PlayerPageState extends State<PlayerPage> {
     await _switchTo(_playlist[_currentIndex - 1]);
   }
 
-  Future<void> _setSpeed(double rate) async {
-    setState(() => _speed = rate);
-    await _player.setRate(rate);
-    _showOsd(rate == 1.0 ? '正常倍速' : '$rate 倍速');
+  Future<void> _setSpeed(double rate) => _applySpeed(rate, showOsd: true);
+
+  String _speedLabel(double rate) =>
+      rate == rate.truncateToDouble() ? '${rate.toInt()}x' : '${rate}x';
+
+  /// 设置播放速度。
+  ///
+  /// 常驻 Player 与全屏时附加的第二个 Video 会让 media_kit 的 setRate
+  /// 偶发只更新 Dart 侧 state、mpv 的 speed 属性没有真正落地。这里在
+  /// setRate 之后再直接写一次 native speed，并读回校验，保证画面真的变速。
+  Future<void> _applySpeed(double rate, {required bool showOsd}) async {
+    if (!mounted) return;
+    final previous = _speed.value;
+    _speed.value = rate;
+    final platform = _player.platform;
+    var applied = false;
+    Object? failure;
+
+    try {
+      await _player.setRate(rate);
+      applied = platform is! NativePlayer;
+    } catch (error) {
+      failure = error;
+    }
+
+    if (platform is NativePlayer) {
+      try {
+        await platform.setProperty('speed', rate.toStringAsFixed(3));
+        await platform.setProperty('audio-pitch-correction', 'yes');
+        final actual = double.tryParse(await platform.getProperty('speed'));
+        if (actual == null || (actual - rate).abs() > 0.02) {
+          await platform.command(['set', 'speed', rate.toStringAsFixed(3)]);
+        }
+        final verified = double.tryParse(await platform.getProperty('speed'));
+        applied = verified == null || (verified - rate).abs() <= 0.02;
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+
+    if (!applied) {
+      if (!mounted) return;
+      _speed.value = previous;
+      _debugLog('设置倍速失败: $failure');
+      if (showOsd) _showOsd('倍速切换失败，请重试');
+      return;
+    }
+
+    if (!mounted) return;
+    _debugLog('倍速已切换: ${_speedLabel(rate)}');
+    if (showOsd) {
+      _showOsd(rate == 1.0 ? '正常倍速' : '${_speedLabel(rate)} 倍速');
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -476,6 +544,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _danmakuEpisodeKey = null;
       _danmakuEnabled = false;
     });
+    _title.value = _headerTitle;
     if (osd != null) _showOsd(osd);
     _debugLog('切换剧集: ${video.title}');
     await _open();
@@ -587,7 +656,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _acceptStreamEvents = true;
       final duration = _player.state.duration;
       if (duration > Duration.zero) _handleDuration(duration);
-      await _player.setRate(_speed);
+      await _applySpeed(_speed.value, showOsd: false);
       _debugLog('open() 调用完成');
       unawaited(_loadSubtitleFiles(source, authPassword));
       // 自动加载弹幕（设置 → 播放），需先配置弹幕服务
@@ -1033,27 +1102,30 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 倍速按钮：显示当前倍速，点击向上弹菜单。
   Widget _buildSpeedButton() {
-    return PopupMenuButton<double>(
-      tooltip: '倍速',
-      color: _menuColor,
-      position: PopupMenuPosition.over,
-      initialValue: _speed,
-      padding: EdgeInsets.zero,
-      onSelected: (rate) {
-        _refocus();
-        _setSpeed(rate);
-      },
-      itemBuilder: (_) => [
-        for (final rate in _speedOptions)
-          PopupMenuItem(
-            value: rate,
-            height: 40,
-            child: _menuRow(rate == 1.0 ? '正常' : '${rate}x', rate == _speed),
-          ),
-      ],
-      child: _ControlButtonLabel(
-        label:
-            '${_speed == _speed.truncateToDouble() ? _speed.toInt() : _speed}x',
+    return ValueListenableBuilder<double>(
+      valueListenable: _speed,
+      builder: (context, speed, _) => PopupMenuButton<double>(
+        tooltip: '倍速',
+        color: _menuColor,
+        position: PopupMenuPosition.over,
+        initialValue: speed,
+        padding: EdgeInsets.zero,
+        onSelected: (rate) {
+          _refocus();
+          _setSpeed(rate);
+        },
+        itemBuilder: (_) => [
+          for (final rate in _speedOptions)
+            PopupMenuItem(
+              value: rate,
+              height: 40,
+              child: _menuRow(
+                rate == 1.0 ? '正常' : _speedLabel(rate),
+                rate == speed,
+              ),
+            ),
+        ],
+        child: _ControlButtonLabel(label: _speedLabel(speed)),
       ),
     );
   }
@@ -1800,8 +1872,8 @@ class _PlayerPageState extends State<PlayerPage> {
         children: [
           Positioned.fill(
             child: MaterialDesktopVideoControlsTheme(
-              normal: _desktopControlsTheme(),
-              fullscreen: _desktopControlsTheme(),
+              normal: _desktopControlsTheme(showTopBar: false),
+              fullscreen: _desktopControlsTheme(showTopBar: true),
               child: Video(
                 key: _videoKey,
                 controller: _controller,
@@ -1950,34 +2022,7 @@ class _PlayerPageState extends State<PlayerPage> {
             child: SafeArea(
               child: Padding(
                 padding: const EdgeInsets.all(12),
-                child: Row(
-                  children: [
-                    _BackButton(
-                      onTap: () async {
-                        await _captureThumbnail();
-                        if (!context.mounted) return;
-                        _refocus();
-                        Navigator.of(context).maybePop();
-                      },
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        _headerTitle,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          shadows: [
-                            Shadow(blurRadius: 8, color: Colors.black54),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
+                child: _buildTopBar(onBack: _exitPlayer),
               ),
             ),
           ),
@@ -1993,15 +2038,58 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 注意：media_kit 的底栏是一个不换行的 Row，电视剧多出「上一集/下一集」后
   /// 右侧按钮会被挤出可视区域（看起来像音轨/字幕按钮消失）。这里把右半部分
   /// 包进 Expanded + 横向滚动，窄窗口下也不会被裁掉。
-  MaterialDesktopVideoControlsThemeData _desktopControlsTheme() {
+  Widget _buildTopBar({required VoidCallback onBack}) {
+    return Row(
+      children: [
+        _BackButton(onTap: onBack),
+        const SizedBox(width: 10),
+        Expanded(
+          child: ValueListenableBuilder<String>(
+            valueListenable: _title,
+            builder: (context, title, _) => Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                shadows: [Shadow(blurRadius: 8, color: Colors.black54)],
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  MaterialDesktopVideoControlsThemeData _desktopControlsTheme({
+    required bool showTopBar,
+  }) {
     final audioTracks = _realAudioTracks;
     final subtitleTracks = _realSubtitleTracks;
     final multi = _playlist.length > 1;
     return MaterialDesktopVideoControlsThemeData(
       keyboardShortcuts: _shortcutBindings,
+      // 控制条收起后隐藏鼠标；全屏时不再一直显示箭头。
+      hideMouseOnControlsRemoval: true,
       // 内建点击播放/暂停默认关闭；这里开启后，点击画面中间（避开底部
       // 进度条区域）即可暂停/继续，普通与全屏共用同一套主题。
       playAndPauseOnTap: true,
+      // 全屏会新建只包含 Video + controls 的路由，页面级顶栏不在其中。
+      // 把同一份标题栏挂到 controls 的 topButtonBar，鼠标移入时随控制条出现。
+      topButtonBar: showTopBar
+          ? [
+              Expanded(
+                child: Builder(
+                  builder: (context) => _buildTopBar(
+                    onBack: () => unawaited(exitFullscreen(context)),
+                  ),
+                ),
+              ),
+            ]
+          : const [],
+      topButtonBarMargin: const EdgeInsets.symmetric(horizontal: 14),
       bottomButtonBar: [
         if (multi)
           _ControlIconButton(
