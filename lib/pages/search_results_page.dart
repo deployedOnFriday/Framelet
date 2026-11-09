@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../core/theme/app_theme.dart';
-import '../models/media_item.dart';
-import '../models/media_source.dart';
-import '../services/media_library.dart';
+import '../services/media_search.dart';
 import '../widgets/poster_grid.dart';
 
 /// 搜索结果区：只占用右侧内容区域，搜索输入仍在展开的左侧栏里。
@@ -12,25 +10,10 @@ class SearchResultsPage extends StatelessWidget {
 
   final String query;
 
-  List<MediaItem> _results() {
-    final keyword = query.trim().toLowerCase();
-    if (keyword.isEmpty) return const [];
-    final library = MediaLibrary.instance;
-    final results = <MediaItem>[];
-    for (final kind in MediaKind.values) {
-      for (final video in library.byKind(kind)) {
-        if (!video.title.toLowerCase().contains(keyword)) continue;
-        final item = toMediaItem(video);
-        if (item != null) results.add(item);
-      }
-    }
-    return results;
-  }
-
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final results = _results();
+    final results = searchMediaItems(query);
     return Material(
       color: colors.background,
       child: Padding(

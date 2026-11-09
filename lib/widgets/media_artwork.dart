@@ -10,6 +10,7 @@ class MediaArtwork extends StatelessWidget {
     required this.item,
     this.borderRadius = 12,
     this.showQuality = false,
+    this.showRating = true,
     this.fit = BoxFit.cover,
     super.key,
   });
@@ -17,6 +18,7 @@ class MediaArtwork extends StatelessWidget {
   final MediaItem item;
   final double borderRadius;
   final bool showQuality;
+  final bool showRating;
   final BoxFit fit;
 
   @override
@@ -53,15 +55,16 @@ class MediaArtwork extends StatelessWidget {
                     alignment: Alignment.center,
                     cacheWidth: cacheWidth,
                     // 解码完成前保持透明，帧就绪后淡入，避免海报闪现
-                    frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-                      if (wasSynchronouslyLoaded) return child;
-                      return AnimatedOpacity(
-                        opacity: frame == null ? 0 : 1,
-                        duration: const Duration(milliseconds: 240),
-                        curve: Curves.easeOut,
-                        child: child,
-                      );
-                    },
+                    frameBuilder:
+                        (context, child, frame, wasSynchronouslyLoaded) {
+                          if (wasSynchronouslyLoaded) return child;
+                          return AnimatedOpacity(
+                            opacity: frame == null ? 0 : 1,
+                            duration: const Duration(milliseconds: 240),
+                            curve: Curves.easeOut,
+                            child: child,
+                          );
+                        },
                     errorBuilder: (context, error, stackTrace) =>
                         _buildPlaceholder(),
                   );
@@ -69,7 +72,7 @@ class MediaArtwork extends StatelessWidget {
               )
             else
               _buildPlaceholder(),
-            if (item.rating != null)
+            if (showRating && item.rating != null)
               Positioned(
                 left: 9,
                 top: 9,

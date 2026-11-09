@@ -11,13 +11,16 @@ import 'package:framelet/models/media_item.dart';
 import 'package:framelet/models/media_source.dart';
 import 'package:framelet/pages/detail_page.dart';
 import 'package:framelet/pages/home_page.dart';
+import 'package:framelet/pages/mobile_library_page.dart';
 import 'package:framelet/services/credential_store.dart';
 import 'package:framelet/services/framelet_store.dart';
 import 'package:framelet/services/media_library.dart';
 import 'package:framelet/services/playback_history.dart';
 import 'package:framelet/services/theme_controller.dart';
+import 'package:framelet/widgets/app_shell.dart';
 import 'package:framelet/widgets/banner_carousel.dart';
 import 'package:framelet/widgets/media_artwork.dart';
+import 'package:framelet/widgets/mobile_poster_card.dart';
 import 'package:framelet/widgets/poster_card.dart';
 import 'package:framelet/widgets/recent_playback_card.dart';
 import 'package:framelet/widgets/side_navigation.dart';
@@ -78,8 +81,12 @@ Future<ByteData> _readFont(File file) async {
   return ByteData.view(bytes.buffer);
 }
 
-Future<void> _pumpApp(WidgetTester tester) async {
-  tester.view.physicalSize = const Size(1440, 1000);
+Future<void> _pumpApp(
+  WidgetTester tester, {
+  Size size = const Size(1440, 1000),
+  bool phone = false,
+}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(() {
     tester.view.resetPhysicalSize();
@@ -93,7 +100,14 @@ Future<void> _pumpApp(WidgetTester tester) async {
   PlaybackHistory.instanceForTesting = PlaybackHistory.withStore(
     MemoryFrameletStore(),
   );
-  await tester.pumpWidget(const FrameletApp());
+  await tester.pumpWidget(
+    phone
+        ? MaterialApp(
+            theme: AppTheme.light.copyWith(platform: TargetPlatform.android),
+            home: const AppShell(),
+          )
+        : const FrameletApp(),
+  );
   await tester.pump(const Duration(milliseconds: 300));
 }
 
@@ -133,8 +147,12 @@ List<ScannedVideo> _sampleVideos() {
 }
 
 /// 带内容的媒体库：用于海报墙与搜索面板的视觉/行为校验。
-Future<void> _pumpAppWithLibrary(WidgetTester tester) async {
-  tester.view.physicalSize = const Size(1440, 1000);
+Future<void> _pumpAppWithLibrary(
+  WidgetTester tester, {
+  Size size = const Size(1440, 1000),
+  bool phone = false,
+}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(() {
     tester.view.resetPhysicalSize();
@@ -152,7 +170,14 @@ Future<void> _pumpAppWithLibrary(WidgetTester tester) async {
       lastSync: '刚刚',
     ),
   ]);
-  await store.saveVideos('local', _sampleVideos());
+  final videos = _sampleVideos();
+  if (phone) {
+    // 手机端卡片会展示「年份 · 文件大小」；补一组上映年份让截图更贴近真实数据。
+    for (var i = 0; i < videos.length; i++) {
+      videos[i] = videos[i].copyWith(releaseDate: '${2016 + (i % 6)}-01-01');
+    }
+  }
+  await store.saveVideos('local', videos);
   final library = _TestMediaLibrary(
     store: InMemoryCredentialStore(),
     db: store,
@@ -166,7 +191,14 @@ Future<void> _pumpAppWithLibrary(WidgetTester tester) async {
   // 横幅轮播内容随机会导致文本断言与 golden 截图不稳定，固定随机源
   HomePage.bannerShuffleRandom = Random(2026);
   addTearDown(() => HomePage.bannerShuffleRandom = null);
-  await tester.pumpWidget(const FrameletApp());
+  await tester.pumpWidget(
+    phone
+        ? MaterialApp(
+            theme: AppTheme.light.copyWith(platform: TargetPlatform.android),
+            home: const AppShell(),
+          )
+        : const FrameletApp(),
+  );
   await tester.pump(const Duration(milliseconds: 300));
 }
 
@@ -256,6 +288,96 @@ void main() {
     expect(find.widgetWithText(PosterCard, '风之谷'), findsOneWidget);
     // 首页海报墙由响应式网格铺开，不再出现横向滚动列表
     expect(find.byType(ListView), findsNothing);
+  });
+
+  testWidgets('手机端隐藏侧栏并使用底部导航与双列海报墙', (tester) async {
+    await _pumpAppWithLibrary(tester, size: const Size(390, 844), phone: true);
+    await tester.tap(find.byKey(const ValueKey('mobile-nav-movie')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(SideNavigation), findsNothing);
+    for (final key in [
+      'mobile-nav-home',
+      'mobile-nav-movie',
+      'mobile-nav-series',
+      'mobile-nav-anime',
+      'mobile-nav-settings',
+    ]) {
+      expect(find.byKey(ValueKey(key)), findsOneWidget);
+    }
+    expect(find.byType(MobileLibraryPage), findsOneWidget);
+    expect(find.byKey(const ValueKey('mobile-library-title')), findsOneWidget);
+    expect(find.byKey(const ValueKey('mobile-search')), findsOneWidget);
+    expect(find.byKey(const ValueKey('mobile-filter')), findsOneWidget);
+    expect(find.text('共 9 个条目'), findsOneWidget);
+
+    final cards = find.byType(MobilePosterCard);
+    expect(cards, findsWidgets);
+    final first = tester.getRect(cards.at(0));
+    final second = tester.getRect(cards.at(1));
+    final third = tester.getRect(cards.at(2));
+    expect(first.top, closeTo(second.top, 0.1));
+    expect(second.left, greaterThan(first.right));
+    expect(third.top, greaterThan(first.bottom));
+    expect(first.width, closeTo((390 - 40 - 14) / 2, 0.1));
+
+    final artwork = tester.getSize(
+      find
+          .descendant(of: cards.at(0), matching: find.byType(MediaArtwork))
+          .first,
+    );
+    expect(artwork.width / artwork.height, closeTo(2 / 3, 0.001));
+
+    final firstCardTitle = find.descendant(
+      of: cards.at(0),
+      matching: find.text('风之谷'),
+    );
+    final title = tester.widget<Text>(firstCardTitle);
+    expect(title.maxLines, 2);
+    expect(title.overflow, TextOverflow.ellipsis);
+    final meta = tester.widget<Text>(
+      find.descendant(of: cards.at(0), matching: find.textContaining('GB')),
+    );
+    expect(meta.data, matches(RegExp(r'^\d{4} · 1\.2 GB$')));
+  });
+
+  testWidgets('手机端搜索与筛选入口可用', (tester) async {
+    await _pumpAppWithLibrary(tester, size: const Size(390, 844), phone: true);
+    await tester.tap(find.byKey(const ValueKey('mobile-nav-movie')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('mobile-filter')));
+    await tester.pumpAndSettle();
+    expect(find.text('筛选与排序'), findsOneWidget);
+    expect(find.text('只看已评分'), findsOneWidget);
+    await tester.tap(find.text('应用'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('mobile-search')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('mobile-search-field')), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('mobile-search-field')),
+      '星际',
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('mobile-search-results-grid')),
+        matching: find.text('星际穿越'),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('手机端电影页黄金截图', (tester) async {
+    await _pumpAppWithLibrary(tester, size: const Size(390, 844), phone: true);
+    await tester.tap(find.byKey(const ValueKey('mobile-nav-movie')));
+    await tester.pumpAndSettle();
+    await expectLater(
+      find.byType(AppShell),
+      matchesGoldenFile('goldens/mobile_movie.png'),
+    );
   });
 
   testWidgets('点搜索后左栏展开成输入框，结果实时显示在右侧', (tester) async {

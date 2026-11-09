@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../core/theme/app_theme.dart';
+import '../core/utils/phone_layout.dart';
 import '../models/media_item.dart';
 import '../models/media_source.dart';
 import '../pages/home_page.dart';
 import '../pages/library_page.dart';
+import '../pages/mobile_library_page.dart';
+import '../pages/mobile_search_page.dart';
 import '../pages/search_results_page.dart';
 import '../pages/settings_page.dart';
 import '../services/media_library.dart';
 import '../services/perf_diagnostics.dart';
+import 'mobile_bottom_navigation.dart';
 import 'side_navigation.dart';
 
 class AppShell extends StatefulWidget {
@@ -78,6 +83,12 @@ class _AppShellState extends State<AppShell>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted && _searchOpen.value) _searchFocus.requestFocus();
     });
+  }
+
+  void _openMobileSearch() {
+    Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => const MobileSearchPage()));
   }
 
   void _closeSearch() {
@@ -157,10 +168,12 @@ class _AppShellState extends State<AppShell>
 
   @override
   Widget build(BuildContext context) {
+    final phone = isPhoneLayout(context);
     return CallbackShortcuts(
       bindings: {
-        const SingleActivator(LogicalKeyboardKey.keyK, control: true):
-            _openSearch,
+        const SingleActivator(LogicalKeyboardKey.keyK, control: true): phone
+            ? _openMobileSearch
+            : _openSearch,
         const SingleActivator(LogicalKeyboardKey.escape): _closeSearch,
         // 性能诊断：F3 切换叠加层，F4 落盘最近帧时间统计
         const SingleActivator(LogicalKeyboardKey.f3):
@@ -169,79 +182,119 @@ class _AppShellState extends State<AppShell>
       },
       child: Focus(
         autofocus: true,
-        child: Scaffold(
-          body: AnimatedBuilder(
-            animation: MediaLibrary.instance,
-            builder: (context, _) => Row(
+        child: AnimatedBuilder(
+          animation: MediaLibrary.instance,
+          builder: (context, _) =>
+              phone ? _buildPhoneLayout(context) : _buildDesktopLayout(context),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDesktopLayout(BuildContext context) {
+    return Scaffold(
+      body: Row(
+        children: [
+          // 只让侧栏自己响应搜索状态，避免每次展开/输入都重建整个页面区。
+          ValueListenableBuilder<bool>(
+            valueListenable: _searchOpen,
+            builder: (context, searchActive, _) => SideNavigation(
+              selectedIndex: _selectedIndex,
+              onSelected: _select,
+              onSearch: _openSearch,
+              searchActive: searchActive,
+              searchController: _searchController,
+              searchFocusNode: _searchFocus,
+              onSearchChanged: _onSearchChanged,
+              onCloseSearch: _closeSearch,
+              onSync: _syncNow,
+              syncing: _syncing,
+            ),
+          ),
+          const VerticalDivider(width: 1, thickness: 1),
+          Expanded(
+            child: Stack(
               children: [
-                // 只让侧栏自己响应搜索状态，避免每次展开/输入都重建整个页面区。
-                ValueListenableBuilder<bool>(
-                  valueListenable: _searchOpen,
-                  builder: (context, searchActive, _) => SideNavigation(
-                    selectedIndex: _selectedIndex,
-                    onSelected: _select,
-                    onSearch: _openSearch,
-                    searchActive: searchActive,
-                    searchController: _searchController,
-                    searchFocusNode: _searchFocus,
-                    onSearchChanged: _onSearchChanged,
-                    onCloseSearch: _closeSearch,
-                    onSync: _syncNow,
-                    syncing: _syncing,
-                  ),
-                ),
-                const VerticalDivider(width: 1, thickness: 1),
-                Expanded(
-                  child: Stack(
-                    children: [
-                      FadeTransition(
-                        opacity: _fade,
-                        child: PageView(
-                          controller: _pageController,
-                          physics: const NeverScrollableScrollPhysics(),
-                          children: [
-                            HomePage(
-                              onOpenLibrary: _openLibrary,
-                              onOpenSettings: () => _select(5),
-                            ),
-                            LibraryPage(
-                              title: '电影',
-                              items: _itemsFor(MediaKind.movie),
-                            ),
-                            LibraryPage(
-                              title: '电视剧',
-                              items: _itemsFor(MediaKind.series),
-                            ),
-                            LibraryPage(
-                              title: '动漫',
-                              items: _itemsFor(MediaKind.anime),
-                            ),
-                            LibraryPage(
-                              title: '综艺',
-                              items: _itemsFor(MediaKind.variety),
-                            ),
-                            const SettingsPage(),
-                          ],
-                        ),
-                      ),
-                      Positioned.fill(
-                        child: ValueListenableBuilder<String>(
-                          valueListenable: _searchQuery,
-                          builder: (context, query, _) {
-                            if (!_searchOpen.value || query.trim().isEmpty) {
-                              return const SizedBox.shrink();
-                            }
-                            return SearchResultsPage(query: query);
-                          },
-                        ),
-                      ),
-                    ],
+                _buildPageView(phone: false),
+                Positioned.fill(
+                  child: ValueListenableBuilder<String>(
+                    valueListenable: _searchQuery,
+                    builder: (context, query, _) {
+                      if (!_searchOpen.value || query.trim().isEmpty) {
+                        return const SizedBox.shrink();
+                      }
+                      return SearchResultsPage(query: query);
+                    },
                   ),
                 ),
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPhoneLayout(BuildContext context) {
+    final colors = context.colors;
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: dark ? Brightness.light : Brightness.dark,
+        statusBarBrightness: dark ? Brightness.dark : Brightness.light,
+        systemNavigationBarColor: colors.surface,
+        systemNavigationBarIconBrightness: dark
+            ? Brightness.light
+            : Brightness.dark,
+        systemNavigationBarDividerColor: Colors.transparent,
+      ),
+      child: Scaffold(
+        body: SafeArea(
+          bottom: false,
+          child: Column(
+            children: [
+              Expanded(child: _buildPageView(phone: true)),
+              MobileBottomNavigation(
+                selectedPage: _selectedIndex,
+                onSelected: _select,
+              ),
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildPageView({required bool phone}) {
+    Widget category(String title, MediaKind kind) {
+      final items = _itemsFor(kind);
+      if (phone) {
+        return MobileLibraryPage(
+          title: title,
+          items: items,
+          onSearch: _openMobileSearch,
+        );
+      }
+      return LibraryPage(title: title, items: items);
+    }
+
+    return FadeTransition(
+      opacity: _fade,
+      child: PageView(
+        controller: _pageController,
+        physics: const NeverScrollableScrollPhysics(),
+        children: [
+          HomePage(
+            onOpenLibrary: _openLibrary,
+            onOpenSettings: () => _select(5),
+          ),
+          category('电影', MediaKind.movie),
+          category('电视剧', MediaKind.series),
+          category('动漫', MediaKind.anime),
+          category('综艺', MediaKind.variety),
+          const SettingsPage(),
+        ],
       ),
     );
   }
