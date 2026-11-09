@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 /// 用 Windows 凭据隔离机制（DPAPI）保存敏感信息：
@@ -7,7 +9,15 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 class CredentialStore {
   CredentialStore();
 
-  final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  /// macOS 默认使用 data-protection keychain，需要
+  /// `keychain-access-groups` entitlement（进而需要 provisioning profile）。
+  /// 当前 DMG 为 ad-hoc 签名，取不到该权限会让所有读写抛错；回退到
+  /// legacy keychain 即可，无需额外 entitlement。
+  final FlutterSecureStorage _storage = Platform.isMacOS
+      ? const FlutterSecureStorage(
+          mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+        )
+      : const FlutterSecureStorage();
 
   Future<String?> readSources() => _storage.read(key: 'framelet.sources');
 

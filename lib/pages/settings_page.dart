@@ -12,6 +12,7 @@ import '../services/scraper_service.dart';
 import '../services/theme_controller.dart';
 import '../services/update_service.dart';
 import '../widgets/match_dialog.dart';
+import 'webdav_browser_page.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -542,14 +543,8 @@ class _SettingsPageState extends State<SettingsPage>
       animation: MediaLibrary.instance,
       builder: (context, _) {
         final library = MediaLibrary.instance;
-        var total = 0;
-        var withPoster = 0;
-        for (final kind in MediaKind.values) {
-          final items = library.byKind(kind);
-          total += items.length;
-          withPoster += items.where((v) => v.posterPath != null).length;
-        }
-        final missing = total - withPoster;
+        final missing = library.unscrapedItems().length;
+        final total = library.matchedCount + missing;
 
         return ListView(
           children: [
@@ -573,11 +568,11 @@ class _SettingsPageState extends State<SettingsPage>
                   Row(
                     children: [
                       _scrapeStat(
-                        '${library.byKind(MediaKind.movie).length + library.byKind(MediaKind.series).length + library.byKind(MediaKind.anime).length + library.byKind(MediaKind.variety).length}',
+                        '${library.matchedCount + missing}',
                         '媒体库条目',
                       ),
                       const SizedBox(width: 26),
-                      _scrapeStat('$withPoster', '已匹配海报'),
+                      _scrapeStat('${library.matchedCount}', '已匹配海报'),
                       const SizedBox(width: 26),
                       _scrapeStat('$missing', '待匹配'),
                     ],
@@ -650,8 +645,8 @@ class _SettingsPageState extends State<SettingsPage>
                       if (!library.scraping)
                         TextButton(
                           key: const ValueKey('rescrape-all'),
-                          onPressed: () => library.scrapeAll(force: true),
-                          child: const Text('全部重新刮削'),
+                          onPressed: () => library.backfillMissingMedia(),
+                          child: const Text('补齐剧照'),
                         ),
                       const SizedBox(width: 8),
                       if (missing > 0 && !library.scraping)
@@ -781,14 +776,9 @@ class _SettingsPageState extends State<SettingsPage>
               },
             ),
             const SizedBox(height: 18),
-            Builder(
-              builder: (context) {
-                final unscraped = library.unscrapedItems();
-                return unscraped.isEmpty
-                    ? const SizedBox.shrink()
-                    : _UnmatchedEntry(items: unscraped);
-              },
-            ),
+            // 常驻入口：即使当前没有未匹配条目，也要留着去手动修正
+            // 已匹配错的条目（旧实现会在数量为 0 时整块消失）。
+            _UnmatchedEntry(items: library.unscrapedItems()),
             const SizedBox(height: 18),
             _buildScrapeSourceSettings(context, library),
           ],
@@ -1221,6 +1211,9 @@ class _SettingsPageState extends State<SettingsPage>
                 videoCount: _countVideos(source.id),
                 onEdit: () => _editSource(existing: source),
                 onSync: () => _scanSource(source),
+                onManage: source.isLocal
+                    ? null
+                    : () => _openWebDavBrowser(source),
                 onDelete: () => _deleteSource(source),
                 onToggleEnabled: (enabled) =>
                     MediaLibrary.instance.setSourceEnabled(source.id, enabled),
@@ -1232,21 +1225,10 @@ class _SettingsPageState extends State<SettingsPage>
                 padding: EdgeInsets.symmetric(vertical: 48),
                 child: Center(child: Text('还没有媒体源，点击右上角添加')),
               ),
-            _buildHiddenEntry(library),
+            _HiddenEntry(count: library.hiddenItems.length),
           ],
         );
       },
-    );
-  }
-
-  /// 已隐藏影片入口：只显示摘要卡片，点进去才是逐条恢复的二级页面，
-  /// 与未匹配内容保持一致，避免隐藏多了把媒体源设置铺满。
-  Widget _buildHiddenEntry(MediaLibrary library) {
-    final hidden = library.hiddenItems;
-    if (hidden.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: _HiddenEntry(count: hidden.length),
     );
   }
 
@@ -1548,6 +1530,21 @@ class _SettingsPageState extends State<SettingsPage>
     }
   }
 
+  Future<void> _openWebDavBrowser(MediaSource source) async {
+    if (source.isLocal) return;
+    final password = MediaLibrary.instance.passwordOf(source.id);
+    if (password == null) {
+      _showMessage('没有读取到密码，请编辑媒体源并重新保存密码');
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            WebDavBrowserPage(source: source, password: password),
+      ),
+    );
+  }
+
   void _showMessage(String message) {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
@@ -1591,7 +1588,9 @@ class _HiddenEntry extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '这些条目不显示在海报墙、最近播放与未匹配列表，点进去可恢复显示',
+                      count == 0
+                          ? '当前没有隐藏条目；在海报上右键可隐藏影片'
+                          : '这些条目不显示在海报墙、最近播放与未匹配列表，点进去可恢复显示',
                       style: TextStyle(
                         fontSize: 11.5,
                         color: context.colors.muted,
@@ -1739,7 +1738,9 @@ class _UnmatchedEntry extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      '没能自动匹配到 TMDB，点进去逐条手动搜索匹配',
+                      items.isEmpty
+                          ? '当前没有未匹配内容；匹配错的条目可在影片详情页点「修正匹配」'
+                          : '没能自动匹配到 TMDB，点进去逐条手动搜索匹配',
                       style: TextStyle(
                         fontSize: 11.5,
                         color: context.colors.muted,
@@ -1816,6 +1817,15 @@ class _UnmatchedPage extends StatelessWidget {
                     '全部匹配完成',
                     style: TextStyle(
                       fontSize: 13.5,
+                      color: context.colors.muted,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    '如果发现海报/片名匹配错了，可在影片详情页点右上角「修正匹配」',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 11.5,
                       color: context.colors.muted,
                     ),
                   ),
@@ -1897,6 +1907,7 @@ class _MediaSourceCard extends StatelessWidget {
     required this.videoCount,
     required this.onEdit,
     required this.onSync,
+    this.onManage,
     required this.onDelete,
     required this.onToggleEnabled,
   });
@@ -1907,6 +1918,7 @@ class _MediaSourceCard extends StatelessWidget {
   final int videoCount;
   final VoidCallback onEdit;
   final VoidCallback onSync;
+  final VoidCallback? onManage;
   final VoidCallback onDelete;
   final ValueChanged<bool> onToggleEnabled;
 
@@ -2015,21 +2027,27 @@ class _MediaSourceCard extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           // 「显示并刮削」开关：关闭后该源不参与海报墙展示与自动刮削
-          Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Switch(
-                value: source.enabled,
-                activeThumbColor: context.colors.primary,
-                onChanged: busy ? null : onToggleEnabled,
-              ),
-              Text(
-                source.enabled ? '显示' : '已隐藏',
-                style: TextStyle(fontSize: 10, color: context.colors.muted),
-              ),
-            ],
+          IconButton(
+            key: const ValueKey('toggle-source-enabled'),
+            onPressed: busy ? null : () => onToggleEnabled(!source.enabled),
+            tooltip: source.enabled ? '显示中，点击隐藏' : '已隐藏，点击显示',
+            icon: Icon(
+              source.enabled
+                  ? Icons.visibility_rounded
+                  : Icons.visibility_off_outlined,
+              color: source.enabled
+                  ? context.colors.primary
+                  : context.colors.muted,
+            ),
           ),
           const SizedBox(width: 4),
+          if (onManage != null)
+            IconButton(
+              key: const ValueKey('manage-source-files'),
+              onPressed: busy ? null : onManage,
+              tooltip: '管理文件',
+              icon: const Icon(Icons.folder_open_rounded),
+            ),
           IconButton(
             onPressed: busy ? null : onSync,
             tooltip: '同步扫描',
@@ -2580,7 +2598,7 @@ class _ThemePreview extends StatelessWidget {
 /// 「软件更新」卡片：GitHub Releases 比对版本 → 下载安装包 → 启动安装。
 ///
 /// Windows 走 Inno Setup 向导（自动处理正在运行的应用）；macOS 挂载
-/// dmg；Android 提示手动安装；iOS 未签名不提供应用内更新。
+/// dmg；Android 授权后唤起系统安装器；iOS 未签名不提供应用内更新。
 class _UpdateCard extends StatefulWidget {
   const _UpdateCard();
 
@@ -2682,21 +2700,30 @@ class _UpdateCardState extends State<_UpdateCard> {
   Future<void> _runInstaller() async {
     final path = _downloadedPath;
     if (path == null) return;
-    await UpdateService.launch(path);
+    bool started;
+    try {
+      started = await UpdateService.launch(path);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = '启动安装失败：$error');
+      return;
+    }
     if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
-      ..showSnackBar(const SnackBar(content: Text('安装程序已启动，按向导完成升级即可')));
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            started ? '安装程序已启动，按向导完成升级即可' : '请在系统设置中允许安装后重试',
+          ),
+        ),
+      );
   }
 
   void _openReleasePage() {
     final url = _latest?.htmlUrl;
     if (url == null || url.isEmpty) return;
-    if (Platform.isWindows) {
-      Process.run('cmd', ['/c', 'start', '', url], runInShell: true);
-    } else if (Platform.isMacOS) {
-      Process.run('open', [url]);
-    }
+    UpdateService.openUrl(url);
   }
 
   @override

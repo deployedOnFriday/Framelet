@@ -119,6 +119,68 @@ class PlaybackHistory extends ChangeNotifier {
     await _persist();
   }
 
+  /// 文件/文件夹在 WebDAV 上改名后，同步更新播放记录里的路径，
+  /// 续播进度和缩略图不丢。
+  Future<void> renamePath(
+    String sourceId,
+    String oldPath,
+    String newPath, {
+    required bool isDir,
+  }) async {
+    final oldClean = _cleanPath(oldPath);
+    final newClean = _cleanPath(newPath);
+    var changed = 0;
+    for (var i = 0; i < _entries.length; i++) {
+      final entry = _entries[i];
+      if (entry.sourceId != sourceId) continue;
+      final path = _cleanPath(entry.path);
+      String? next;
+      if (isDir) {
+        if (path == oldClean) {
+          next = newClean;
+        } else if (path.startsWith('$oldClean/')) {
+          next = '$newClean${path.substring(oldClean.length)}';
+        }
+      } else if (path == oldClean) {
+        next = newClean;
+      }
+      if (next == null || next == entry.path) continue;
+      _entries[i] = entry.copyWith(path: next);
+      changed++;
+    }
+    if (changed == 0) return;
+    notifyListeners();
+    await _persist();
+  }
+
+  /// 文件/文件夹在 WebDAV 上删除后，同步清掉对应的播放记录。
+  Future<void> removePath(
+    String sourceId,
+    String path, {
+    required bool isDir,
+  }) async {
+    final clean = _cleanPath(path);
+    final before = _entries.length;
+    _entries.removeWhere((entry) {
+      if (entry.sourceId != sourceId) return false;
+      final current = _cleanPath(entry.path);
+      return isDir
+          ? current == clean || current.startsWith('$clean/')
+          : current == clean;
+    });
+    if (_entries.length == before) return;
+    notifyListeners();
+    await _persist();
+  }
+
+  static String _cleanPath(String path) {
+    var value = path.trim();
+    while (value.length > 1 && value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    return value;
+  }
+
   /// 按条件批量移除（例如移除一部剧在最近播放里的全部集）。
   Future<void> removeWhere(bool Function(HistoryEntry entry) test) async {
     final before = _entries.length;

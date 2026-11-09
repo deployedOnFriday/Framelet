@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:framelet/models/media_source.dart';
 import 'package:framelet/services/media_library.dart';
+import 'package:framelet/services/scraper_service.dart';
 import 'package:framelet/services/webdav_service.dart';
 
 ScannedVideo video(
@@ -392,6 +393,36 @@ void main() {
       expect(result, hasLength(1));
       expect(result.first.title, '一人之下');
     });
+
+    test('带发布标签的季目录（第 4 季 - 1080p）仍向上取剧名', () {
+      const folder = '/夸克网盘/影视/一人之下/第 4 季 - 1080p WEB-DL H264 AAC';
+      final result = MediaLibrary.aggregate([
+        for (var i = 1; i <= 12; i++)
+          video(
+            '$folder/The OutCast S04E${i.toString().padLeft(2, '0')} - 第 $i 集.mp4',
+            'The OutCast S04E${i.toString().padLeft(2, '0')} - 第 $i 集',
+            kind: MediaKind.series,
+          ),
+      ]);
+      expect(result, hasLength(1));
+      expect(result.first.title, '一人之下');
+      expect(result.first.episodeCount, 12);
+    });
+
+    test('中文季号目录（第四季）仍向上取剧名', () {
+      const folder = '/夸克网盘/影视/一人之下/第四季';
+      final result = MediaLibrary.aggregate([
+        for (var i = 1; i <= 12; i++)
+          video(
+            '$folder/The OutCast S04E${i.toString().padLeft(2, '0')} - 第 $i 集.mp4',
+            'The OutCast S04E${i.toString().padLeft(2, '0')} - 第 $i 集',
+            kind: MediaKind.series,
+          ),
+      ]);
+      expect(result, hasLength(1));
+      expect(result.first.title, '一人之下');
+      expect(result.first.episodeCount, 12);
+    });
   });
 
   group('单集标题识别', () {
@@ -405,6 +436,65 @@ void main() {
       for (final name in ['一人之下', 'The 16th Episode', '三体', 'Signal', '第16集之上']) {
         expect(MediaLibrary.isEpisodeLikeTitle(name), isFalse, reason: name);
       }
+    });
+  });
+
+  group('TMDB 错配校验', () {
+    test('恶意重复条目名与目录名无关时判为不可信', () {
+      expect(
+        MediaLibrary.isPlausibleTmdbMatch(
+          name: '诛仙第一百季',
+          originalName: '诛仙第一百季',
+          sourceNames: ['一人之下', 'The OutCast'],
+        ),
+        isFalse,
+      );
+    });
+
+    test('官方名或原名任一与目录名相符即可信', () {
+      expect(
+        MediaLibrary.isPlausibleTmdbMatch(
+          name: '一人之下',
+          originalName: '一人之下',
+          sourceNames: ['一人之下', 'The OutCast'],
+        ),
+        isTrue,
+      );
+      // 英文原名兜底：中文目录/条目标题对不上时仍能靠原名确认。
+      expect(
+        MediaLibrary.isPlausibleTmdbMatch(
+          name: '洛基',
+          originalName: 'Loki',
+          sourceNames: ['Loki'],
+        ),
+        isTrue,
+      );
+    });
+
+    test('纯季号不能作为 TMDB 搜索词', () {
+      for (final query in ['第 4 季', '第4季', '第四季', 'Season 4', 'S04']) {
+        expect(ScraperService.isSeasonLabelQuery(query), isTrue, reason: query);
+      }
+      for (final query in ['一人之下', '一人之下 第4季', 'The OutCast']) {
+        expect(
+          ScraperService.isSeasonLabelQuery(query),
+          isFalse,
+          reason: query,
+        );
+      }
+    });
+
+    test('手动匹配初始搜索词取剧名目录而非季目录', () {
+      expect(
+        MediaLibrary.suggestedQueryForPath(
+          '/夸克网盘/影视/一人之下/第四季/The.OutCast.S04E01.mkv',
+        ),
+        '一人之下',
+      );
+      expect(
+        MediaLibrary.suggestedQueryForPath('/影视/黑寡妇.Black.Widow.2021.mkv'),
+        contains('黑寡妇'),
+      );
     });
   });
 }

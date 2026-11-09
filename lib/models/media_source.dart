@@ -231,6 +231,7 @@ class ScannedVideo {
   );
 
   ScannedVideo copyWith({
+    String? path,
     String? title,
     MediaKind? kind,
     int? episodeCount,
@@ -253,7 +254,7 @@ class ScannedVideo {
     bool clearTmdbId = false,
   }) => ScannedVideo(
     sourceId: sourceId,
-    path: path,
+    path: path ?? this.path,
     title: title ?? this.title,
     kind: kind ?? this.kind,
     episodeCount: episodeCount ?? this.episodeCount,

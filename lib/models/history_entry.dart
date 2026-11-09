@@ -52,13 +52,14 @@ class HistoryEntry {
   );
 
   HistoryEntry copyWith({
+    String? path,
     double? positionSec,
     double? durationSec,
     String? thumbnailPath,
     int? updatedAtMs,
   }) => HistoryEntry(
     sourceId: sourceId,
-    path: path,
+    path: path ?? this.path,
     title: title,
     kind: kind,
     positionSec: positionSec ?? this.positionSec,

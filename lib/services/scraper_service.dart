@@ -10,6 +10,7 @@ import 'proxy_resolver.dart';
 class ScrapeResult {
   const ScrapeResult({
     required this.name,
+    this.originalName,
     this.posterUrl,
     this.summary,
     this.rating,
@@ -24,6 +25,7 @@ class ScrapeResult {
   });
 
   final String name;
+  final String? originalName;
   final String? posterUrl;
   final String? summary;
   final String? rating;
@@ -147,7 +149,11 @@ class ScraperService {
   static String? proxyAddress;
 
   /// 可选 TMDB API Key（v3）：配置后优先用 TMDB，中文与电影覆盖最好。
-  static String? tmdbApiKey;
+  ///
+  /// 默认即内置 Key：安全存储读取失败（macOS 钥匙串无权限、
+  /// Android Keystore 异常等）时仍能开箱即用，避免误报
+  /// 「未配置 TMDB API Key」。
+  static String? tmdbApiKey = builtinTmdbApiKey;
 
   static const _apiHost = 'api.themoviedb.org';
   static const _apiAltHost = 'api.tmdb.org';
@@ -1441,6 +1447,7 @@ class ScraperService {
 
       Map<String, Object?>? best;
       var bestScore = 0.0;
+      var bestOriginalName = '';
       for (final item in results) {
         final map = item as Map<String, Object?>;
         final mediaType = map['media_type'] as String? ?? '';
@@ -1473,6 +1480,7 @@ class ScraperService {
         if (score > bestScore) {
           bestScore = score;
           best = map;
+          bestOriginalName = originalName;
         }
       }
       if (best == null || bestScore < 0.35) return null;
@@ -1488,6 +1496,7 @@ class ScraperService {
           '';
       return ScrapeResult(
         name: title,
+        originalName: bestOriginalName.isEmpty ? null : bestOriginalName,
         posterUrl: posterPath == null
             ? null
             : 'https://image.tmdb.org/t/p/w500$posterPath',
@@ -1568,6 +1577,9 @@ class ScraperService {
       final vote = (map['vote_average'] as num?)?.toDouble();
       return ScrapeResult(
         name: (map['title'] as String?) ?? (map['name'] as String?) ?? '',
+        originalName:
+            (map['original_title'] as String?) ??
+            (map['original_name'] as String?),
         posterUrl: posterPath == null
             ? null
             : 'https://image.tmdb.org/t/p/w500$posterPath',
@@ -2510,6 +2522,22 @@ class ScraperService {
       }
     }
     return wordScore > charScore ? wordScore : charScore;
+  }
+
+  /// 供刮削层校验「缓存条目/候选条目」是否真的对应当前目录。
+  static double nameSimilarity(String a, String b) => _similarity(a, b);
+
+  /// 纯季号查询词（「第 4 季」「Season 4」「S04」）。
+  ///
+  /// TMDB 上有大量恶意创建/重复的条目专门用这种名字劫持刮削，
+  /// 拿它们当搜索词只会命中垃圾数据。
+  static bool isSeasonLabelQuery(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return false;
+    return RegExp(
+      r'^(第\s*[0-9一二三四五六七八九十百]+\s*[季部]|season\s*\d{1,3}|s\d{1,2})$',
+      caseSensitive: false,
+    ).hasMatch(text);
   }
 
   static String _normalize(String raw) => raw

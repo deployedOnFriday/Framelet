@@ -9,6 +9,34 @@ import '../models/media_source.dart';
 class WebDavService {
   WebDavService._();
 
+  /// 管理页根目录：媒体源配置的「目录」。
+  static String rootPathOf(MediaSource source) =>
+      _normalizeDirectory(source.address, source.directory);
+
+  /// 管理页路径规范化：保证以 / 开头、去掉结尾多余的 /。
+  static String normalizePath(String path) {
+    var value = path.trim();
+    if (value.isEmpty) return '/';
+    if (!value.startsWith('/')) value = '/$value';
+    while (value.length > 1 && value.endsWith('/')) {
+      value = value.substring(0, value.length - 1);
+    }
+    return value;
+  }
+
+  static String joinPath(String parent, String name) {
+    final base = normalizePath(parent);
+    final child = name.trim();
+    return base == '/' ? '/$child' : '$base/$child';
+  }
+
+  static String parentPath(String path) {
+    final value = normalizePath(path);
+    if (value == '/') return '/';
+    final index = value.lastIndexOf('/');
+    return index <= 0 ? '/' : value.substring(0, index);
+  }
+
   static final videoExtensions = {
     '.mp4',
     '.mkv',
@@ -91,6 +119,136 @@ class WebDavService {
     }
     final normalized = '/${dirSegments.join('/')}';
     return normalized == '//' ? '/' : normalized;
+  }
+
+  /// 列出目录中的文件与文件夹（管理页用，不递归、不过滤扩展名）。
+  static Future<List<WebDavEntry>> listDirectory(
+    MediaSource source,
+    String password,
+    String path,
+  ) async {
+    final target = normalizePath(path);
+    try {
+      final entries = await _client(source, password).readDir(target);
+      final result = <WebDavEntry>[];
+      for (final entry in entries) {
+        final name = (entry.name ?? '').trim();
+        final entryPath = (entry.path ?? '').trim();
+        if (name.isEmpty || entryPath.isEmpty) continue;
+        result.add(
+          WebDavEntry(
+            name: name,
+            path: normalizePath(entryPath),
+            isDir: entry.isDir ?? false,
+            sizeBytes: entry.size ?? 0,
+            modified: entry.mTime,
+          ),
+        );
+      }
+      result.sort((a, b) {
+        if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+      return result;
+    } catch (error) {
+      throw StateError(describeManagementError(error, '读取目录'));
+    }
+  }
+
+  /// 重命名文件/文件夹。newName 只允许名称，不允许带路径分隔符。
+  static Future<String> renameEntry(
+    MediaSource source,
+    String password, {
+    required String path,
+    required String newName,
+    required bool isDir,
+  }) async {
+    final name = validateEntryName(newName);
+    final oldPath = isDir ? _directoryPath(path) : normalizePath(path);
+    final parent = parentPath(oldPath);
+    final newPath = joinPath(parent, name);
+    final target = isDir ? _directoryPath(newPath) : newPath;
+    try {
+      await _client(source, password).rename(oldPath, target, false);
+    } catch (error) {
+      throw StateError(describeManagementError(error, '重命名'));
+    }
+    return newPath;
+  }
+
+  /// 删除文件/文件夹（文件夹递归删除）。
+  static Future<void> removeEntry(
+    MediaSource source,
+    String password, {
+    required String path,
+    required bool isDir,
+  }) async {
+    final target = isDir ? _directoryPath(path) : normalizePath(path);
+    try {
+      await _client(source, password).remove(target);
+    } catch (error) {
+      throw StateError(describeManagementError(error, '删除'));
+    }
+  }
+
+  /// 在当前目录下新建文件夹。
+  static Future<String> createDirectory(
+    MediaSource source,
+    String password, {
+    required String parent,
+    required String name,
+  }) async {
+    final folder = validateEntryName(name);
+    final target = joinPath(parent, folder);
+    try {
+      await _client(source, password).mkdir(target);
+    } catch (error) {
+      throw StateError(describeManagementError(error, '新建文件夹'));
+    }
+    return target;
+  }
+
+  /// 校验用户输入的文件/文件夹名。
+  static String validateEntryName(String raw) {
+    final name = raw.trim();
+    if (name.isEmpty) throw StateError('名称不能为空');
+    if (name == '.' || name == '..') throw StateError('名称不能是 . 或 ..');
+    if (RegExp(r'[\\/]').hasMatch(name)) {
+      throw StateError('名称不能包含 / 或 \\');
+    }
+    return name;
+  }
+
+  static String _directoryPath(String path) {
+    final value = normalizePath(path);
+    return value == '/' ? '/' : '$value/';
+  }
+
+  /// 管理操作的错误文案：把 HTTP 状态翻译成能看懂的原因。
+  static String describeManagementError(Object error, String action) {
+    final text = error.toString().toLowerCase();
+    if (text.contains('401') || text.contains('unauthorized')) {
+      return '$action失败：认证未通过，请重新检查用户名和密码';
+    }
+    if (text.contains('403') || text.contains('forbidden')) {
+      return '$action失败：没有权限（网盘可能只读，或账号没有写入权限）';
+    }
+    if (text.contains('404')) {
+      return '$action失败：目标已不存在，请刷新目录后重试';
+    }
+    if (text.contains('409')) {
+      return '$action失败：同名文件/文件夹已存在，或上级目录不存在';
+    }
+    if (text.contains('423') || text.contains('locked')) {
+      return '$action失败：文件被占用或锁定';
+    }
+    if (text.contains('507')) {
+      return '$action失败：网盘空间不足';
+    }
+    if (text.contains('timeout') || text.contains('timed out')) {
+      return '$action超时，请检查网络后重试';
+    }
+    return '$action失败：$error';
   }
 
   /// 测试连接；失败抛 StateError（文案已是人话，调用方原样透传）。
@@ -702,4 +860,21 @@ class WebDavService {
   static bool _isEpisodeToken(String token) =>
       RegExp(r'^([eE][pP]?\d{1,3}|[sS]\d{1,2}[eE]\d{1,3}|\d{1,4})$')
           .hasMatch(token);
+}
+
+/// WebDAV 目录中的一项（管理页展示与操作使用）。
+class WebDavEntry {
+  const WebDavEntry({
+    required this.name,
+    required this.path,
+    required this.isDir,
+    this.sizeBytes = 0,
+    this.modified,
+  });
+
+  final String name;
+  final String path;
+  final bool isDir;
+  final int sizeBytes;
+  final DateTime? modified;
 }

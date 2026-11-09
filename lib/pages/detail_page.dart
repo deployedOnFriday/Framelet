@@ -541,8 +541,11 @@ class _HeroSection extends StatelessWidget {
   }
 
   Future<void> _matchManually(BuildContext context) async {
+    final sourcePath = episodes.isNotEmpty ? episodes.first.path : video.path;
+    final suggested = MediaLibrary.suggestedQueryForPath(sourcePath);
     final parsed = ScraperService.parseTitle(title);
-    final query = parsed.queries.isEmpty ? title : parsed.queries.first;
+    final query =
+        suggested ?? (parsed.queries.isEmpty ? title : parsed.queries.first);
     final candidate = await showDialog<ScrapeCandidate>(
       context: context,
       builder: (_) =>

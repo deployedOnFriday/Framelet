@@ -3,6 +3,9 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
+
 import 'proxy_resolver.dart';
 
 /// 应用内检查更新（GitHub Releases）。
@@ -226,7 +229,10 @@ class UpdateService {
       ...candidates.where((url) => !probes.any((probe) => probe.url == url)),
     ];
 
-    final file = File('${Directory.systemTemp.path}/${asset.name}');
+    final tempPath = Platform.isAndroid
+        ? (await getTemporaryDirectory()).path
+        : Directory.systemTemp.path;
+    final file = File('$tempPath/${asset.name}');
     try {
       if (file.existsSync()) file.deleteSync();
     } catch (_) {}
@@ -474,13 +480,39 @@ class UpdateService {
   }
 
   /// 启动安装包（Windows：Inno 向导会自动处理正在运行的应用；
-  /// macOS：挂载 dmg）。
-  static Future<void> launch(String path) async {
+  /// macOS：挂载 dmg；Android：唤起系统安装器）。
+  static Future<bool> launch(String path) async {
     if (Platform.isWindows) {
       await Process.start(path, const [], mode: ProcessStartMode.detached);
+      return true;
     } else if (Platform.isMacOS) {
       await Process.run('open', [path]);
+      return true;
+    } else if (Platform.isAndroid) {
+      return await const MethodChannel('framelet/update')
+              .invokeMethod<bool>('installApk', {'path': path}) ??
+          false;
     }
+    return false;
+  }
+
+  /// 打开外部链接（发布页兜底）。
+  static Future<bool> openUrl(String url) async {
+    if (url.isEmpty) return false;
+    if (Platform.isWindows) {
+      await Process.run('cmd', ['/c', 'start', '', url], runInShell: true);
+      return true;
+    }
+    if (Platform.isMacOS) {
+      await Process.run('open', [url]);
+      return true;
+    }
+    if (Platform.isAndroid) {
+      return await const MethodChannel('framelet/update')
+              .invokeMethod<bool>('openUrl', {'url': url}) ??
+          false;
+    }
+    return false;
   }
 }
 
