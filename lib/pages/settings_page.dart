@@ -6,7 +6,6 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../core/theme/app_theme.dart';
 import '../models/media_source.dart';
-import '../services/danmaku_service.dart';
 import '../services/media_library.dart';
 import '../services/playback_preferences.dart';
 import '../services/scraper_service.dart';
@@ -29,17 +28,13 @@ class _SettingsPageState extends State<SettingsPage>
   final _tmdbKeyController = TextEditingController();
   final _proxyController = TextEditingController();
   final _danmakuBaseUrlController = TextEditingController();
-  final _danmakuAppIdController = TextEditingController();
-  final _danmakuAppSecretController = TextEditingController();
   final _cacheMaxController = TextEditingController();
   final _cacheBackController = TextEditingController();
   final _cacheReadaheadController = TextEditingController();
   bool _scrapeFieldsFilled = false;
   bool _danmakuFieldsFilled = false;
-  bool _obscureDanmakuSecret = true;
   bool _diagnosing = false;
   bool _clearingCache = false;
-  DanmakuProvider _danmakuProvider = DanmakuProvider.dandanplay;
 
   @override
   bool get wantKeepAlive => true;
@@ -95,8 +90,6 @@ class _SettingsPageState extends State<SettingsPage>
     _tmdbKeyController.dispose();
     _proxyController.dispose();
     _danmakuBaseUrlController.dispose();
-    _danmakuAppIdController.dispose();
-    _danmakuAppSecretController.dispose();
     _cacheMaxController.dispose();
     _cacheBackController.dispose();
     _cacheReadaheadController.dispose();
@@ -148,7 +141,7 @@ class _SettingsPageState extends State<SettingsPage>
               _playbackSwitch(
                 key: 'playback-auto-danmaku',
                 title: '自动加载弹幕',
-                subtitle: '播放时自动匹配并加载弹幕（弹弹play 凭据已内置，开箱即用）',
+                subtitle: '播放时自动匹配并加载弹幕（内置弹幕服务开箱即用）',
                 value: prefs.autoLoadDanmaku,
                 onChanged: prefs.setAutoLoadDanmaku,
               ),
@@ -1275,13 +1268,11 @@ class _SettingsPageState extends State<SettingsPage>
       builder: (context, _) {
         final library = MediaLibrary.instance;
         if (!_danmakuFieldsFilled) {
-          _danmakuProvider = library.danmakuProvider;
-          _danmakuBaseUrlController.text = library.danmakuBaseUrl;
-          _danmakuAppIdController.text = library.danmakuAppId ?? '';
-          _danmakuAppSecretController.text = library.danmakuAppSecret ?? '';
+          _danmakuBaseUrlController.text = library.usingBuiltinDanmaku
+              ? ''
+              : library.danmakuBaseUrl;
           _danmakuFieldsFilled = true;
         }
-        final custom = _danmakuProvider == DanmakuProvider.custom;
         return ListView(
           children: [
             Text('弹幕设置', style: Theme.of(context).textTheme.titleLarge),
@@ -1293,44 +1284,52 @@ class _SettingsPageState extends State<SettingsPage>
                 borderRadius: BorderRadius.circular(15),
                 border: Border.all(color: context.colors.border),
               ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '弹弹play 直连',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '内置开放平台凭据，动漫弹幕优先走官方接口，通常 1–3 秒返回。',
+                          style: TextStyle(
+                            color: context.colors.muted,
+                            fontSize: 12.5,
+                            height: 1.6,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Switch(
+                    key: const ValueKey('danmaku-dandanplay-switch'),
+                    value: library.danmakuDandanplayEnabled,
+                    onChanged: library.setDanmakuDandanplayEnabled,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: context.colors.surface,
+                borderRadius: BorderRadius.circular(15),
+                border: Border.all(color: context.colors.border),
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SizedBox(
-                    width: double.infinity,
-                    child: SegmentedButton<DanmakuProvider>(
-                      segments: const [
-                        ButtonSegment(
-                          value: DanmakuProvider.dandanplay,
-                          icon: Icon(Icons.public_outlined),
-                          label: Text('DanDanPlay'),
-                        ),
-                        ButtonSegment(
-                          value: DanmakuProvider.custom,
-                          icon: Icon(Icons.dns_outlined),
-                          label: Text('御坂 / 自定义'),
-                        ),
-                      ],
-                      selected: {_danmakuProvider},
-                      onSelectionChanged: (value) {
-                        setState(() {
-                          _danmakuProvider = value.first;
-                          if (_danmakuProvider == DanmakuProvider.dandanplay) {
-                            _danmakuBaseUrlController.text =
-                                DanmakuService.officialBaseUrl;
-                          } else if (_danmakuBaseUrlController.text.trim() ==
-                              DanmakuService.officialBaseUrl) {
-                            _danmakuBaseUrlController.clear();
-                          }
-                        });
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 18),
                   Row(
                     children: [
                       Text(
-                        custom ? '自托管服务' : 'DanDanPlay 凭据',
+                        '自定义弹幕源',
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                       const SizedBox(width: 10),
@@ -1340,32 +1339,30 @@ class _SettingsPageState extends State<SettingsPage>
                           vertical: 3,
                         ),
                         decoration: BoxDecoration(
-                          color: library.hasDanmaku
-                              ? context.colors.primarySoft
-                              : context.colors.background,
+                          color: context.colors.primarySoft,
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          library.hasDanmaku ? '已配置' : '未配置',
+                          library.usingBuiltinDanmaku ? '内置' : '自定义',
                           style: TextStyle(
                             fontSize: 11,
-                            color: library.hasDanmaku
-                                ? context.colors.primary
-                                : context.colors.muted,
+                            color: context.colors.primary,
                           ),
                         ),
+                      ),
+                      const Spacer(),
+                      Switch(
+                        key: const ValueKey('danmaku-custom-switch'),
+                        value: library.danmakuCustomEnabled,
+                        onChanged: library.setDanmakuCustomEnabled,
                       ),
                     ],
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    custom
-                        ? '填写御坂网络弹幕服务的完整接口地址，例如 '
-                              'http://192.168.1.100:7768/api/v1/<Token>。'
-                              '也可以填写其它兼容 DanDanPlay API 的服务。'
-                        : '应用已内置弹弹play 凭据，无需填写即可使用。'
-                              '想用自己的配额时，可在 doc.dandanplay.com '
-                              '开发者中心申请 AppId/AppSecret 填到这里覆盖内置值。',
+                    '两个源可以同时开启：弹弹直连负责速度和动漫覆盖，'
+                    '自建源（LogVar / 御坂）补充国产剧和平台源，结果会合并展示。'
+                    '地址留空使用内置服务。',
                     style: TextStyle(
                       color: context.colors.muted,
                       fontSize: 12.5,
@@ -1373,87 +1370,61 @@ class _SettingsPageState extends State<SettingsPage>
                     ),
                   ),
                   const SizedBox(height: 16),
-                  if (custom)
-                    TextField(
-                      key: const ValueKey('danmaku-base-url'),
-                      controller: _danmakuBaseUrlController,
-                      spellCheckConfiguration:
-                          const SpellCheckConfiguration.disabled(),
-                      decoration: const InputDecoration(
-                        labelText: '弹幕接口地址',
-                        hintText: 'http://192.168.1.100:7768/api/v1/<Token>',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                    )
-                  else ...[
-                    TextField(
-                      key: const ValueKey('dandanplay-app-id'),
-                      controller: _danmakuAppIdController,
-                      spellCheckConfiguration:
-                          const SpellCheckConfiguration.disabled(),
-                      decoration: const InputDecoration(
-                        labelText: 'AppId（已内置，留空即用内置凭据）',
-                        border: OutlineInputBorder(),
-                        isDense: true,
-                      ),
+                  TextField(
+                    key: const ValueKey('danmaku-base-url'),
+                    controller: _danmakuBaseUrlController,
+                    enabled: library.danmakuCustomEnabled,
+                    spellCheckConfiguration:
+                        const SpellCheckConfiguration.disabled(),
+                    decoration: const InputDecoration(
+                      labelText: '自定义接口地址（留空使用内置）',
+                      hintText: 'https://danmu.example.com/<Token>',
+                      border: OutlineInputBorder(),
+                      isDense: true,
                     ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      key: const ValueKey('dandanplay-app-secret'),
-                      controller: _danmakuAppSecretController,
-                      obscureText: _obscureDanmakuSecret,
-                      spellCheckConfiguration:
-                          const SpellCheckConfiguration.disabled(),
-                      decoration: InputDecoration(
-                        labelText: 'AppSecret（已内置，留空即用内置凭据）',
-                        border: const OutlineInputBorder(),
-                        isDense: true,
-                        suffixIcon: IconButton(
-                          onPressed: () => setState(
-                            () =>
-                                _obscureDanmakuSecret = !_obscureDanmakuSecret,
-                          ),
-                          icon: Icon(
-                            _obscureDanmakuSecret
-                                ? Icons.visibility_outlined
-                                : Icons.visibility_off_outlined,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+                  ),
                   const SizedBox(height: 14),
-                  FilledButton.tonal(
-                    key: const ValueKey('save-danmaku-settings'),
-                    onPressed: () async {
-                      final customUrl = _danmakuBaseUrlController.text.trim();
-                      if (custom) {
-                        final uri = Uri.tryParse(customUrl);
-                        if (uri == null ||
-                            !uri.hasScheme ||
-                            uri.host.isEmpty ||
-                            !const ['http', 'https'].contains(uri.scheme)) {
-                          _showMessage('请填写有效的弹幕接口地址');
-                          return;
-                        }
-                      }
-                      await library.saveDanmakuSettings(
-                        provider: _danmakuProvider,
-                        baseUrl: custom
-                            ? customUrl
-                            : DanmakuService.officialBaseUrl,
-                        appId: custom ? '' : _danmakuAppIdController.text,
-                        appSecret: custom
-                            ? ''
-                            : _danmakuAppSecretController.text,
-                      );
-                      if (!context.mounted) return;
-                      _showMessage(
-                        library.hasDanmaku ? '弹幕凭据已保存' : '弹幕配置不完整，请检查',
-                      );
-                    },
-                    child: const Text('保存弹幕设置'),
+                  Row(
+                    children: [
+                      FilledButton.tonal(
+                        key: const ValueKey('save-danmaku-settings'),
+                        onPressed: () async {
+                          final customUrl = _danmakuBaseUrlController.text
+                              .trim();
+                          if (customUrl.isNotEmpty) {
+                            final uri = Uri.tryParse(customUrl);
+                            if (uri == null ||
+                                !uri.hasScheme ||
+                                uri.host.isEmpty ||
+                                !const ['http', 'https'].contains(uri.scheme)) {
+                              _showMessage('请填写有效的弹幕接口地址');
+                              return;
+                            }
+                          }
+                          await library.saveDanmakuSettings(baseUrl: customUrl);
+                          if (!context.mounted) return;
+                          _danmakuBaseUrlController.text =
+                              library.usingBuiltinDanmaku
+                              ? ''
+                              : library.danmakuBaseUrl;
+                          _showMessage(
+                            customUrl.isEmpty ? '已恢复内置弹幕服务' : '弹幕设置已保存',
+                          );
+                        },
+                        child: const Text('保存弹幕设置'),
+                      ),
+                      const SizedBox(width: 10),
+                      TextButton(
+                        key: const ValueKey('reset-danmaku-settings'),
+                        onPressed: () async {
+                          await library.saveDanmakuSettings(baseUrl: '');
+                          if (!context.mounted) return;
+                          setState(_danmakuBaseUrlController.clear);
+                          _showMessage('已恢复内置弹幕服务');
+                        },
+                        child: const Text('恢复内置'),
+                      ),
+                    ],
                   ),
                 ],
               ),

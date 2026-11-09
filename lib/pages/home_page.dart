@@ -348,13 +348,18 @@ class _HomePageState extends State<HomePage>
       if (tmdbId != null) {
         return 'movie|${video.sourceId}|tmdb|$tmdbId';
       }
-      final rawTitle = (video.tmdbTitle ?? aggregate.tmdbTitle ?? '').trim();
+      final rawTitle =
+          (MediaLibrary.officialTitleOf(video) ??
+                  MediaLibrary.officialTitleOf(aggregate) ??
+                  '')
+              .trim();
       if (rawTitle.isNotEmpty) {
         return 'movie|${video.sourceId}|title|${rawTitle.toLowerCase()}';
       }
       return '${video.sourceId}|${video.path}';
     }
-    final rawTitle = (aggregate.tmdbTitle ?? aggregate.title).trim();
+    final rawTitle = (MediaLibrary.officialTitleOf(aggregate) ?? aggregate.title)
+        .trim();
     final title = MediaLibrary.normalizeSeriesTitle(
       MediaLibrary.seriesTitleForDisplay(rawTitle),
     );
@@ -401,7 +406,7 @@ class _HomePageState extends State<HomePage>
     String? episodeLabel;
     if (video != null) {
       final aggregate = library.aggregateOf(video);
-      final officialTitle = aggregate.tmdbTitle?.trim() ?? '';
+      final officialTitle = MediaLibrary.officialTitleOf(aggregate) ?? '';
       final displayTitle = officialTitle.isNotEmpty
           ? officialTitle
           : aggregate.title.trim();

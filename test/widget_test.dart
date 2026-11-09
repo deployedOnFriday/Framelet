@@ -718,6 +718,31 @@ void main() {
     expect(find.text('自定义网络缓存'), findsNothing);
   });
 
+  testWidgets('弹幕设置只保留自定义源并使用内置服务', (tester) async {
+    await _pumpApp(tester);
+    await tester.tap(find.byKey(const ValueKey('nav-settings')));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.byKey(const ValueKey('settings-tab-4')));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('自定义弹幕源'), findsOneWidget);
+    expect(find.text('弹弹play 直连'), findsOneWidget);
+    expect(find.text('内置'), findsOneWidget);
+    expect(find.text('DanDanPlay'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('danmaku-dandanplay-switch')),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('danmaku-custom-switch')), findsOneWidget);
+    expect(find.byKey(const ValueKey('dandanplay-app-id')), findsNothing);
+    expect(find.byKey(const ValueKey('dandanplay-app-secret')), findsNothing);
+    expect(find.byKey(const ValueKey('danmaku-base-url')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('reset-danmaku-settings')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('深色模式首页黄金截图', (tester) async {
     ThemeController.instance.value = ThemeMode.dark;
     addTearDown(() => ThemeController.instance.value = ThemeMode.system);

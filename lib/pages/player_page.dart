@@ -101,7 +101,7 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _danmakuEnabled = false;
   bool _loadingDanmaku = false;
   List<DanmakuEpisode> _danmakuCandidates = const [];
-  int? _danmakuEpisodeId;
+  String? _danmakuEpisodeKey;
 
   /// 用户本次是否想要弹幕；切集后据此继续自动加载。
   bool _danmakuWanted = false;
@@ -147,7 +147,7 @@ class _PlayerPageState extends State<PlayerPage> {
     if (_current.kind == MediaKind.movie) return _current.title;
     final aggregated = MediaLibrary.instance.resolveAggregated(_current);
     final showTitle = MediaLibrary.normalizeSeriesTitle(
-      (aggregated.tmdbTitle ?? aggregated.title).trim(),
+      (MediaLibrary.officialTitleOf(aggregated) ?? aggregated.title).trim(),
     );
     final episodeTitle = MediaLibrary.episodeDisplayTitle(
       _current,
@@ -473,7 +473,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _probeResult = null;
       _danmakuComments = const [];
       _danmakuCandidates = const [];
-      _danmakuEpisodeId = null;
+      _danmakuEpisodeKey = null;
       _danmakuEnabled = false;
     });
     if (osd != null) _showOsd(osd);
@@ -679,7 +679,7 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _toggleDanmaku() async {
     _debugLog(
       '弹幕开关点击: enabled=$_danmakuEnabled comments=${_danmakuComments.length} '
-      'loading=$_loadingDanmaku provider=${DanmakuService.providerLabel}',
+      'loading=$_loadingDanmaku host=${DanmakuService.displayHost}',
     );
     if (_danmakuEnabled) {
       setState(() {
@@ -706,7 +706,10 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 加载弹幕。[episodeId] 用于在已匹配的候选里切换弹幕源，
   /// [searchAgain] 会重新按当前集搜索一遍。
-  Future<void> _loadDanmaku({int? episodeId, bool searchAgain = false}) async {
+  Future<void> _loadDanmaku({
+    String? candidateKey,
+    bool searchAgain = false,
+  }) async {
     if (_loadingDanmaku) {
       _debugLog('弹幕加载中，忽略重复请求');
       return;
@@ -717,17 +720,15 @@ class _PlayerPageState extends State<PlayerPage> {
       var candidates = _danmakuCandidates;
       var query = '';
       var episodeNumber = 1;
-      if (searchAgain || candidates.isEmpty || episodeId == null) {
+      if (searchAgain || candidates.isEmpty || candidateKey == null) {
         final aggregated = MediaLibrary.instance.resolveAggregated(_current);
         query = MediaLibrary.normalizeSeriesTitle(
-          aggregated.tmdbTitle?.trim().isNotEmpty == true
-              ? aggregated.tmdbTitle!
-              : aggregated.title,
+          MediaLibrary.officialTitleOf(aggregated) ?? aggregated.title,
         );
         episodeNumber = MediaLibrary.episodeNumberOfVideo(_current) ?? 1;
         _debugLog(
           '弹幕搜索: query="$query" episode=$episodeNumber '
-          'baseUrl=${DanmakuService.baseUrl}',
+          'sources=${DanmakuService.enabledBackends.map((item) => item.name).join('+')}',
         );
         candidates = await DanmakuService.searchEpisodes(
           anime: query,
@@ -744,17 +745,17 @@ class _PlayerPageState extends State<PlayerPage> {
         }
         setState(() => _danmakuCandidates = candidates);
       }
-      final selected = episodeId == null
+      final selected = candidateKey == null
           ? candidates.first
           : candidates.firstWhere(
-              (episode) => episode.episodeId == episodeId,
+              (episode) => episode.key == candidateKey,
               orElse: () => candidates.first,
             );
       _debugLog(
         '拉取弹幕: ${selected.animeTitle} · ${selected.episodeTitle} '
         '(${selected.episodeId})',
       );
-      final comments = await DanmakuService.comments(selected.episodeId);
+      final comments = await DanmakuService.comments(selected);
       _debugLog('弹幕拉取完成: ${comments.length} 条');
       if (!mounted) return;
       comments.sort((a, b) => a.timeSec.compareTo(b.timeSec));
@@ -767,7 +768,7 @@ class _PlayerPageState extends State<PlayerPage> {
       }
       setState(() {
         _danmakuComments = comments;
-        _danmakuEpisodeId = selected.episodeId;
+        _danmakuEpisodeKey = selected.key;
         _danmakuEnabled = comments.isNotEmpty;
         _danmakuWanted = comments.isNotEmpty;
       });
@@ -1007,6 +1008,8 @@ class _PlayerPageState extends State<PlayerPage> {
         Expanded(
           child: Text(
             label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
               color: selected ? Colors.white : Colors.white70,
               fontSize: 13,
@@ -1276,8 +1279,7 @@ class _PlayerPageState extends State<PlayerPage> {
     } else if (value == 'reload') {
       await _loadDanmaku(searchAgain: true);
     } else if (value.startsWith('episode:')) {
-      final id = int.tryParse(value.substring('episode:'.length));
-      if (id != null) await _loadDanmaku(episodeId: id);
+      await _loadDanmaku(candidateKey: value.substring('episode:'.length));
     }
   }
 
@@ -1360,11 +1362,12 @@ class _PlayerPageState extends State<PlayerPage> {
         ),
         for (final candidate in _danmakuCandidates.take(8))
           PopupMenuItem<String>(
-            value: 'episode:${candidate.episodeId}',
+            value: 'episode:${candidate.key}',
             height: 40,
             child: _menuRow(
-              '${candidate.animeTitle} · ${candidate.episodeTitle}',
-              candidate.episodeId == _danmakuEpisodeId,
+              '[${candidate.backendLabel}] ${candidate.animeTitle} · '
+              '${candidate.episodeTitle}',
+              candidate.key == _danmakuEpisodeKey,
             ),
           ),
       ],

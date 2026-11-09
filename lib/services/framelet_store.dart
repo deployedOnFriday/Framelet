@@ -9,7 +9,7 @@ import '../models/media_source.dart';
 
 /// 媒体库与播放历史的本地持久化入口。
 ///
-/// 只有密码、TMDB Key、DanDanPlay Secret 等敏感信息留在安全存储；
+/// 只有密码、TMDB Key 等敏感信息留在安全存储；
 /// 媒体库、播放历史和普通设置进入 SQLite。
 abstract class FrameletStore {
   static FrameletStore instance = SqliteFrameletStore();

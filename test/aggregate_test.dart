@@ -361,5 +361,50 @@ void main() {
       ]);
       expect(result, hasLength(2));
     });
+
+    test('带发布标签的季目录向上取剧名，不用「第 1 季」当片名', () {
+      const folder =
+          '/夸克网盘/影视/一人之下/第 1 季 - 2160p WEB-DL HQ H265 AAC';
+      final result = MediaLibrary.aggregate([
+        for (var i = 1; i <= 12; i++)
+          video(
+            '$folder/The OutCast S01E${i.toString().padLeft(2, '0')} - 第 $i 集.mp4',
+            'The OutCast S01E${i.toString().padLeft(2, '0')} - 第 $i 集',
+            kind: MediaKind.series,
+          ),
+      ]);
+      expect(result, hasLength(1));
+      expect(result.first.title, '一人之下');
+      expect(result.first.episodeCount, 12);
+    });
+
+    test('刮削误命中的「第16集」不当作剧名展示', () {
+      const folder =
+          '/夸克网盘/影视/一人之下/第 1 季 - 2160p WEB-DL HQ H265 AAC';
+      final result = MediaLibrary.aggregate([
+        for (var i = 1; i <= 3; i++)
+          video(
+            '$folder/The OutCast S01E${i.toString().padLeft(2, '0')} - 第 $i 集.mp4',
+            'The OutCast S01E${i.toString().padLeft(2, '0')} - 第 $i 集',
+            kind: MediaKind.series,
+          ).copyWith(tmdbId: 610704, tmdbTitle: '第16集'),
+      ]);
+      expect(result, hasLength(1));
+      expect(result.first.title, '一人之下');
+    });
+  });
+
+  group('单集标题识别', () {
+    test('命中「第 N 集」这类单集标题', () {
+      for (final name in ['第16集', '第 1 集', '第3话', 'Episode 5', 'E07', 'S01E02']) {
+        expect(MediaLibrary.isEpisodeLikeTitle(name), isTrue, reason: name);
+      }
+    });
+
+    test('正常剧名/电影名不误判', () {
+      for (final name in ['一人之下', 'The 16th Episode', '三体', 'Signal', '第16集之上']) {
+        expect(MediaLibrary.isEpisodeLikeTitle(name), isFalse, reason: name);
+      }
+    });
   });
 }

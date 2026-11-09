@@ -52,17 +52,19 @@ class MediaLibrary extends ChangeNotifier {
   /// 刮削设置（TMDB 密钥与可选代理），保存于安全存储。
   String? scrapeProxy;
   String? tmdbKey;
-  DanmakuProvider danmakuProvider = DanmakuProvider.dandanplay;
-  String danmakuBaseUrl = DanmakuService.officialBaseUrl;
-  String? danmakuAppId;
-  String? danmakuAppSecret;
+
+  /// 当前生效的弹幕服务地址（默认内置服务，用户填写后覆盖）。
+  String danmakuBaseUrl = DanmakuService.builtinBaseUrl;
+  bool danmakuDandanplayEnabled = true;
+  bool danmakuCustomEnabled = true;
 
   /// TMDB 是否可用：用户配置了 key，或存在内置 key（开箱即用）。
   bool get hasTmdb =>
       (tmdbKey ?? '').trim().isNotEmpty ||
       ScraperService.builtinTmdbApiKey.isNotEmpty;
 
-  bool get hasDanmaku => DanmakuService.configured;
+  /// 是否仍在使用内置弹幕服务（用户没有填写自定义地址）。
+  bool get usingBuiltinDanmaku => DanmakuService.usingBuiltin;
 
   String get scraperSourceLabel => hasTmdb ? 'TMDB + TVmaze' : 'TVmaze（免费）';
 
@@ -574,7 +576,7 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   static ScannedVideo _movieVersionView(ScannedVideo file, ScannedVideo movie) {
-    final officialTitle = movie.tmdbTitle?.trim() ?? '';
+    final officialTitle = officialTitleOf(movie) ?? '';
     return file.copyWith(
       title: officialTitle.isNotEmpty ? officialTitle : movie.title,
       kind: MediaKind.movie,
@@ -919,23 +921,12 @@ class MediaLibrary extends ChangeNotifier {
     try {
       scrapeProxy = await _store.read('framelet.scrape.proxy');
       tmdbKey = await _store.read('framelet.scrape.tmdbkey');
-      final provider = await _store.read('framelet.danmaku.provider');
-      danmakuProvider =
-          DanmakuProvider.values
-              .where((item) => item.name == provider)
-              .firstOrNull ??
-          DanmakuProvider.dandanplay;
-      danmakuBaseUrl =
-          await _store.read('framelet.danmaku.baseUrl') ??
-          (danmakuProvider == DanmakuProvider.dandanplay
-              ? DanmakuService.officialBaseUrl
-              : '');
-      danmakuAppId =
-          await _store.read('framelet.danmaku.appId') ??
-          await _store.read('framelet.dandanplay.appId');
-      danmakuAppSecret =
-          await _store.read('framelet.danmaku.appSecret') ??
-          await _store.read('framelet.dandanplay.appSecret');
+      danmakuBaseUrl = await _readDanmakuBaseUrl();
+      danmakuDandanplayEnabled =
+          (await _store.read('framelet.danmaku.dandanplay.enabled')) != '0';
+      danmakuCustomEnabled =
+          (await _store.read('framelet.danmaku.custom.enabled')) != '0';
+      await _cleanupLegacyDanmakuSettings();
       final auto = await _store.read('framelet.scrape.auto');
       // 未设置过时默认开启
       autoScrapeAfterScan = auto == null ? true : auto == '1';
@@ -946,10 +937,9 @@ class MediaLibrary extends ChangeNotifier {
           ? ScraperService.builtinTmdbApiKey
           : tmdbKey!.trim();
       UpdateService.proxyAddress = scrapeProxy;
-      DanmakuService.provider = danmakuProvider;
+      DanmakuService.dandanplayEnabled = danmakuDandanplayEnabled;
+      DanmakuService.customEnabled = danmakuCustomEnabled;
       DanmakuService.baseUrl = danmakuBaseUrl;
-      DanmakuService.appId = danmakuAppId;
-      DanmakuService.appSecret = danmakuAppSecret;
       DanmakuService.proxyAddress = ScraperService.proxyAddress;
     } catch (_) {
       // 读取失败不影响使用默认源
@@ -984,27 +974,71 @@ class MediaLibrary extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> saveDanmakuSettings({
-    required DanmakuProvider provider,
-    required String baseUrl,
-    required String appId,
-    required String appSecret,
-  }) async {
-    danmakuProvider = provider;
-    danmakuBaseUrl = provider == DanmakuProvider.dandanplay
-        ? DanmakuService.officialBaseUrl
-        : baseUrl.trim();
-    danmakuAppId = appId.trim();
-    danmakuAppSecret = appSecret.trim();
-    await _store.write('framelet.danmaku.provider', danmakuProvider.name);
-    await _store.write('framelet.danmaku.baseUrl', danmakuBaseUrl);
-    await _store.write('framelet.danmaku.appId', danmakuAppId!);
-    await _store.write('framelet.danmaku.appSecret', danmakuAppSecret!);
-    DanmakuService.provider = danmakuProvider;
+  /// 读取弹幕服务地址。空值或旧版 DanDanPlay 配置都回退到内置服务。
+  Future<String> _readDanmakuBaseUrl() async {
+    final provider = (await _store.read('framelet.danmaku.provider'))?.trim();
+    final saved = (await _store.read('framelet.danmaku.baseUrl'))?.trim() ?? '';
+    if (saved.isEmpty) return DanmakuService.builtinBaseUrl;
+    if (provider == 'dandanplay') return DanmakuService.builtinBaseUrl;
+    // 0.1.34 及更早版本会在 DanDanPlay 模式下把官方地址写进 baseUrl。
+    if (saved == 'https://api.dandanplay.net') {
+      return DanmakuService.builtinBaseUrl;
+    }
+    // 内置地址换过端口（443 → 8843）：同主机同路径的旧地址视为内置，
+    // 直接改用当前内置地址，避免老配置把请求打到打不通的端口。
+    final builtin = Uri.tryParse(DanmakuService.builtinBaseUrl);
+    final parsed = Uri.tryParse(saved);
+    if (builtin != null &&
+        parsed != null &&
+        parsed.host == builtin.host &&
+        parsed.path == builtin.path) {
+      return DanmakuService.builtinBaseUrl;
+    }
+    return saved;
+  }
+
+  /// 清掉 0.1.34 及以前的 DanDanPlay 直连配置，避免旧的官方地址继续生效。
+  Future<void> _cleanupLegacyDanmakuSettings() async {
+    for (final key in const [
+      'framelet.danmaku.provider',
+      'framelet.danmaku.appId',
+      'framelet.danmaku.appSecret',
+      'framelet.dandanplay.appId',
+      'framelet.dandanplay.appSecret',
+    ]) {
+      await _store.delete(key);
+    }
+  }
+
+  /// 保存弹幕设置。留空表示恢复内置服务。
+  Future<void> saveDanmakuSettings({required String baseUrl}) async {
+    final custom = baseUrl.trim();
+    danmakuBaseUrl = custom.isEmpty ? DanmakuService.builtinBaseUrl : custom;
+    await _store.write('framelet.danmaku.baseUrl', custom);
+    await _cleanupLegacyDanmakuSettings();
+    DanmakuService.dandanplayEnabled = danmakuDandanplayEnabled;
+    DanmakuService.customEnabled = danmakuCustomEnabled;
     DanmakuService.baseUrl = danmakuBaseUrl;
-    DanmakuService.appId = danmakuAppId;
-    DanmakuService.appSecret = danmakuAppSecret;
     DanmakuService.proxyAddress = ScraperService.proxyAddress;
+    DanmakuService.clearCache();
+    notifyListeners();
+  }
+
+  Future<void> setDanmakuDandanplayEnabled(bool value) async {
+    danmakuDandanplayEnabled = value;
+    await _store.write(
+      'framelet.danmaku.dandanplay.enabled',
+      value ? '1' : '0',
+    );
+    DanmakuService.dandanplayEnabled = value;
+    DanmakuService.clearCache();
+    notifyListeners();
+  }
+
+  Future<void> setDanmakuCustomEnabled(bool value) async {
+    danmakuCustomEnabled = value;
+    await _store.write('framelet.danmaku.custom.enabled', value ? '1' : '0');
+    DanmakuService.customEnabled = value;
     DanmakuService.clearCache();
     notifyListeners();
   }
@@ -1459,6 +1493,9 @@ class MediaLibrary extends ChangeNotifier {
       orElse: () => job.representative,
     );
     final isSeriesJob = job.group.length > 1;
+    // 官方名是「第 N 集」说明上次匹配到的是某一集而不是整部剧：
+    // 判为未完成，重新走一遍匹配把脏数据纠正回来。
+    if (isEpisodeLikeTitle(job.representative.tmdbTitle)) return false;
     final hasPoster = _imageExists(target.posterPath);
     final hasBackdrop = _imageExists(target.backdropPath);
     final stillComplete =
@@ -1506,6 +1543,18 @@ class MediaLibrary extends ChangeNotifier {
         id: tmdbId,
       );
       if (details == null) return;
+      // 剧集任务只接受 TV 条目。TMDB 上有不少近名的电影（例如搜
+      // 「第 1 季」会命中电影《第16集》），一旦接受电影，整部剧的
+      // 标题、海报都会被这一条电影覆盖。
+      if (isSeriesJob && details.mediaType != 'tv') {
+        _scrapeLog('  跳过：剧集任务忽略 ${details.mediaType} 条目「${details.name}」');
+        return;
+      }
+      // 名字是「第 N 集」这类单集标题：匹配到的是某一集，不是整部剧
+      if (isEpisodeLikeTitle(details.name)) {
+        _scrapeLog('  跳过：返回的是单集标题「${details.name}」');
+        return;
+      }
       firstUsable ??= details;
       if (best != null) return;
       if (details.mediaType == 'tv') {
@@ -2013,11 +2062,13 @@ class MediaLibrary extends ChangeNotifier {
       if (_isExtraGroup(entry.key, group)) continue;
       // 展示名优先用 TMDB 官方名，缺失时用清洗后的文件夹名
       final tmdbTitle = group
+          .map((video) => video.tmdbTitle)
           .firstWhere(
-            (video) => (video.tmdbTitle ?? '').isNotEmpty,
-            orElse: () => group.first,
-          )
-          .tmdbTitle;
+            // 脏数据（「第16集」这类单集标题）不能拿来当剧名，
+            // 回退到文件夹名，至少界面不会显示成某一集
+            (name) => (name ?? '').trim().isNotEmpty && !isEpisodeLikeTitle(name),
+            orElse: () => null,
+          );
       final rawFolderTitle = _seriesTitle(entry.key, group);
       final folderTitle = rawFolderTitle == null
           ? null
@@ -2091,7 +2142,7 @@ class MediaLibrary extends ChangeNotifier {
           _sameTitleLoose(_parsedName(effective.first.first), folderTitle);
       for (final cluster in effective) {
         final first = cluster.first;
-        final ownTitle = first.tmdbTitle?.trim() ?? '';
+        final ownTitle = officialTitleOf(first) ?? '';
         final parsedName = _parsedName(first);
         final groupTitle = (tmdbTitle != null && tmdbTitle.isNotEmpty)
             ? tmdbTitle
@@ -2190,6 +2241,32 @@ class MediaLibrary extends ChangeNotifier {
     final right = norm(b);
     if (left.isEmpty || right.isEmpty) return false;
     return left == right || left.startsWith(right) || right.startsWith(left);
+  }
+
+  /// 官方名是否其实是「第 N 集」这类单集标题。
+  ///
+  /// TMDB 上确有片名叫《第16集》的电影，用「第 1 季」这样的季目录名去
+  /// 搜会误命中它，结果整部剧被命名成某一集。正常剧名几乎不会长这样，
+  /// 命中即判为脏数据。
+  static bool isEpisodeLikeTitle(String? title) {
+    final text = (title ?? '').trim();
+    if (text.isEmpty) return false;
+    return RegExp(r'^第\s*\d{1,4}\s*[集话話]$').hasMatch(text) ||
+        RegExp(r'^\d{1,4}\s*[集话話]$').hasMatch(text) ||
+        RegExp(
+          r'^(episode|ep)\s*\.?\s*\d{1,4}$',
+          caseSensitive: false,
+        ).hasMatch(text) ||
+        RegExp(r'^e\d{1,3}$', caseSensitive: false).hasMatch(text) ||
+        RegExp(r'^s\d{1,2}\s*e\d{1,3}$', caseSensitive: false).hasMatch(text);
+  }
+
+  /// 取条目的官方名，顺手过滤「第 N 集」这类脏数据（返回 null）。
+  /// 展示名、弹幕搜索词都应走这里，避免脏数据扩散。
+  static String? officialTitleOf(ScannedVideo video) {
+    final name = video.tmdbTitle?.trim() ?? '';
+    if (name.isEmpty || isEpisodeLikeTitle(name)) return null;
+    return name;
   }
 
   /// 清洗文件夹名作为展示标题：剥掉尾部的年份/画质/码率等杂质。
@@ -2304,9 +2381,15 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   /// 目录名是否是季目录：纯数字（1、2）或 Season 2 / Season.2 / Season-2。
+  ///
+  /// 网盘目录常带发布标签（「第 1 季 - 2160p WEB-DL HQ H265 AAC」），
+  /// 这类目录也是季目录——上层才是真正的剧名，不能拿「第 1 季」当片名
+  /// 去搜 TMDB。
   static bool _isSeasonFolder(String segment) =>
       RegExp(r'^\d{1,2}$').hasMatch(segment) ||
-      RegExp(r'^season[\s._-]*\d+', caseSensitive: false).hasMatch(segment);
+      RegExp(r'^season[\s._-]*\d+', caseSensitive: false).hasMatch(segment) ||
+      RegExp(r'^第\s*\d{1,2}\s*[季部]').hasMatch(segment) ||
+      RegExp(r'^\d{1,2}\s*季').hasMatch(segment);
 
   /// 文件夹名是否只是"电影/电视剧/动漫/综艺"这类通用名。
   static bool _isGenericFolder(String name) {
