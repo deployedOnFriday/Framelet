@@ -1,10 +1,13 @@
 package dev.framelet.framelet
 
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import android.app.UiModeManager
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -14,6 +17,15 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "framelet/device",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "isTelevision" -> result.success(isTelevision())
+                else -> result.notImplemented()
+            }
+        }
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "framelet/update",
@@ -37,6 +49,12 @@ class MainActivity : FlutterActivity() {
                 result.error("update_failed", error.message, null)
             }
         }
+    }
+
+    /** 电视、机顶盒、投影等 Leanback 设备返回 true。 */
+    private fun isTelevision(): Boolean {
+        val manager = getSystemService(Context.UI_MODE_SERVICE) as UiModeManager
+        return manager.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION
     }
 
     private fun installApk(path: String?): Boolean {

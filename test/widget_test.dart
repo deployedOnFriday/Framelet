@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:framelet/app.dart';
 import 'package:framelet/core/theme/app_theme.dart';
+import 'package:framelet/core/utils/device_profile.dart';
 import 'package:framelet/models/media_item.dart';
 import 'package:framelet/models/media_source.dart';
 import 'package:framelet/pages/detail_page.dart';
@@ -24,6 +25,8 @@ import 'package:framelet/widgets/mobile_poster_card.dart';
 import 'package:framelet/widgets/poster_card.dart';
 import 'package:framelet/widgets/recent_playback_card.dart';
 import 'package:framelet/widgets/side_navigation.dart';
+import 'package:framelet/widgets/tv_navigation_rail.dart';
+import 'package:framelet/widgets/tv_shell.dart';
 
 /// 测试专用的内存凭据存储，避免触达 Windows 安全存储。
 /// 注意：必须重写全部读写方法——flutter_secure_storage 的 read 在
@@ -151,6 +154,7 @@ Future<void> _pumpAppWithLibrary(
   WidgetTester tester, {
   Size size = const Size(1440, 1000),
   bool phone = false,
+  bool tv = false,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
@@ -191,6 +195,10 @@ Future<void> _pumpAppWithLibrary(
   // 横幅轮播内容随机会导致文本断言与 golden 截图不稳定，固定随机源
   HomePage.bannerShuffleRandom = Random(2026);
   addTearDown(() => HomePage.bannerShuffleRandom = null);
+  if (tv) {
+    DeviceProfile.instance.debugForceTelevision(true);
+    addTearDown(() => DeviceProfile.instance.debugForceTelevision(null));
+  }
   await tester.pumpWidget(
     phone
         ? MaterialApp(
@@ -377,6 +385,49 @@ void main() {
     await expectLater(
       find.byType(AppShell),
       matchesGoldenFile('goldens/mobile_movie.png'),
+    );
+  });
+
+  testWidgets('电视端使用左侧导航与遥控焦点海报墙', (tester) async {
+    await _pumpAppWithLibrary(tester, size: const Size(1920, 1080), tv: true);
+    expect(find.byType(TvNavigationRail), findsOneWidget);
+    expect(find.text('拾帧'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('tv-nav-movie')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('tv-library-title')), findsOneWidget);
+    expect(find.byKey(const ValueKey('tv-library-count')), findsOneWidget);
+    expect(find.textContaining('个条目'), findsOneWidget);
+  });
+
+  testWidgets('电视端电影页黄金截图', (tester) async {
+    await _pumpAppWithLibrary(tester, size: const Size(1920, 1080), tv: true);
+    await tester.tap(find.byKey(const ValueKey('tv-nav-movie')));
+    await tester.pumpAndSettle();
+    await expectLater(
+      find.byType(TvShell),
+      matchesGoldenFile('goldens/tv_movie.png'),
+    );
+  });
+
+  testWidgets('电视端首页黄金截图', (tester) async {
+    await _pumpAppWithLibrary(tester, size: const Size(1920, 1080), tv: true);
+    await expectLater(
+      find.byType(TvShell),
+      matchesGoldenFile('goldens/tv_home.png'),
+    );
+  });
+
+  testWidgets('电视端方向键可从导航栏进入内容区', (tester) async {
+    await _pumpAppWithLibrary(tester, size: const Size(1920, 1080), tv: true);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    final focus = FocusManager.instance.primaryFocus;
+    expect(focus, isNotNull);
+    expect(
+      focus!.context?.findAncestorWidgetOfExactType<TvNavigationRail>(),
+      isNull,
+      reason: '按右键后焦点应进入内容区',
     );
   });
 

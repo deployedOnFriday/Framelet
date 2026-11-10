@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'app.dart';
+import 'core/utils/device_profile.dart';
 import 'core/theme/shader_warmup.dart';
 import 'models/media_source.dart';
 import 'services/media_library.dart';
@@ -19,6 +20,7 @@ void main() async {
   PaintingBinding.shaderWarmUp = const FrameletShaderWarmUp();
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
+  await DeviceProfile.instance.detect();
   // 错误落盘： framework 断言等问题的精确堆栈写入临时目录，便于排障
   FlutterError.onError = (details) {
     try {

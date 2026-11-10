@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
+import '../core/utils/device_profile.dart';
 import '../models/media_source.dart';
 import '../services/credential_store.dart';
 import '../services/danmaku_service.dart';
@@ -133,6 +134,14 @@ class _PlayerPageState extends State<PlayerPage> {
   final ValueNotifier<String?> _osdMessage = ValueNotifier<String?>(null);
   Timer? _osdTimer;
 
+  // ---------------------------- Android TV ----------------------------
+  /// 电视遥控：控制条常驻焦点态，任意按键可唤出，播放中自动收起。
+  bool get _isTv => DeviceProfile.instance.isTelevision;
+  bool _tvControlsVisible = false;
+  Timer? _tvHideTimer;
+  final FocusNode _tvPlayFocus = FocusNode(debugLabel: 'tv-play');
+  double? _tvScrubSeconds;
+
   /// 自动连播进行中，防止 completed 重复触发。
   bool _advancing = false;
 
@@ -249,6 +258,17 @@ class _PlayerPageState extends State<PlayerPage> {
     });
     // 暂停时立即存档
     _playingSub = _player.stream.playing.listen((playing) async {
+      if (_isTv && mounted) setState(() {});
+      if (_isTv) {
+        if (playing) {
+          if (_tvControlsVisible) _scheduleTvHide();
+        } else if (_durationSec > 0 && !_tvControlsVisible) {
+          // 暂停常发生在“看完了想停一下”的时刻，直接把控制条亮出来。
+          _showTvControls();
+        } else {
+          _tvHideTimer?.cancel();
+        }
+      }
       if (!_acceptStreamEvents ||
           playing ||
           _durationSec <= 0 ||
@@ -279,6 +299,11 @@ class _PlayerPageState extends State<PlayerPage> {
     _speed.value = PlaybackPreferences.instance.defaultSpeed;
     _title.value = _headerTitle;
     _open(initial: true);
+    if (_isTv) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showTvControls();
+      });
+    }
   }
 
   void _handleDuration(Duration duration) {
@@ -366,6 +391,8 @@ class _PlayerPageState extends State<PlayerPage> {
     _resumeSeekTimer?.cancel();
     _osdTimer?.cancel();
     _osdMessage.dispose();
+    _tvHideTimer?.cancel();
+    _tvPlayFocus.dispose();
     _speed.dispose();
     _title.dispose();
     _focusNode.dispose();
@@ -991,6 +1018,85 @@ class _PlayerPageState extends State<PlayerPage> {
 
   void _refocus() {
     if (mounted) _focusNode.requestFocus();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 电视遥控：控制条显隐与按键
+  // ---------------------------------------------------------------------------
+
+  KeyEventResult _handleTvKey(FocusNode node, KeyEvent event) {
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+    final isBack =
+        key == LogicalKeyboardKey.escape ||
+        key == LogicalKeyboardKey.browserBack;
+
+    if (_tvControlsVisible) {
+      // 控制条展开时把方向键/OK 交给焦点系统，遥控器可逐个按钮移动。
+      if (isBack) {
+        _hideTvControls();
+        return KeyEventResult.handled;
+      }
+      _scheduleTvHide();
+      return KeyEventResult.ignored;
+    }
+
+    if (key == LogicalKeyboardKey.select ||
+        key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      unawaited(_togglePlay());
+      _showTvControls();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowLeft) {
+      unawaited(_seekBy(-10));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowRight) {
+      unawaited(_seekBy(10));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      unawaited(_changeVolume(5));
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      unawaited(_changeVolume(-5));
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  void _showTvControls() {
+    if (!_isTv) return;
+    _tvHideTimer?.cancel();
+    final wasVisible = _tvControlsVisible;
+    if (!wasVisible) {
+      setState(() => _tvControlsVisible = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _tvControlsVisible) _tvPlayFocus.requestFocus();
+      });
+    }
+    _scheduleTvHide();
+  }
+
+  /// 播放中 6 秒无操作自动收起；暂停时保持常驻。
+  void _scheduleTvHide() {
+    _tvHideTimer?.cancel();
+    if (!_player.state.playing) return;
+    _tvHideTimer = Timer(const Duration(seconds: 6), () {
+      if (mounted && _tvControlsVisible) _hideTvControls();
+    });
+  }
+
+  void _hideTvControls() {
+    _tvHideTimer?.cancel();
+    if (!_tvControlsVisible) return;
+    setState(() {
+      _tvControlsVisible = false;
+      _tvScrubSeconds = null;
+    });
+    _refocus();
   }
 
   // ---------------------------------------------------------------------------
@@ -1737,17 +1843,27 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   Widget build(BuildContext context) {
-    return CallbackShortcuts(
+    final player = CallbackShortcuts(
       bindings: _shortcutBindings,
       child: Focus(
         focusNode: _focusNode,
         autofocus: true,
+        onKeyEvent: _isTv ? _handleTvKey : null,
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
           onSecondaryTapDown: (_) => _showMediaInfo(),
           child: _buildScreen(context),
         ),
       ),
+    );
+    if (!_isTv) return player;
+    // 电视遥控的返回键走系统 pop：控制条展开时先收起，而不是直接退出播放页。
+    return PopScope(
+      canPop: !_tvControlsVisible,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _tvControlsVisible) _hideTvControls();
+      },
+      child: player,
     );
   }
 
@@ -1895,8 +2011,11 @@ class _PlayerPageState extends State<PlayerPage> {
                             ),
                           ),
                           Positioned.fill(
-                            child: MaterialDesktopVideoControls(state),
+                            child: _isTv
+                                ? const SizedBox.shrink()
+                                : MaterialDesktopVideoControls(state),
                           ),
+                          if (_isTv) Positioned.fill(child: _buildTvControls()),
                           _buildOsdOverlay(),
                         ],
                       ),
@@ -2029,6 +2148,324 @@ class _PlayerPageState extends State<PlayerPage> {
         ],
       ),
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // 电视控制层
+  // ---------------------------------------------------------------------------
+
+  Widget _buildTvControls() {
+    final duration = _durationSec <= 0 ? 1.0 : _durationSec;
+    final position = (_tvScrubSeconds ?? _positionSec).clamp(0.0, duration);
+    final playing = _player.state.playing;
+    final multi = _playlist.length > 1;
+
+    return IgnorePointer(
+      ignoring: !_tvControlsVisible,
+      child: AnimatedOpacity(
+        opacity: _tvControlsVisible ? 1 : 0,
+        duration: const Duration(milliseconds: 180),
+        child: Stack(
+          children: [
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.78),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+                child: SafeArea(
+                  bottom: false,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(28, 22, 28, 56),
+                    child: Row(
+                      children: [
+                        _TvRoundButton(
+                          icon: Icons.arrow_back_rounded,
+                          tooltip: '返回',
+                          onTap: _exitPlayer,
+                        ),
+                        const SizedBox(width: 20),
+                        Expanded(
+                          child: ValueListenableBuilder<String>(
+                            valueListenable: _title,
+                            builder: (context, title, _) => Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 26,
+                                fontWeight: FontWeight.w600,
+                                shadows: [
+                                  Shadow(blurRadius: 10, color: Colors.black54),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.bottomCenter,
+                    end: Alignment.topCenter,
+                    colors: [
+                      Colors.black.withValues(alpha: 0.88),
+                      Colors.transparent,
+                    ],
+                  ),
+                ),
+                child: SafeArea(
+                  top: false,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(28, 60, 28, 22),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Text(
+                              _clockText(position),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                            const SizedBox(width: 18),
+                            Expanded(
+                              child: SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 5,
+                                  activeTrackColor: Colors.white,
+                                  inactiveTrackColor: Colors.white24,
+                                  thumbColor: Colors.white,
+                                  overlayColor: Colors.white24,
+                                  thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 9,
+                                  ),
+                                ),
+                                child: Slider(
+                                  value: position,
+                                  max: duration,
+                                  onChanged: (value) =>
+                                      setState(() => _tvScrubSeconds = value),
+                                  onChangeEnd: (value) async {
+                                    setState(() => _tvScrubSeconds = null);
+                                    await _player.seek(
+                                      Duration(
+                                        milliseconds: (value * 1000).round(),
+                                      ),
+                                    );
+                                    _showTvControls();
+                                  },
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 18),
+                            Text(
+                              _clockText(_durationSec),
+                              style: const TextStyle(
+                                color: Colors.white70,
+                                fontSize: 17,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              _TvPlayerButton(
+                                icon: Icons.replay_10_rounded,
+                                label: '快退 10 秒',
+                                onTap: () => unawaited(_seekBy(-10)),
+                              ),
+                              _TvPlayerButton(
+                                icon: playing
+                                    ? Icons.pause_rounded
+                                    : Icons.play_arrow_rounded,
+                                label: playing ? '暂停' : '播放',
+                                focusNode: _tvPlayFocus,
+                                onTap: () => unawaited(_togglePlay()),
+                              ),
+                              _TvPlayerButton(
+                                icon: Icons.forward_10_rounded,
+                                label: '快进 10 秒',
+                                onTap: () => unawaited(_seekBy(10)),
+                              ),
+                              if (multi) ...[
+                                _TvPlayerButton(
+                                  icon: Icons.skip_previous_rounded,
+                                  label: '上一集',
+                                  onTap: () => unawaited(_prevEpisode()),
+                                ),
+                                _TvPlayerButton(
+                                  icon: Icons.skip_next_rounded,
+                                  label: '下一集',
+                                  onTap: () => unawaited(_nextEpisode()),
+                                ),
+                              ],
+                              _TvPlayerButton(
+                                icon: Icons.video_library_rounded,
+                                label:
+                                    '选集 ${_currentIndex + 1}/${_playlist.length}',
+                                onTap: () => unawaited(_showTvEpisodePicker()),
+                              ),
+                              ValueListenableBuilder<double>(
+                                valueListenable: _speed,
+                                builder: (context, speed, _) => _TvPlayerButton(
+                                  icon: Icons.speed_rounded,
+                                  label: _speedLabel(speed),
+                                  onTap: () => unawaited(_showTvSpeedPicker()),
+                                ),
+                              ),
+                              _TvPlayerButton(
+                                icon: Icons.audiotrack_rounded,
+                                label: '音轨',
+                                onTap: () => unawaited(_showTvAudioPicker()),
+                              ),
+                              _TvPlayerButton(
+                                icon: Icons.subtitles_rounded,
+                                label: '字幕',
+                                onTap: () => unawaited(_showTvSubtitlePicker()),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showTvChoiceDialog({
+    required String title,
+    required List<({String label, bool selected, VoidCallback onPick})> choices,
+  }) async {
+    _tvHideTimer?.cancel();
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _TvChoiceDialog(title: title, choices: choices),
+    );
+    if (!mounted) return;
+    _showTvControls();
+  }
+
+  Future<void> _showTvSpeedPicker() {
+    final current = _speed.value;
+    return _showTvChoiceDialog(
+      title: '播放速度',
+      choices: [
+        for (final rate in _speedOptions)
+          (
+            label: rate == 1.0 ? '正常' : _speedLabel(rate),
+            selected: rate == current,
+            onPick: () => unawaited(_setSpeed(rate)),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _showTvAudioPicker() {
+    final tracks = _realAudioTracks;
+    final currentId = _player.state.track.audio.id;
+    return _showTvChoiceDialog(
+      title: '音轨',
+      choices: [
+        (
+          label: '自动',
+          selected: currentId == 'auto',
+          onPick: () {
+            unawaited(_player.setAudioTrack(AudioTrack.auto()));
+            _showOsd('音轨：自动');
+          },
+        ),
+        for (var i = 0; i < tracks.length; i++)
+          (
+            label: _audioLabel(tracks[i], i + 1),
+            selected: currentId == tracks[i].id,
+            onPick: () {
+              unawaited(_player.setAudioTrack(tracks[i]));
+              _showOsd('音轨：${_audioLabel(tracks[i], i + 1)}');
+            },
+          ),
+      ],
+    );
+  }
+
+  Future<void> _showTvSubtitlePicker() {
+    final tracks = _realSubtitleTracks;
+    final currentId = _player.state.track.subtitle.id;
+    return _showTvChoiceDialog(
+      title: '字幕',
+      choices: [
+        (
+          label: '关闭字幕',
+          selected: currentId == 'no',
+          onPick: () {
+            unawaited(_player.setSubtitleTrack(SubtitleTrack.no()));
+            _showOsd('字幕已关闭');
+          },
+        ),
+        (
+          label: '自动',
+          selected: currentId == 'auto',
+          onPick: () {
+            unawaited(_player.setSubtitleTrack(SubtitleTrack.auto()));
+            _showOsd('字幕：自动');
+          },
+        ),
+        for (var i = 0; i < tracks.length; i++)
+          (
+            label: _subtitleLabel(tracks[i], i + 1),
+            selected: currentId == tracks[i].id,
+            onPick: () {
+              unawaited(_player.setSubtitleTrack(tracks[i]));
+              _showOsd('字幕：${_subtitleLabel(tracks[i], i + 1)}');
+            },
+          ),
+      ],
+    );
+  }
+
+  Future<void> _showTvEpisodePicker() async {
+    _tvHideTimer?.cancel();
+    final picked = await showDialog<int>(
+      context: context,
+      builder: (_) =>
+          _TvEpisodeDialog(episodes: _playlist, currentIndex: _currentIndex),
+    );
+    if (!mounted) return;
+    _showTvControls();
+    if (picked != null) await _switchTo(_playlist[picked]);
   }
 
   /// 控制条主题：禁用内建键盘快捷键（由页面层统一接管）；
@@ -2456,6 +2893,415 @@ class _MediaInfoDialogState extends State<_MediaInfoDialog> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 电视端控制层组件
+// -----------------------------------------------------------------------------
+
+class _TvRoundButton extends StatefulWidget {
+  const _TvRoundButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+  static const double size = 56;
+
+  @override
+  State<_TvRoundButton> createState() => _TvRoundButtonState();
+}
+
+class _TvRoundButtonState extends State<_TvRoundButton> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 140),
+      width: _TvRoundButton.size,
+      height: _TvRoundButton.size,
+      decoration: BoxDecoration(
+        color: _focused ? Colors.white : Colors.white.withValues(alpha: 0.14),
+        shape: BoxShape.circle,
+        border: Border.all(
+          color: _focused ? Colors.white : Colors.white24,
+          width: 2,
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          focusColor: Colors.transparent,
+          onFocusChange: (value) {
+            if (_focused != value) setState(() => _focused = value);
+          },
+          onTap: widget.onTap,
+          child: Tooltip(
+            message: widget.tooltip,
+            child: Icon(
+              widget.icon,
+              size: _TvRoundButton.size * 0.46,
+              color: _focused ? Colors.black : Colors.white,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TvPlayerButton extends StatefulWidget {
+  const _TvPlayerButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.focusNode,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final FocusNode? focusNode;
+
+  @override
+  State<_TvPlayerButton> createState() => _TvPlayerButtonState();
+}
+
+class _TvPlayerButtonState extends State<_TvPlayerButton> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground = _focused ? Colors.black : Colors.white;
+    return Padding(
+      padding: const EdgeInsets.only(right: 12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        height: 64,
+        decoration: BoxDecoration(
+          color: _focused ? Colors.white : Colors.white.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: _focused ? Colors.white : Colors.white24,
+            width: 2,
+          ),
+        ),
+        child: Material(
+          color: Colors.transparent,
+          child: InkWell(
+            focusNode: widget.focusNode,
+            borderRadius: BorderRadius.circular(12),
+            focusColor: Colors.transparent,
+            onFocusChange: (value) {
+              if (_focused != value) setState(() => _focused = value);
+            },
+            onTap: widget.onTap,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(widget.icon, size: 26, color: foreground),
+                  const SizedBox(width: 10),
+                  Text(
+                    widget.label,
+                    style: TextStyle(
+                      color: foreground,
+                      fontSize: 16.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TvChoiceDialog extends StatelessWidget {
+  const _TvChoiceDialog({required this.title, required this.choices});
+
+  final String title;
+  final List<({String label, bool selected, VoidCallback onPick})> choices;
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: const Color(0xFF1B2230),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 620, maxHeight: 680),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(30, 26, 30, 22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: choices.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (context, index) {
+                    final choice = choices[index];
+                    final hasSelected = choices.any((item) => item.selected);
+                    return _TvChoiceTile(
+                      label: choice.label,
+                      selected: choice.selected,
+                      autofocus:
+                          choice.selected || (!hasSelected && index == 0),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        choice.onPick();
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TvChoiceTile extends StatefulWidget {
+  const _TvChoiceTile({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.autofocus = false,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+  final bool autofocus;
+
+  @override
+  State<_TvChoiceTile> createState() => _TvChoiceTileState();
+}
+
+class _TvChoiceTileState extends State<_TvChoiceTile> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 130),
+      decoration: BoxDecoration(
+        color: _focused
+            ? Colors.white
+            : (widget.selected
+                  ? Colors.white.withValues(alpha: 0.14)
+                  : Colors.white.withValues(alpha: 0.05)),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: _focused ? Colors.white : Colors.white12,
+          width: 2,
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          autofocus: widget.autofocus,
+          borderRadius: BorderRadius.circular(12),
+          focusColor: Colors.transparent,
+          onFocusChange: (value) {
+            if (_focused != value) setState(() => _focused = value);
+          },
+          onTap: widget.onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 17),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: _focused ? Colors.black : Colors.white,
+                      fontSize: 19,
+                      fontWeight: widget.selected || _focused
+                          ? FontWeight.w700
+                          : FontWeight.w500,
+                    ),
+                  ),
+                ),
+                if (widget.selected)
+                  Icon(
+                    Icons.check_rounded,
+                    size: 22,
+                    color: _focused ? Colors.black : const Color(0xFF60A5FA),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TvEpisodeDialog extends StatelessWidget {
+  const _TvEpisodeDialog({required this.episodes, required this.currentIndex});
+
+  final List<ScannedVideo> episodes;
+  final int currentIndex;
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: const Color(0xFF1B2230),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 900, maxHeight: 720),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(30, 26, 30, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '选集（共 ${episodes.length} 集）',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Flexible(
+                child: GridView.builder(
+                  shrinkWrap: true,
+                  itemCount: episodes.length,
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 5,
+                    crossAxisSpacing: 12,
+                    mainAxisSpacing: 12,
+                    childAspectRatio: 2.6,
+                  ),
+                  itemBuilder: (context, index) => _TvEpisodeTile(
+                    number: index + 1,
+                    title: MediaLibrary.episodeDisplayTitle(
+                      episodes[index],
+                      fallbackNumber: index + 1,
+                    ),
+                    selected: index == currentIndex,
+                    autofocus: index == currentIndex,
+                    onTap: () => Navigator.of(context).pop(index),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TvEpisodeTile extends StatefulWidget {
+  const _TvEpisodeTile({
+    required this.number,
+    required this.title,
+    required this.selected,
+    required this.onTap,
+    this.autofocus = false,
+  });
+
+  final int number;
+  final String title;
+  final bool selected;
+  final VoidCallback onTap;
+  final bool autofocus;
+
+  @override
+  State<_TvEpisodeTile> createState() => _TvEpisodeTileState();
+}
+
+class _TvEpisodeTileState extends State<_TvEpisodeTile> {
+  bool _focused = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 130),
+      decoration: BoxDecoration(
+        color: _focused
+            ? Colors.white
+            : (widget.selected
+                  ? Colors.white.withValues(alpha: 0.16)
+                  : Colors.white.withValues(alpha: 0.05)),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: _focused ? Colors.white : Colors.white12,
+          width: 2,
+        ),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          autofocus: widget.autofocus,
+          borderRadius: BorderRadius.circular(10),
+          focusColor: Colors.transparent,
+          onFocusChange: (value) {
+            if (_focused != value) setState(() => _focused = value);
+          },
+          onTap: widget.onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              children: [
+                Text(
+                  '${widget.number}',
+                  style: TextStyle(
+                    color: _focused ? Colors.black : Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    widget.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: _focused
+                          ? Colors.black.withValues(alpha: 0.72)
+                          : Colors.white70,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

@@ -112,6 +112,12 @@ void main() {
       final bytes = await _rasterize(entry.value, _paintMacosIcon, alpha: true);
       File('${macosDir.path}/${entry.key}').writeAsBytesSync(bytes);
     }
+
+    // Android TV 主屏横幅（Leanback banner）：320×180，需不透明。
+    final banner = await _rasterizeBanner(320, 180, _paintTvBanner);
+    final bannerDir = Directory('${androidRes.path}/drawable-xhdpi')
+      ..createSync(recursive: true);
+    File('${bannerDir.path}/tv_banner.png').writeAsBytesSync(banner);
   });
 }
 
@@ -182,6 +188,86 @@ void _paintMacosIcon(Canvas canvas, double size) {
   canvas.clipPath(bodyPath);
   _paintCenteredGlyph(canvas, size, glyphHeight: body.height * 0.6);
   canvas.restore();
+}
+
+/// Android TV 横幅：品牌渐变底 + 居中字标与柔和光晕。
+void _paintTvBanner(Canvas canvas, double width, double height) {
+  paintBrandBackdrop(canvas, Rect.fromLTWH(0, 0, width, height));
+
+  final glowCenter = Offset(width * 0.8, height * 0.15);
+  final glowRadius = height * 1.05;
+  canvas.drawCircle(
+    glowCenter,
+    glowRadius,
+    Paint()
+      ..shader = RadialGradient(
+        colors: [
+          const Color(0xFF2563EB).withValues(alpha: 0.35),
+          const Color(0xFF2563EB).withValues(alpha: 0),
+        ],
+      ).createShader(Rect.fromCircle(center: glowCenter, radius: glowRadius)),
+  );
+
+  // 用画布中心做字标定位，宽高比不影响视觉重心。
+  final bounds = kBrandGlyphBounds;
+  final glyphHeight = height * 0.56;
+  final scale = glyphHeight / bounds.height;
+  canvas.save();
+  canvas.translate(
+    width / 2 - bounds.center.dx * scale,
+    height / 2 - bounds.center.dy * scale,
+  );
+  canvas.scale(scale);
+  paintBrandGlyph(canvas);
+  canvas.restore();
+}
+
+Future<Uint8List> _rasterizeBanner(
+  int width,
+  int height,
+  void Function(Canvas canvas, double width, double height) paint,
+) async {
+  const supersample = 2;
+  final renderWidth = width * supersample;
+  final renderHeight = height * supersample;
+
+  final recorder = ui.PictureRecorder();
+  final canvas = Canvas(
+    recorder,
+    Rect.fromLTWH(0, 0, renderWidth.toDouble(), renderHeight.toDouble()),
+  );
+  paint(canvas, renderWidth.toDouble(), renderHeight.toDouble());
+  final picture = recorder.endRecording();
+  final large = await picture.toImage(renderWidth, renderHeight);
+  picture.dispose();
+
+  final scaledRecorder = ui.PictureRecorder();
+  final scaledCanvas = Canvas(
+    scaledRecorder,
+    Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+  );
+  scaledCanvas.drawImageRect(
+    large,
+    Rect.fromLTWH(0, 0, renderWidth.toDouble(), renderHeight.toDouble()),
+    Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble()),
+    Paint()
+      ..isAntiAlias = true
+      ..filterQuality = FilterQuality.high,
+  );
+  final scaledPicture = scaledRecorder.endRecording();
+  final image = await scaledPicture.toImage(width, height);
+  scaledPicture.dispose();
+  large.dispose();
+
+  final data = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+  image.dispose();
+  final rgba = data!.buffer.asUint8List();
+  for (var i = 3; i < rgba.length; i += 4) {
+    if (rgba[i] != 255) {
+      throw StateError('TV 横幅存在透明像素');
+    }
+  }
+  return _encodePng(width, height, rgba, alpha: false);
 }
 
 void _paintCenteredGlyph(

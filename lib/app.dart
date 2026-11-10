@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import 'core/theme/app_theme.dart';
+import 'core/utils/device_profile.dart';
 import 'services/perf_diagnostics.dart';
 import 'services/theme_controller.dart';
 import 'widgets/app_shell.dart';
+import 'widgets/tv_shell.dart';
 
 class FrameletApp extends StatelessWidget {
   const FrameletApp({super.key});
@@ -14,6 +16,7 @@ class FrameletApp extends StatelessWidget {
       animation: Listenable.merge([
         ThemeController.instance,
         PerfDiagnostics.instance,
+        DeviceProfile.instance,
       ]),
       builder: (context, _) => MaterialApp(
         title: '拾帧 - Framelet',
@@ -37,7 +40,9 @@ class FrameletApp extends StatelessWidget {
               ),
           ],
         ),
-        home: const AppShell(),
+        home: DeviceProfile.instance.isTelevision
+            ? const TvShell()
+            : const AppShell(),
       ),
     );
   }

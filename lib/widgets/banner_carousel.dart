@@ -14,6 +14,7 @@ class BannerCarousel extends StatelessWidget {
     required this.onPageChanged,
     this.onPlay,
     this.onShowDetails,
+    this.large = false,
     super.key,
   });
 
@@ -24,13 +25,18 @@ class BannerCarousel extends StatelessWidget {
   final ValueChanged<MediaItem>? onPlay;
   final ValueChanged<MediaItem>? onShowDetails;
 
+  /// 电视端 10 尺界面：更大的横幅、字号与按钮。
+  final bool large;
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
         // 宽银幕比例铺满内容区，高度设上限，避免首屏被横幅占满。
         final width = constraints.maxWidth;
-        final height = (width * 9 / 21).clamp(320.0, 430.0).toDouble();
+        final height = (width * 9 / 21)
+            .clamp(large ? 460.0 : 320.0, large ? 620.0 : 430.0)
+            .toDouble();
         return Align(
           alignment: Alignment.center,
           child: SizedBox(
@@ -49,6 +55,7 @@ class BannerCarousel extends StatelessWidget {
                       item: items[itemIndex],
                       onPlay: onPlay,
                       onShowDetails: onShowDetails,
+                      large: large,
                     ),
                   ),
                   Positioned(
@@ -59,14 +66,17 @@ class BannerCarousel extends StatelessWidget {
                         _CarouselButton(
                           icon: Icons.chevron_left_rounded,
                           tooltip: '上一张',
+                          large: large,
                           onTap: () => _goTo(index - 1),
                         ),
                         const SizedBox(width: 12),
                         for (var i = 0; i < items.length; i++)
                           AnimatedContainer(
                             duration: const Duration(milliseconds: 220),
-                            width: i == index ? 22 : 7,
-                            height: 7,
+                            width: i == index
+                                ? (large ? 28 : 22)
+                                : (large ? 9 : 7),
+                            height: large ? 9 : 7,
                             margin: const EdgeInsets.symmetric(horizontal: 3),
                             decoration: BoxDecoration(
                               color: Colors.white.withValues(
@@ -79,6 +89,7 @@ class BannerCarousel extends StatelessWidget {
                         _CarouselButton(
                           icon: Icons.chevron_right_rounded,
                           tooltip: '下一张',
+                          large: large,
                           onTap: () => _goTo(index + 1),
                         ),
                       ],
@@ -104,11 +115,17 @@ class BannerCarousel extends StatelessWidget {
 }
 
 class _BannerSlide extends StatelessWidget {
-  const _BannerSlide({required this.item, this.onPlay, this.onShowDetails});
+  const _BannerSlide({
+    required this.item,
+    this.onPlay,
+    this.onShowDetails,
+    this.large = false,
+  });
 
   final MediaItem item;
   final ValueChanged<MediaItem>? onPlay;
   final ValueChanged<MediaItem>? onShowDetails;
+  final bool large;
 
   @override
   Widget build(BuildContext context) {
@@ -136,8 +153,7 @@ class _BannerSlide extends StatelessWidget {
             Positioned.fill(
               child: LayoutBuilder(
                 builder: (context, constraints) {
-                  final dpr =
-                      MediaQuery.maybeDevicePixelRatioOf(context) ?? 1;
+                  final dpr = MediaQuery.maybeDevicePixelRatioOf(context) ?? 1;
                   // 档位化解码宽度：布局微变（如侧栏展开动画）不触发重新解码
                   final cacheWidth = decodeCacheWidth(
                     constraints.maxWidth,
@@ -178,14 +194,16 @@ class _BannerSlide extends StatelessWidget {
             ),
           ],
           Padding(
-            padding: const EdgeInsets.fromLTRB(32, 24, 32, 22),
+            padding: large
+                ? const EdgeInsets.fromLTRB(48, 34, 48, 30)
+                : const EdgeInsets.fromLTRB(32, 24, 32, 22),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 9,
-                    vertical: 4,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: large ? 12 : 9,
+                    vertical: large ? 6 : 4,
                   ),
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.32),
@@ -194,21 +212,21 @@ class _BannerSlide extends StatelessWidget {
                       color: Colors.white.withValues(alpha: 0.16),
                     ),
                   ),
-                  child: const Text(
+                  child: Text(
                     '今日推荐',
                     style: TextStyle(
                       color: Colors.white,
-                      fontSize: 11,
+                      fontSize: large ? 13.5 : 11,
                       letterSpacing: 1,
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: large ? 14 : 10),
                 Text(
                   item.title,
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: Colors.white,
-                    fontSize: 32,
+                    fontSize: large ? 46 : 32,
                     fontWeight: FontWeight.w700,
                     letterSpacing: 1,
                     shadows: [
@@ -226,12 +244,12 @@ class _BannerSlide extends StatelessWidget {
                   ),
                 ),
                 if (meta.isNotEmpty) ...[
-                  const SizedBox(height: 7),
+                  SizedBox(height: large ? 10 : 7),
                   Text(
                     meta,
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.92),
-                      fontSize: 12.5,
+                      fontSize: large ? 17 : 12.5,
                       fontWeight: FontWeight.w600,
                       shadows: const [
                         Shadow(
@@ -243,16 +261,16 @@ class _BannerSlide extends StatelessWidget {
                     ),
                   ),
                 ],
-                const SizedBox(height: 8),
+                SizedBox(height: large ? 11 : 8),
                 ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 560),
+                  constraints: BoxConstraints(maxWidth: large ? 760 : 560),
                   child: Text(
                     item.description,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: Colors.white.withValues(alpha: 0.94),
-                      fontSize: 14,
+                      fontSize: large ? 17.5 : 14,
                       fontWeight: FontWeight.w500,
                       height: 1.5,
                       shadows: const [
@@ -271,13 +289,19 @@ class _BannerSlide extends StatelessWidget {
                     FilledButton.icon(
                       key: const ValueKey('featured-play'),
                       onPressed: onPlay == null ? null : () => onPlay!(item),
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('立即播放'),
+                      icon: Icon(
+                        Icons.play_arrow_rounded,
+                        size: large ? 24 : 18,
+                      ),
+                      label: Text(
+                        '立即播放',
+                        style: TextStyle(fontSize: large ? 17 : 14),
+                      ),
                       style: FilledButton.styleFrom(
                         backgroundColor: context.colors.accent,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 18,
-                          vertical: 11,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: large ? 26 : 18,
+                          vertical: large ? 18 : 11,
                         ),
                       ),
                     ),
@@ -289,12 +313,15 @@ class _BannerSlide extends StatelessWidget {
                       style: TextButton.styleFrom(
                         foregroundColor: Colors.white,
                         backgroundColor: Colors.black.withValues(alpha: 0.22),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 14,
-                          vertical: 10,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: large ? 22 : 14,
+                          vertical: large ? 17 : 10,
                         ),
                       ),
-                      child: const Text('查看详情'),
+                      child: Text(
+                        '查看详情',
+                        style: TextStyle(fontSize: large ? 17 : 14),
+                      ),
                     ),
                   ],
                 ),
@@ -312,22 +339,24 @@ class _CarouselButton extends StatelessWidget {
     required this.icon,
     required this.tooltip,
     required this.onTap,
+    this.large = false,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback onTap;
+  final bool large;
 
   @override
   Widget build(BuildContext context) {
     return IconButton(
       onPressed: onTap,
       tooltip: tooltip,
-      icon: Icon(icon, size: 20),
+      icon: Icon(icon, size: large ? 26 : 20),
       style: IconButton.styleFrom(
         foregroundColor: Colors.white,
         backgroundColor: Colors.black.withValues(alpha: 0.15),
-        minimumSize: const Size(32, 32),
+        minimumSize: Size.square(large ? 46 : 32),
         padding: EdgeInsets.zero,
       ),
     );
