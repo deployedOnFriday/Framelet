@@ -209,13 +209,22 @@ jobs:
             --build-name="$APP_VERSION" --build-number="$APP_BUILD"
       - name: Package dmg
         run: |
+          set -euxo pipefail
           # 未经签名的 App Sandbox 应用在 macOS Gatekeeper 下常表现为“无法打开”；
           # ad-hoc 签名可保留沙盒权限，并允许用户通过右键打开或清除隔离属性运行。
           codesign --force --deep --entitlements macos/Runner/Release.entitlements \
             --sign - build/macos/Build/Products/Release/framelet.app
-          hdiutil create -volname "Framelet" \
-            -srcfolder build/macos/Build/Products/Release/framelet.app \
-            -ov -format UDZO framelet-macos.dmg
+          # 运行器偶发 Resource busy / 设备占用，重试几次再判定失败。
+          for attempt in 1 2 3; do
+            if hdiutil create -volname "Framelet" \
+              -srcfolder build/macos/Build/Products/Release/framelet.app \
+              -ov -format UDZO framelet-macos.dmg; then
+              break
+            fi
+            echo "hdiutil attempt $attempt failed, retrying..."
+            sleep 10
+            test "$attempt" -lt 3
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: framelet-macos

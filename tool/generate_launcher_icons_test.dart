@@ -245,7 +245,19 @@ Future<Uint8List> _rasterize(
   image.dispose();
   final rgba = data!.buffer.asUint8List();
 
-  if (!alpha) {
+  if (alpha) {
+    // rawRgba 是预乘 alpha，PNG 需要直通 alpha，否则透明边缘会发暗。
+    for (var i = 0; i < rgba.length; i += 4) {
+      final a = rgba[i + 3];
+      if (a == 0 || a == 255) {
+        continue;
+      }
+      final scale = 255 / a;
+      rgba[i] = (rgba[i] * scale).round().clamp(0, 255);
+      rgba[i + 1] = (rgba[i + 1] * scale).round().clamp(0, 255);
+      rgba[i + 2] = (rgba[i + 2] * scale).round().clamp(0, 255);
+    }
+  } else {
     for (var i = 3; i < rgba.length; i += 4) {
       if (rgba[i] != 255) {
         throw StateError('iOS 图标存在透明像素，App Store 会拒绝');
