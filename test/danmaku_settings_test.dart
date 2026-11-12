@@ -226,4 +226,56 @@ void main() {
       expect(DanmakuService.enabledBackends, isEmpty);
     });
   });
+
+  group('证书过期降级', () {
+    final now = DateTime.utc(2026, 11, 12, 0, 0, 0);
+
+    test('证书已过期且域名匹配时放行', () {
+      expect(
+        DanmakuService.shouldTrustExpiredCertificate(
+          subject: 'CN=abot.openlist.ccwu.cc',
+          notAfter: DateTime.utc(2026, 11, 10, 7, 35, 38),
+          host: 'abot.openlist.ccwu.cc',
+          now: now,
+        ),
+        isTrue,
+      );
+    });
+
+    test('证书仍在有效期内不需要降级', () {
+      expect(
+        DanmakuService.shouldTrustExpiredCertificate(
+          subject: 'CN=abot.openlist.ccwu.cc',
+          notAfter: DateTime.utc(2027, 2, 10, 7, 35, 38),
+          host: 'abot.openlist.ccwu.cc',
+          now: now,
+        ),
+        isFalse,
+      );
+    });
+
+    test('过期但证书域名对不上时不放行', () {
+      expect(
+        DanmakuService.shouldTrustExpiredCertificate(
+          subject: 'CN=evil.example.com',
+          notAfter: DateTime.utc(2026, 11, 10, 7, 35, 38),
+          host: 'abot.openlist.ccwu.cc',
+          now: now,
+        ),
+        isFalse,
+      );
+    });
+
+    test('空主机名不放行', () {
+      expect(
+        DanmakuService.shouldTrustExpiredCertificate(
+          subject: 'CN=',
+          notAfter: DateTime.utc(2026, 11, 10),
+          host: '   ',
+          now: now,
+        ),
+        isFalse,
+      );
+    });
+  });
 }
