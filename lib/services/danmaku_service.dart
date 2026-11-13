@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart';
 
 /// 弹幕来源。两个源可以同时开启，搜索结果会合并展示。
 enum DanmakuBackend {
@@ -302,50 +301,6 @@ class DanmakuService {
     return result;
   }
 
-  /// 是否容忍「已过期但域名匹配」的证书。
-  ///
-  /// 内置自建源由第三方维护，续期不及时会让整条弹幕链路直接不可用。
-  /// 弹幕只读、不携带任何私人信息，因此这里做一次有限度的降级：
-  /// 仅放行「证书确实过期」且「证书主体就是目标域名」的情况，
-  /// 自签名、域名不匹配、签发者异常的证书仍然一律拒绝。
-  static bool trustExpiredCertificates = true;
-
-  /// [HttpClient.badCertificateCallback] 的实现，只在证书过期时被调用。
-  static bool _acceptOnlyExpiredMatchingCertificate(
-    X509Certificate certificate,
-    String host,
-    int port,
-  ) {
-    if (!trustExpiredCertificates) return false;
-    final allowed = shouldTrustExpiredCertificate(
-      subject: certificate.subject,
-      notAfter: certificate.endValidity,
-      host: host,
-    );
-    if (allowed) {
-      debugPrint(
-        '[danmaku] 证书已过期（${certificate.endValidity.toIso8601String()}），'
-        '域名匹配 $host，继续请求',
-      );
-    }
-    return allowed;
-  }
-
-  /// 判断过期证书是否可以放行。抽成纯函数便于单测。
-  static bool shouldTrustExpiredCertificate({
-    required String subject,
-    required DateTime notAfter,
-    required String host,
-    DateTime? now,
-  }) {
-    final current = (now ?? DateTime.now()).toUtc();
-    if (!notAfter.toUtc().isBefore(current)) return false;
-    final normalizedHost = host.trim().toLowerCase();
-    if (normalizedHost.isEmpty) return false;
-    // subject 形如 `CN=abot.openlist.ccwu.cc`，命中域名才认。
-    return subject.toLowerCase().contains(normalizedHost);
-  }
-
   static Future<Map<String, Object?>> _getJson(
     Uri uri,
     DanmakuBackend backend,
@@ -355,8 +310,7 @@ class DanmakuService {
     }
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 10)
-      ..userAgent = 'Framelet/0.1'
-      ..badCertificateCallback = _acceptOnlyExpiredMatchingCertificate;
+      ..userAgent = 'Framelet/0.1';
     final proxy = (proxyAddress ?? '').trim();
     if (proxy.isNotEmpty) {
       client.findProxy = (_) => 'PROXY $proxy';
@@ -410,10 +364,7 @@ class DanmakuService {
     } on TimeoutException {
       throw const DanmakuException('弹幕请求超时');
     } on HandshakeException {
-      throw const DanmakuException(
-        '弹幕服务 HTTPS 证书校验失败（服务端证书过期或域名不匹配），'
-        '可稍后重试或到 设置 → 弹幕 更换服务地址',
-      );
+      throw const DanmakuException('弹幕服务 HTTPS 握手失败，请检查证书或代理');
     } on SocketException catch (error) {
       final timedOut = error.message.contains('timed out');
       throw DanmakuException(
