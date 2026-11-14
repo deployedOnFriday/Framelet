@@ -364,8 +364,7 @@ void main() {
     });
 
     test('带发布标签的季目录向上取剧名，不用「第 1 季」当片名', () {
-      const folder =
-          '/夸克网盘/影视/一人之下/第 1 季 - 2160p WEB-DL HQ H265 AAC';
+      const folder = '/夸克网盘/影视/一人之下/第 1 季 - 2160p WEB-DL HQ H265 AAC';
       final result = MediaLibrary.aggregate([
         for (var i = 1; i <= 12; i++)
           video(
@@ -380,8 +379,7 @@ void main() {
     });
 
     test('刮削误命中的「第16集」不当作剧名展示', () {
-      const folder =
-          '/夸克网盘/影视/一人之下/第 1 季 - 2160p WEB-DL HQ H265 AAC';
+      const folder = '/夸克网盘/影视/一人之下/第 1 季 - 2160p WEB-DL HQ H265 AAC';
       final result = MediaLibrary.aggregate([
         for (var i = 1; i <= 3; i++)
           video(
@@ -427,13 +425,26 @@ void main() {
 
   group('单集标题识别', () {
     test('命中「第 N 集」这类单集标题', () {
-      for (final name in ['第16集', '第 1 集', '第3话', 'Episode 5', 'E07', 'S01E02']) {
+      for (final name in [
+        '第16集',
+        '第 1 集',
+        '第3话',
+        'Episode 5',
+        'E07',
+        'S01E02',
+      ]) {
         expect(MediaLibrary.isEpisodeLikeTitle(name), isTrue, reason: name);
       }
     });
 
     test('正常剧名/电影名不误判', () {
-      for (final name in ['一人之下', 'The 16th Episode', '三体', 'Signal', '第16集之上']) {
+      for (final name in [
+        '一人之下',
+        'The 16th Episode',
+        '三体',
+        'Signal',
+        '第16集之上',
+      ]) {
         expect(MediaLibrary.isEpisodeLikeTitle(name), isFalse, reason: name);
       }
     });
@@ -494,6 +505,50 @@ void main() {
       expect(
         MediaLibrary.suggestedQueryForPath('/影视/黑寡妇.Black.Widow.2021.mkv'),
         contains('黑寡妇'),
+      );
+    });
+  });
+
+  group('语言/字幕标签不能当片名', () {
+    test('纯语言标签不生成 TMDB 查询词', () {
+      for (final raw in ['英语', '国语', '中字', '英语中字', '中英字幕', '4K.英语中字.mkv']) {
+        expect(ScraperService.parseTitle(raw).queries, isEmpty, reason: raw);
+      }
+      // 含标签但仍是正常片名的不受影响。
+      expect(ScraperService.isSubtitleOrAudioLabel('英语老师'), isFalse);
+      expect(ScraperService.isSubtitleOrAudioLabel('挽救计划'), isFalse);
+    });
+
+    test('挽救计划目录里的标签文件名仍用目录名作标题', () {
+      final files = [
+        video(
+          '/夸克网盘/挽救计划/4K.英语中字.mkv',
+          WebDavService.cleanTitle('4K.英语中字.mkv'),
+        ),
+        video(
+          '/夸克网盘/挽救计划/2026.2160p.iT.WEB-DL.mkv',
+          WebDavService.cleanTitle('2026.2160p.iT.WEB-DL.mkv'),
+        ),
+        video(
+          '/夸克网盘/挽救计划/1080P.国语中字.mp4',
+          WebDavService.cleanTitle('1080P.国语中字.mp4'),
+        ),
+      ];
+      final result = MediaLibrary.aggregate(files);
+      expect(result, isNotEmpty);
+      // 关键：标签名「英语」不能再变成展示名/搜索词；能取到目录名时用目录名。
+      expect(result.every((item) => item.title != '英语'), isTrue);
+      expect(result.any((item) => item.title == '挽救计划'), isTrue);
+      expect(result.every((item) => item.tmdbId == null), isTrue);
+    });
+
+    test('《萌之英语单词》不再是「挽救计划」的可信匹配', () {
+      expect(
+        MediaLibrary.isPlausibleTmdbMatch(
+          name: '萌之英语单词',
+          sourceNames: ['挽救计划'],
+        ),
+        isFalse,
       );
     });
   });

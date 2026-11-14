@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 
@@ -11,6 +13,14 @@ import 'package:media_kit_video/media_kit_video.dart';
 class PlayerHost {
   PlayerHost._();
 
-  static final Player player = Player();
+  /// 桌面端交给 mpv/libass 渲染字幕：ASS/SSA 的字体、描边、
+  /// 中上英下等定位信息才能保留；Flutter 纯文本渲染会丢掉这些版式。
+  /// Android/iOS 需要额外的 libass 字体资源，继续用 Flutter 渲染。
+  static final bool _useLibass =
+      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+
+  static final Player player = Player(
+    configuration: PlayerConfiguration(libass: _useLibass),
+  );
   static final VideoController controller = VideoController(player);
 }

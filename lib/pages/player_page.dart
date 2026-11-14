@@ -19,6 +19,7 @@ import '../services/subtitle_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/webdav_service.dart';
 import '../widgets/danmaku_overlay.dart';
+import '../widgets/subtitle_picker_dialog.dart';
 
 /// 沉浸式播放页：media_kit 硬件解码 + WebDAV Basic 认证流。
 ///
@@ -1297,98 +1298,108 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
-  /// 字幕按钮：常驻底部控制条（没内嵌字幕轨也保留入口，
-  /// 菜单里给「无内嵌字幕轨」提示），支持关闭/自动/指定轨。
+  /// 字幕按钮：常驻底部控制条（没内嵌字幕轨也保留入口），
+  /// 点开一个独立的字幕选择弹窗，支持关闭/自动/指定轨/外挂字幕。
+  ///
+  /// 不用 PopupMenuButton：它挂在播放器 controls 里时，
+  /// 弹出层在部分窗口尺寸/缩放下点不中选项（菜单会关闭但不触发选择）。
+  /// 独立 Dialog 走正常路由，鼠标和遥控器都稳定。
   Widget _buildSubtitleButton(List<SubtitleTrack> tracks) {
-    final currentId = _player.state.track.subtitle.id;
-    return PopupMenuButton<String>(
-      tooltip: '字幕',
-      color: _menuColor,
-      position: PopupMenuPosition.over,
-      padding: EdgeInsets.zero,
-      onSelected: (id) async {
-        _refocus();
-        if (id == 'no') {
-          await _player.setSubtitleTrack(SubtitleTrack.no());
-          if (mounted) setState(() => _activeSubtitlePath = null);
-          _showOsd('字幕已关闭');
-        } else if (id == 'auto') {
-          await _player.setSubtitleTrack(SubtitleTrack.auto());
-          if (mounted) setState(() => _activeSubtitlePath = null);
-          _showOsd('字幕：自动');
-        } else if (id == 'pick') {
-          await _pickExternalSubtitle();
-        } else if (id.startsWith('external:')) {
-          final path = id.substring('external:'.length);
-          final subtitle = _subtitleFiles.where((item) => item.path == path);
-          if (subtitle.isNotEmpty) {
-            await _applyExternalSubtitle(subtitle.first);
-          }
-        } else {
-          final track = tracks.firstWhere((t) => t.id == id);
-          await _player.setSubtitleTrack(track);
-          if (mounted) setState(() => _activeSubtitlePath = null);
-          _showOsd('字幕：${_subtitleLabel(track, tracks.indexOf(track) + 1)}');
-        }
-      },
-      itemBuilder: (_) => [
-        _menuItem('no', '关闭字幕', currentId),
-        _menuItem('auto', '自动', currentId),
-        for (var i = 0; i < tracks.length; i++)
-          _menuItem(tracks[i].id, _subtitleLabel(tracks[i], i + 1), currentId),
-        if (_subtitleFiles.isNotEmpty) const PopupMenuDivider(),
-        for (final subtitle in _subtitleFiles)
-          PopupMenuItem<String>(
-            value: 'external:${subtitle.path}',
-            height: 40,
-            child: _menuRow(
-              subtitle.title,
-              _activeSubtitlePath == subtitle.path,
-            ),
-          ),
-        const PopupMenuDivider(),
-        PopupMenuItem<String>(
-          value: 'pick',
-          height: 40,
-          child: Row(
-            children: [
-              const Icon(
-                Icons.file_open_outlined,
-                size: 16,
-                color: Colors.white70,
-              ),
-              const SizedBox(width: 7),
-              const Text(
-                '加载外挂字幕…',
-                style: TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-            ],
+    return Tooltip(
+      message: '字幕',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => unawaited(_showSubtitlePicker(tracks)),
+          borderRadius: BorderRadius.circular(6),
+          child: const _ControlButtonLabel(
+            icon: Icons.subtitles_rounded,
+            label: '字幕',
           ),
         ),
-        if (_loadingSubtitles)
-          const PopupMenuItem<String>(
-            enabled: false,
-            height: 34,
-            child: Text(
-              '正在查找同名字幕…',
-              style: TextStyle(color: Colors.white30, fontSize: 12),
-            ),
-          )
-        else if (tracks.isEmpty && _subtitleFiles.isEmpty)
-          const PopupMenuItem<String>(
-            enabled: false,
-            height: 34,
-            child: Text(
-              '未发现内嵌或同名字幕',
-              style: TextStyle(color: Colors.white30, fontSize: 12),
-            ),
-          ),
-      ],
-      child: const _ControlButtonLabel(
-        icon: Icons.subtitles_rounded,
-        label: '字幕',
       ),
     );
+  }
+
+  Future<void> _showSubtitlePicker(List<SubtitleTrack> tracks) async {
+    final currentId = _player.state.track.subtitle.id;
+    final entries = <SubtitlePickerEntry>[
+      SubtitlePickerEntry(
+        value: 'no',
+        label: '关闭字幕',
+        selected: currentId == 'no',
+      ),
+      SubtitlePickerEntry(
+        value: 'auto',
+        label: '自动',
+        selected: currentId == 'auto',
+      ),
+      for (var i = 0; i < tracks.length; i++)
+        SubtitlePickerEntry(
+          value: 'track:${tracks[i].id}',
+          label: _subtitleLabel(tracks[i], i + 1),
+          selected: currentId == tracks[i].id,
+        ),
+      if (_subtitleFiles.isNotEmpty) const SubtitlePickerEntry.divider(),
+      for (final subtitle in _subtitleFiles)
+        SubtitlePickerEntry(
+          value: 'external:${subtitle.path}',
+          label: subtitle.title,
+          selected: _activeSubtitlePath == subtitle.path,
+        ),
+      const SubtitlePickerEntry.divider(),
+      const SubtitlePickerEntry(value: 'pick', label: '加载外挂字幕…'),
+      if (_loadingSubtitles)
+        const SubtitlePickerEntry.hint('正在查找同名字幕…')
+      else if (tracks.isEmpty && _subtitleFiles.isEmpty)
+        const SubtitlePickerEntry.hint('未发现内嵌或同名字幕'),
+    ];
+    final value = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (_) => SubtitlePickerDialog(entries: entries),
+    );
+    if (!mounted || value == null) return;
+    _refocus();
+    await _applySubtitleChoice(value, tracks);
+  }
+
+  Future<void> _applySubtitleChoice(
+    String value,
+    List<SubtitleTrack> tracks,
+  ) async {
+    if (value == 'no') {
+      await _player.setSubtitleTrack(SubtitleTrack.no());
+      if (mounted) setState(() => _activeSubtitlePath = null);
+      _debugLog('字幕切换: 关闭');
+      _showOsd('字幕已关闭');
+      return;
+    }
+    if (value == 'auto') {
+      await _player.setSubtitleTrack(SubtitleTrack.auto());
+      if (mounted) setState(() => _activeSubtitlePath = null);
+      _debugLog('字幕切换: 自动');
+      _showOsd('字幕：自动');
+      return;
+    }
+    if (value == 'pick') {
+      await _pickExternalSubtitle();
+      return;
+    }
+    if (value.startsWith('external:')) {
+      final path = value.substring('external:'.length);
+      final subtitle = _subtitleFiles.where((item) => item.path == path);
+      if (subtitle.isNotEmpty) await _applyExternalSubtitle(subtitle.first);
+      return;
+    }
+    if (value.startsWith('track:')) {
+      final id = value.substring('track:'.length);
+      final track = tracks.firstWhere((t) => t.id == id);
+      await _player.setSubtitleTrack(track);
+      if (mounted) setState(() => _activeSubtitlePath = null);
+      _debugLog('字幕切换: ${track.id} ${track.title}');
+      _showOsd('字幕：${_subtitleLabel(track, tracks.indexOf(track) + 1)}');
+    }
   }
 
   /// 弹幕开关：点击直接弹出菜单。第一次点击会先匹配一次，
@@ -1993,6 +2004,19 @@ class _PlayerPageState extends State<PlayerPage> {
               child: Video(
                 key: _videoKey,
                 controller: _controller,
+                // 非 libass 平台（Android/iOS）由 Flutter 画字幕：
+                // 默认 32px 在播放器里偏大、且贴着窗口底边容易被裁掉。
+                subtitleViewConfiguration: const SubtitleViewConfiguration(
+                  style: TextStyle(
+                    height: 1.35,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w500,
+                    color: Colors.white,
+                    backgroundColor: Color(0x99000000),
+                  ),
+                  textAlign: TextAlign.center,
+                  padding: EdgeInsets.fromLTRB(16, 0, 16, 56),
+                ),
                 // 视频尚未就绪时不渲染控制条，避免其布局在零尺寸下溢出报错。
                 //
                 // 弹幕层必须放在 controls 里：media_kit 进入全屏时会新建

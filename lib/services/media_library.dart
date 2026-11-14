@@ -442,6 +442,14 @@ class MediaLibrary extends ChangeNotifier {
     return result;
   }
 
+  /// 已有 TMDB ID 但被判为脏数据的任务（如语言标签当片名导致的错配）。
+  ///
+  /// 这类条目有海报，`unscrapedItems` 不会返回它们；单独判断一次，
+  /// 让启动扫描后也能自动纠正，不必等用户手动点「重新刮削」。
+  bool _hasDirtyScrapeJobs() => _scrapeJobsOf(
+    _videosBySource,
+  ).any((job) => job.representative.tmdbId != null && !_scrapeJobComplete(job));
+
   /// 某聚合条目对应的单集文件列表（电影返回自身）。
   ///
   /// 只按「同一媒体源 + 同一文件夹」收集，不再比较 kind——
@@ -1293,9 +1301,7 @@ class MediaLibrary extends ChangeNotifier {
       // 海报、简介、剧照、集数等刮削结果原封不动；只有新增/变化的文件
       // 才需要重新计算和写库。
       final previous = _videosBySource[sourceId] ?? const <ScannedVideo>[];
-      final previousByPath = {
-        for (final video in previous) video.path: video,
-      };
+      final previousByPath = {for (final video in previous) video.path: video};
       var added = 0;
       var updated = 0;
       for (var i = 0; i < videos.length; i++) {
@@ -1332,8 +1338,7 @@ class MediaLibrary extends ChangeNotifier {
       for (final video in previous) {
         if (!currentPaths.contains(video.path)) removed++;
       }
-      final fileStructureUnchanged =
-          added == 0 && updated == 0 && removed == 0;
+      final fileStructureUnchanged = added == 0 && updated == 0 && removed == 0;
       _videosBySource[sourceId] = videos;
       final now = DateTime.now();
       final index = _sources.indexWhere((item) => item.id == sourceId);
@@ -1346,9 +1351,7 @@ class MediaLibrary extends ChangeNotifier {
         );
       }
       scanStatus = ScanStatus.done;
-      final notes = <String>[
-        if (result.truncated) '已达文件数量上限',
-      ];
+      final notes = <String>[if (result.truncated) '已达文件数量上限'];
       final elapsed = DateTime.now().difference(startedAt);
       final elapsedText = elapsed.inMilliseconds < 1000
           ? '${elapsed.inMilliseconds} 毫秒'
@@ -1364,7 +1367,9 @@ class MediaLibrary extends ChangeNotifier {
       if (!fileStructureUnchanged) await _persistVideos(sourceId);
       _resetScrapeProgress();
       // 扫描完成后自动刮削：只补没刮过的条目（已有海报的自动跳过）
-      if (autoScrapeAfterScan && !scraping && unscrapedItems().isNotEmpty) {
+      if (autoScrapeAfterScan &&
+          !scraping &&
+          (unscrapedItems().isNotEmpty || _hasDirtyScrapeJobs())) {
         unawaited(scrapeAll());
       }
     } catch (error) {
@@ -1389,8 +1394,7 @@ class MediaLibrary extends ChangeNotifier {
     if (aModified == null || bModified == null) {
       return aModified == bModified;
     }
-    return aModified.millisecondsSinceEpoch ==
-        bModified.millisecondsSinceEpoch;
+    return aModified.millisecondsSinceEpoch == bModified.millisecondsSinceEpoch;
   }
 
   /// 蓝光原盘：`片名/BDMV/STREAM/*.m2ts`。
@@ -1610,6 +1614,20 @@ class MediaLibrary extends ChangeNotifier {
     // 官方名是「第 N 集」说明上次匹配到的是某一集而不是整部剧：
     // 判为未完成，重新走一遍匹配把脏数据纠正回来。
     if (isEpisodeLikeTitle(job.representative.tmdbTitle)) return false;
+    // 文件名只剩语言/字幕标签（「4K.英语中字.mkv」→「英语」）时，
+    // 历史版本会拿标签当片名搜索，把整部片匹配到《萌之英语单词》这类
+    // 无关长片。若现有 TMDB 名与目录名对不上，判为脏数据重刮一次；
+    // 匹配纠正后官方名与目录名相符，不再重复触发。
+    final junkNamed = job.group.any(
+      (video) => ScraperService.isSubtitleOrAudioLabel(video.title),
+    );
+    if (junkNamed &&
+        !isPlausibleTmdbMatch(
+          name: job.representative.tmdbTitle ?? '',
+          sourceNames: _sourceNamesOf(job),
+        )) {
+      return false;
+    }
     // 有海报且已有 TMDB ID 就跳过，避免每轮全量重拉。
     // 缺剧照的场景由「补齐剧照」显式处理，不阻塞常规同步。
     return target.posterPath != null && target.tmdbId != null;
@@ -1708,6 +1726,9 @@ class MediaLibrary extends ChangeNotifier {
       final text = (raw ?? '').trim();
       if (text.length < 2 || seen.contains(text)) return;
       if (_isSeasonFolder(text) || _isGenericFolder(text)) return;
+      // 「英语」「国语中字」这类语言/字幕标签不是片名，不能当匹配依据：
+      // 否则「英语」会被判成《萌之英语单词》的合理匹配。
+      if (ScraperService.isSubtitleOrAudioLabel(text)) return;
       if (RegExp(r'^[\d\s._-]+$').hasMatch(text)) return;
       seen.add(text);
       names.add(text);
@@ -1799,6 +1820,7 @@ class MediaLibrary extends ChangeNotifier {
       int tmdbId,
       String mediaType, {
       ScrapeResult? fallback,
+      bool cached = false,
     }) async {
       _scrapeLog('  拉取详情 tmdbId=$tmdbId');
       var details = await ScraperService.fetchTmdbDetails(
@@ -1836,7 +1858,14 @@ class MediaLibrary extends ChangeNotifier {
         // 搜到真正对应的条目就覆盖它。典型场景是 TMDB 上的恶意重复条目
         // （例如把别的剧改名成「诛仙第一百季」劫持「一人之下 第 4 季」）。
         _scrapeLog('  跳过：条目名与目录/文件名不符「${details.name}」');
-        firstUsable ??= details;
+        // 既有 tmdbId 对不上目录名时直接丢弃，不能留作保底：
+        // 它是上一轮错配的产物，继续兜底会让脏数据永远纠正不回来
+        // （挽救计划被「英语」搜成《萌之英语单词》）。
+        if (cached) {
+          _scrapeLog('  既有 tmdbId=$tmdbId 与目录名不符，重新搜索');
+        } else {
+          firstUsable ??= details;
+        }
         return;
       }
       // 与目录名相符的候选优先作为保底，避免前面命中的垃圾条目
@@ -1868,7 +1897,7 @@ class MediaLibrary extends ChangeNotifier {
     final cachedId = job.representative.tmdbId;
     if (cachedId != null) {
       _scrapeLog('  复用既有 tmdbId=$cachedId');
-      await consider(cachedId, isSeriesJob ? 'tv' : 'movie');
+      await consider(cachedId, isSeriesJob ? 'tv' : 'movie', cached: true);
     }
     // 2) TMDB 搜索（中文片名与电影覆盖最好），逐个查询词尝试。
     //    三个来源按置信度排序：条目标题 → 文件名 → 祖先目录名，
@@ -2345,7 +2374,8 @@ class MediaLibrary extends ChangeNotifier {
           .firstWhere(
             // 脏数据（「第16集」这类单集标题）不能拿来当剧名，
             // 回退到文件夹名，至少界面不会显示成某一集
-            (name) => (name ?? '').trim().isNotEmpty && !isEpisodeLikeTitle(name),
+            (name) =>
+                (name ?? '').trim().isNotEmpty && !isEpisodeLikeTitle(name),
             orElse: () => null,
           );
       final rawFolderTitle = _seriesTitle(entry.key, group);
@@ -2667,9 +2697,7 @@ class MediaLibrary extends ChangeNotifier {
   static bool _isSeasonFolder(String segment) =>
       RegExp(r'^\d{1,2}$').hasMatch(segment) ||
       RegExp(r'^season[\s._-]*\d+', caseSensitive: false).hasMatch(segment) ||
-      RegExp(
-        r'^第\s*[0-9一二三四五六七八九十百]{1,3}\s*[季部]',
-      ).hasMatch(segment) ||
+      RegExp(r'^第\s*[0-9一二三四五六七八九十百]{1,3}\s*[季部]').hasMatch(segment) ||
       RegExp(r'^[0-9一二三四五六七八九十百]{1,3}\s*季').hasMatch(segment);
 
   /// 文件夹名是否只是"电影/电视剧/动漫/综艺"这类通用名。

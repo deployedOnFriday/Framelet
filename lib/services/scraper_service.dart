@@ -109,6 +109,7 @@ class ScraperService {
   ScraperService._();
 
   static const _userAgent = 'Framelet/0.1 (media library scraper)';
+
   /// 全局请求间隔（所有刮削请求共用）。默认约 3.8 请求/秒，
   /// 触发 429 时自动指数退避，恢复后逐步回到基准值。
   static const _minRequestGap = Duration(milliseconds: 260);
@@ -1183,6 +1184,7 @@ class ScraperService {
     void addVariant(String q) {
       final t = q.trim();
       if (t.length < 2) return; // 单字符查询噪音太大
+      if (isSubtitleOrAudioLabel(t)) return;
       if (pureLabelTail.hasMatch(t) && t.length <= 6) return;
       if (!variants.contains(t)) variants.add(t);
     }
@@ -2428,9 +2430,7 @@ class ScraperService {
   /// 收到 429/503 时记录全局冷却，并按指数退避放慢后续请求。
   static void _noteRateLimited({Duration? retryAfter}) {
     _rateLimitStreak = (_rateLimitStreak + 1).clamp(1, 5).toInt();
-    final backoff = Duration(
-      seconds: 5 * (1 << (_rateLimitStreak - 1)),
-    );
+    final backoff = Duration(seconds: 5 * (1 << (_rateLimitStreak - 1)));
     var wait = retryAfter ?? backoff;
     if (wait > _maxRateLimitWait) wait = _maxRateLimitWait;
     final until = DateTime.now().add(wait);
@@ -2539,6 +2539,84 @@ class ScraperService {
       r'^(第\s*[0-9一二三四五六七八九十百]+\s*[季部]|season\s*\d{1,3}|s\d{1,2})$',
       caseSensitive: false,
     ).hasMatch(text);
+  }
+
+  /// 整个字符串是否只是语言/字幕标签（「英语」「中字」「英语中字」…）。
+  ///
+  /// 网盘文件名常写成「4K.英语中字.mkv」，清掉画质后只剩语言标签。
+  /// 它不是片名：拿去搜索会命中《萌之英语单词》这类长片（挽救计划事故），
+  /// 拿它当「可信目录名」也会让错误匹配通过校验。
+  static bool isSubtitleOrAudioLabel(String raw) {
+    var text = raw.toLowerCase();
+    text = text.replaceAll(RegExp(r'[\s\-_.·/|+、，,（）()\[\]【】]'), '');
+    if (text.isEmpty) return false;
+    // 长标签在前，避免「中英字幕」被「中英」吃掉后残留「字幕」再匹配
+    const labels = <String>[
+      '国粤双语',
+      '英语中字',
+      '国语中字',
+      '粤语中字',
+      '中英双字',
+      '中英字幕',
+      '中文字幕',
+      '英文字幕',
+      '简繁字幕',
+      '西班牙语',
+      '意大利语',
+      '葡萄牙语',
+      '阿拉伯语',
+      '普通话',
+      '多语言',
+      '内封字幕',
+      '内嵌字幕',
+      '外挂字幕',
+      '中英',
+      '中字',
+      '英字',
+      '双字',
+      '双语',
+      '字幕',
+      '简体',
+      '繁体',
+      '简繁',
+      '简中',
+      '繁中',
+      '内封',
+      '内嵌',
+      '外挂',
+      '国语',
+      '粤语',
+      '英语',
+      '英文',
+      '日语',
+      '日文',
+      '韩语',
+      '韩文',
+      '法语',
+      '德语',
+      '俄语',
+      '泰语',
+      '印地语',
+      '原声',
+      '配音',
+      '多语',
+      '国配',
+      '台配',
+      '港配',
+    ];
+    var rest = text;
+    var changed = true;
+    while (changed && rest.isNotEmpty) {
+      changed = false;
+      for (final label in labels) {
+        if (rest.startsWith(label)) {
+          rest = rest.substring(label.length);
+          changed = true;
+          break;
+        }
+      }
+    }
+    return rest.isEmpty;
   }
 
   static String _normalize(String raw) => raw
