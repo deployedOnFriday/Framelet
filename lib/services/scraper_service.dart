@@ -1315,6 +1315,7 @@ class ScraperService {
           ScrapeCandidate(
             name: title,
             mediaType: mediaType,
+            tmdbId: (map['id'] as num?)?.toInt(),
             originalName:
                 (map['original_title'] as String?) ??
                 (map['original_name'] as String?),

@@ -1795,12 +1795,24 @@ class MediaLibrary extends ChangeNotifier {
     String? seasonAirDate;
     double? seasonRuntimeSec;
 
-    Future<void> consider(int tmdbId, String mediaType) async {
+    Future<void> consider(
+      int tmdbId,
+      String mediaType, {
+      ScrapeResult? fallback,
+    }) async {
       _scrapeLog('  拉取详情 tmdbId=$tmdbId');
-      final details = await ScraperService.fetchTmdbDetails(
+      var details = await ScraperService.fetchTmdbDetails(
         mediaType: mediaType,
         id: tmdbId,
       );
+      // 搜索接口已经拿到了片名/海报/简介，详情接口单独抽风时不能把它
+      // 判成「未匹配」——手动匹配只走搜索接口，所以同样情况下手动能用。
+      if (details == null &&
+          fallback != null &&
+          (fallback.tmdbId == null || fallback.tmdbId == tmdbId)) {
+        details = fallback;
+        _scrapeLog('  详情接口失败，改用搜索结果兜底「${fallback.name}」');
+      }
       if (details == null) return;
       // 剧集任务只接受 TV 条目。TMDB 上有不少近名的电影（例如搜
       // 「第 1 季」会命中电影《第16集》），一旦接受电影，整部剧的
@@ -1872,7 +1884,7 @@ class MediaLibrary extends ChangeNotifier {
         preferTv: preferTv,
       );
       if (hit?.tmdbId == null) return false;
-      await consider(hit!.tmdbId!, hit.mediaType ?? 'movie');
+      await consider(hit!.tmdbId!, hit.mediaType ?? 'movie', fallback: hit);
       return best != null;
     }
 
