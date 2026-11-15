@@ -15,6 +15,7 @@ import '../services/media_library.dart';
 import '../services/playback_history.dart';
 import '../services/playback_preferences.dart';
 import '../services/player_host.dart';
+import '../services/subtitle_preferences.dart';
 import '../services/subtitle_service.dart';
 import '../services/thumbnail_service.dart';
 import '../services/webdav_service.dart';
@@ -99,6 +100,14 @@ class _PlayerPageState extends State<PlayerPage> {
   List<SubtitleFile> _subtitleFiles = const [];
   String? _activeSubtitlePath;
   bool _loadingSubtitles = false;
+
+  /// 本集是否已经尝试套用过「上次的字幕选择」。每集只套用一次，
+  /// 避免用户手动改选后又被记忆覆盖；切集时重置。
+  bool _subtitleRestored = false;
+
+  /// 本集的同名字幕是否已发现完。外挂字幕要等它，否则会在文件列表
+  /// 还是空的时候误判成「本集没有对应字幕」。
+  bool _subtitleDiscoveryDone = false;
   List<DanmakuComment> _danmakuComments = const [];
   bool _danmakuEnabled = false;
   bool _loadingDanmaku = false;
@@ -290,7 +299,12 @@ class _PlayerPageState extends State<PlayerPage> {
     });
     // 轨道变化驱动顶栏「音轨/字幕」按钮的显隐
     _tracksSub = _player.stream.tracks.listen((_) {
-      if (mounted) setState(() {});
+      if (!mounted) return;
+      setState(() {});
+      // 内嵌轨是新文件打开后才枚举出来的；还没套用过记忆时补一次。
+      if (!_subtitleRestored && _acceptStreamEvents) {
+        unawaited(_restoreSubtitleChoice());
+      }
     });
     _trackSub = _player.stream.track.listen((_) {
       if (mounted) setState(() {});
@@ -571,6 +585,9 @@ class _PlayerPageState extends State<PlayerPage> {
       _danmakuCandidates = const [];
       _danmakuEpisodeKey = null;
       _danmakuEnabled = false;
+      // 字幕记忆按「作品」保留，但新的这一集要重新套用一次。
+      _subtitleRestored = false;
+      _subtitleDiscoveryDone = false;
     });
     _title.value = _headerTitle;
     if (osd != null) _showOsd(osd);
@@ -719,6 +736,7 @@ class _PlayerPageState extends State<PlayerPage> {
         _subtitleFiles = const [];
         _activeSubtitlePath = null;
         _loadingSubtitles = true;
+        _subtitleDiscoveryDone = false;
       });
     }
     final videoPath = _current.path;
@@ -727,10 +745,81 @@ class _PlayerPageState extends State<PlayerPage> {
     setState(() {
       _subtitleFiles = files;
       _loadingSubtitles = false;
+      _subtitleDiscoveryDone = true;
     });
+    // 外挂字幕发现完再套用记忆：内嵌轨可能先到，外挂字幕要等这一步。
+    unawaited(_restoreSubtitleChoice());
   }
 
-  Future<void> _applyExternalSubtitle(SubtitleFile subtitle) async {
+  /// 套用「这部作品上次选的字幕」到当前集。
+  ///
+  /// 每集只套用一次（`_subtitleRestored`），用户手动改选后不会被
+  /// 随后的轨道事件覆盖。
+  Future<void> _restoreSubtitleChoice() async {
+    if (!_acceptStreamEvents) return;
+    final videoPath = _current.path;
+    if (_subtitleRestored) return;
+
+    final choice = await SubtitlePreferences.instance.choiceFor(_current);
+    // 读存储是异步的：期间用户可能已经手动选过，不能再用记忆覆盖。
+    if (_subtitleRestored || !mounted || videoPath != _current.path) return;
+    if (choice == null) {
+      _subtitleRestored = true;
+      return;
+    }
+
+    if (choice.isOff) {
+      await _player.setSubtitleTrack(SubtitleTrack.no());
+      if (!mounted || videoPath != _current.path) return;
+      _subtitleRestored = true;
+      setState(() => _activeSubtitlePath = null);
+      _debugLog('字幕记忆: 关闭');
+      _showOsd('字幕已关闭（沿用上次选择）');
+      return;
+    }
+
+    if (choice.kind == 'track') {
+      final tracks = _realSubtitleTracks;
+      // 轨道还没枚举出来：留待 tracks 事件再试，不要标记为已处理。
+      if (tracks.isEmpty) return;
+      final index = SubtitleChoiceResolver.trackIndex(choice, tracks);
+      if (index == null) {
+        _subtitleRestored = true;
+        _debugLog('字幕记忆: 本集没有对应的内嵌字幕轨');
+        return;
+      }
+      final track = tracks[index];
+      await _player.setSubtitleTrack(track);
+      if (!mounted || videoPath != _current.path) return;
+      _subtitleRestored = true;
+      setState(() => _activeSubtitlePath = null);
+      _debugLog('字幕记忆: ${track.id} ${track.title}');
+      _showOsd('字幕：${_subtitleLabel(track, index + 1)}');
+      return;
+    }
+
+    if (choice.kind == 'external') {
+      // 同名字幕还在发现中：等 _loadSubtitleFiles 完成后再来一次，
+      // 不能把「还没发现完」误判成「本集没有外挂字幕」。
+      if (!_subtitleDiscoveryDone) return;
+      final subtitle = SubtitleChoiceResolver.externalFile(
+        choice,
+        _subtitleFiles,
+      );
+      if (subtitle == null) {
+        _subtitleRestored = true;
+        _debugLog('字幕记忆: 本集没有对应的外挂字幕');
+        return;
+      }
+      _subtitleRestored = true;
+      await _applyExternalSubtitle(subtitle, remember: false);
+    }
+  }
+
+  Future<void> _applyExternalSubtitle(
+    SubtitleFile subtitle, {
+    bool remember = true,
+  }) async {
     final source = MediaLibrary.instance.sourceById(_current.sourceId);
     if (source == null) return;
     _showOsd('正在加载字幕…');
@@ -753,6 +842,18 @@ class _PlayerPageState extends State<PlayerPage> {
     );
     if (!mounted) return;
     setState(() => _activeSubtitlePath = subtitle.path);
+    if (remember) {
+      unawaited(
+        SubtitlePreferences.instance.save(
+          _current,
+          SubtitleChoice.external(
+            path: subtitle.path,
+            language: subtitle.language,
+            title: subtitle.title,
+          ),
+        ),
+      );
+    }
     _showOsd('字幕：${subtitle.title}');
   }
 
@@ -1368,9 +1469,14 @@ class _PlayerPageState extends State<PlayerPage> {
     String value,
     List<SubtitleTrack> tracks,
   ) async {
+    // 用户在本集做了显式选择：后续轨道事件不应再用「记忆」回写。
+    _subtitleRestored = true;
     if (value == 'no') {
       await _player.setSubtitleTrack(SubtitleTrack.no());
       if (mounted) setState(() => _activeSubtitlePath = null);
+      unawaited(
+        SubtitlePreferences.instance.save(_current, const SubtitleChoice.off()),
+      );
       _debugLog('字幕切换: 关闭');
       _showOsd('字幕已关闭');
       return;
@@ -1378,6 +1484,8 @@ class _PlayerPageState extends State<PlayerPage> {
     if (value == 'auto') {
       await _player.setSubtitleTrack(SubtitleTrack.auto());
       if (mounted) setState(() => _activeSubtitlePath = null);
+      // 「自动」= 恢复默认，清掉这部作品的记忆，免得下次又被拽回来。
+      unawaited(SubtitlePreferences.instance.clear(_current));
       _debugLog('字幕切换: 自动');
       _showOsd('字幕：自动');
       return;
@@ -1397,6 +1505,16 @@ class _PlayerPageState extends State<PlayerPage> {
       final track = tracks.firstWhere((t) => t.id == id);
       await _player.setSubtitleTrack(track);
       if (mounted) setState(() => _activeSubtitlePath = null);
+      unawaited(
+        SubtitlePreferences.instance.save(
+          _current,
+          SubtitleChoice.track(
+            id: track.id,
+            language: track.language,
+            title: track.title,
+          ),
+        ),
+      );
       _debugLog('字幕切换: ${track.id} ${track.title}');
       _showOsd('字幕：${_subtitleLabel(track, tracks.indexOf(track) + 1)}');
     }
@@ -2456,6 +2574,12 @@ class _PlayerPageState extends State<PlayerPage> {
           selected: currentId == 'no',
           onPick: () {
             unawaited(_player.setSubtitleTrack(SubtitleTrack.no()));
+            unawaited(
+              SubtitlePreferences.instance.save(
+                _current,
+                const SubtitleChoice.off(),
+              ),
+            );
             _showOsd('字幕已关闭');
           },
         ),
@@ -2464,6 +2588,7 @@ class _PlayerPageState extends State<PlayerPage> {
           selected: currentId == 'auto',
           onPick: () {
             unawaited(_player.setSubtitleTrack(SubtitleTrack.auto()));
+            unawaited(SubtitlePreferences.instance.clear(_current));
             _showOsd('字幕：自动');
           },
         ),
@@ -2473,6 +2598,16 @@ class _PlayerPageState extends State<PlayerPage> {
             selected: currentId == tracks[i].id,
             onPick: () {
               unawaited(_player.setSubtitleTrack(tracks[i]));
+              unawaited(
+                SubtitlePreferences.instance.save(
+                  _current,
+                  SubtitleChoice.track(
+                    id: tracks[i].id,
+                    language: tracks[i].language,
+                    title: tracks[i].title,
+                  ),
+                ),
+              );
               _showOsd('字幕：${_subtitleLabel(tracks[i], i + 1)}');
             },
           ),
