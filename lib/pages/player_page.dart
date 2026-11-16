@@ -141,6 +141,10 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _outroSkipped = false;
   bool _skipSeeking = false;
   final ValueNotifier<SkipPrompt> _skipPrompt = ValueNotifier(SkipPrompt.none);
+  Timer? _outroCountdownTimer;
+  final ValueNotifier<int> _outroCountdown = ValueNotifier(0);
+
+  static const _outroCountdownSeconds = 5;
 
   /// 当前播放的条目（可切集）
   late ScannedVideo _current = widget.video;
@@ -428,6 +432,8 @@ class _PlayerPageState extends State<PlayerPage> {
     _volumePersistTimer?.cancel();
     _resumeSeekTimer?.cancel();
     _danmakuHintTimer?.cancel();
+    _outroCountdownTimer?.cancel();
+    _outroCountdown.dispose();
     _skipPrompt.dispose();
     _osdTimer?.cancel();
     _osdMessage.dispose();
@@ -494,6 +500,7 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 按当前进度决定是否显示「跳过片头/片尾」。
   void _evaluateSkipPrompt() {
     if (_skipSeeking || _skipMarks.isEmpty) {
+      _cancelOutroCountdown();
       if (_skipPrompt.value != SkipPrompt.none) {
         _skipPrompt.value = SkipPrompt.none;
       }
@@ -512,9 +519,42 @@ class _PlayerPageState extends State<PlayerPage> {
     // 自动跳过只做一次：跳完把本集标记置位，手动回拖不再反复触发。
     if (prompt == SkipPrompt.intro && prefs.autoSkipIntro) {
       unawaited(_skipIntro(auto: true));
-    } else if (prompt == SkipPrompt.outro && prefs.autoSkipOutro) {
-      unawaited(_skipOutro(auto: true));
+    } else if (prompt == SkipPrompt.outro) {
+      // 自动跳过片尾或自动连播任一开启，都在片尾倒计时后进入下一集。
+      if (prefs.autoSkipOutro || prefs.autoPlayNext) {
+        _startOutroCountdown();
+      } else {
+        _cancelOutroCountdown();
+      }
+    } else {
+      _cancelOutroCountdown();
     }
+  }
+
+  /// Netflix 式片尾倒计时：5 秒后自动进入下一集，点按钮可立即跳过。
+  void _startOutroCountdown() {
+    if (_outroCountdownTimer != null || _outroSkipped) return;
+    _outroCountdown.value = _outroCountdownSeconds;
+    _outroCountdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || _skipPrompt.value != SkipPrompt.outro) {
+        timer.cancel();
+        _outroCountdownTimer = null;
+        _outroCountdown.value = 0;
+        return;
+      }
+      final remaining = _outroCountdown.value - 1;
+      _outroCountdown.value = remaining < 0 ? 0 : remaining;
+      if (remaining > 0) return;
+      timer.cancel();
+      _outroCountdownTimer = null;
+      unawaited(_skipOutro(auto: true));
+    });
+  }
+
+  void _cancelOutroCountdown() {
+    _outroCountdownTimer?.cancel();
+    _outroCountdownTimer = null;
+    _outroCountdown.value = 0;
   }
 
   Future<void> _skipIntro({bool auto = false}) async {
@@ -541,11 +581,12 @@ class _PlayerPageState extends State<PlayerPage> {
 
   Future<void> _skipOutro({bool auto = false}) async {
     if (_outroSkipped || _skipSeeking) return;
+    _cancelOutroCountdown();
     _outroSkipped = true;
     _skipPrompt.value = SkipPrompt.none;
-    // 手动点跳过片尾时直接进下一集；自动跳过则沿用「自动连播」设置，
-    // 关闭连播时只是把进度推到结尾。
-    if (_hasNext && (!auto || PlaybackPreferences.instance.autoPlayNext)) {
+    // 片尾就是本集结束：有下一集就进入下一集（自动倒计时也一样），
+    // 最后一集才退回「跳到结尾」。
+    if (_hasNext) {
       await _nextEpisode();
       return;
     }
@@ -605,6 +646,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   Future<void> _clearSkipMarks() async {
     final autoKey = SkipMarksService.cacheKeyFor(_current);
+    _cancelOutroCountdown();
     setState(() {
       _skipMarks = const SeriesSkipMarks();
       _skipSource = SkipMarkSource.none;
@@ -752,6 +794,7 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _switchTo(ScannedVideo video, {String? osd}) async {
     if (video.path == _current.path) return;
     await _recordProgress();
+    _cancelOutroCountdown();
     _acceptStreamEvents = false;
     _resumeSeekTimer?.cancel();
     _resumeSeekTarget = null;
@@ -1636,7 +1679,7 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 片头片尾按钮：一集里只需标记一次，整部剧共用。
   Widget _buildSkipButton() {
     return Tooltip(
-      message: '片头片尾',
+      message: '片尾',
       child: Material(
         color: Colors.transparent,
         child: InkWell(
@@ -1650,11 +1693,7 @@ class _PlayerPageState extends State<PlayerPage> {
             icon: _skipMarks.isEmpty
                 ? Icons.content_cut_rounded
                 : Icons.check_circle_outline_rounded,
-            label: switch (_skipSource) {
-              SkipMarkSource.manual => '片头片尾·手动',
-              SkipMarkSource.auto => '片头片尾·识别',
-              SkipMarkSource.none => '片头片尾',
-            },
+            label: '片尾',
           ),
         ),
       ),
@@ -2455,7 +2494,7 @@ class _PlayerPageState extends State<PlayerPage> {
       builder: (context, prompt, _) {
         if (prompt == SkipPrompt.none) return const SizedBox.shrink();
         final isIntro = prompt == SkipPrompt.intro;
-        final label = isIntro ? '跳过片头' : (_hasNext ? '跳过片尾' : '跳到结尾');
+        final label = isIntro ? '跳过片头' : (_hasNext ? '下一集' : '跳到结尾');
         // Netflix 式白底黑字按钮：贴在进度条正上方，右侧对齐。
         return Positioned(
           right: 28,
@@ -2488,7 +2527,32 @@ class _PlayerPageState extends State<PlayerPage> {
                     Colors.black.withValues(alpha: 0.06),
                   ),
                 ),
-            child: Text(label),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!isIntro && _hasNext)
+                  ValueListenableBuilder<int>(
+                    valueListenable: _outroCountdown,
+                    builder: (context, remaining, _) {
+                      if (remaining <= 0) return const SizedBox.shrink();
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 9),
+                        child: SizedBox(
+                          width: 17,
+                          height: 17,
+                          child: CircularProgressIndicator(
+                            value: remaining / _outroCountdownSeconds,
+                            strokeWidth: 2.2,
+                            color: Colors.black87,
+                            backgroundColor: Colors.black12,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                Text(label),
+              ],
+            ),
           ),
         );
       },

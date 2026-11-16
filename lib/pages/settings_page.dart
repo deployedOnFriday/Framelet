@@ -144,7 +144,7 @@ class _SettingsPageState extends State<SettingsPage>
               _playbackSwitch(
                 key: 'playback-auto-skip-outro',
                 title: '自动跳过片尾',
-                subtitle: '到片尾起点自动结束本集，有下一集则直接连播',
+                subtitle: '到片尾起点等 5 秒，倒计时结束自动播放下一集',
                 value: prefs.autoSkipOutro,
                 onChanged: prefs.setAutoSkipOutro,
               ),
