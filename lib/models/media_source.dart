@@ -4,7 +4,7 @@ export 'cast_member.dart';
 import 'cast_member.dart';
 import 'media_item.dart';
 
-enum MediaSourceKind { webdav, local }
+enum MediaSourceKind { webdav, local, smb, jellyfin }
 
 class MediaSource {
   MediaSource({
@@ -34,10 +34,38 @@ class MediaSource {
 
   bool get isLocal => kind == MediaSourceKind.local;
 
-  String get kindLabel => isLocal ? '本地目录' : 'WebDAV';
+  bool get isWebDav => kind == MediaSourceKind.webdav;
+
+  bool get isSmb => kind == MediaSourceKind.smb;
+
+  /// Jellyfin / Emby 走同一套 API，界面上合并成一个类型。
+  bool get isJellyfin => kind == MediaSourceKind.jellyfin;
+
+  /// 能否当成本机文件系统路径直接读写（本地目录与 SMB 共享）。
+  bool get isFileSystem => isLocal || isSmb;
+
+  /// 扫描前是否必须有密码。SMB/Jellyfin 允许匿名或空密码账号。
+  bool get requiresPassword => kind == MediaSourceKind.webdav;
+
+  String get kindLabel => switch (kind) {
+    MediaSourceKind.local => '本地目录',
+    MediaSourceKind.smb => 'SMB 共享',
+    MediaSourceKind.jellyfin => 'Jellyfin / Emby',
+    MediaSourceKind.webdav => 'WebDAV',
+  };
 
   String get location {
-    if (isLocal) return address;
+    if (isLocal || isJellyfin) return address;
+    if (isSmb) {
+      final root = address.trim().replaceFirst(RegExp(r'[\\/]+$'), '');
+      final folder = directory
+          .trim()
+          .replaceAll('/', r'\')
+          .replaceFirst(RegExp(r'^\\+'), '')
+          .replaceFirst(RegExp(r'\\+$'), '');
+      if (folder.isEmpty) return root;
+      return '$root\\$folder';
+    }
     final root = address.trim().replaceFirst(RegExp(r'/+$'), '');
     final folder = directory.trim();
     if (folder.isEmpty || folder == '/') return root;
@@ -299,10 +327,7 @@ class ScannedVideo {
 
 /// 一次目录扫描的结果。
 class ScanResult {
-  const ScanResult({
-    required this.videos,
-    this.truncated = false,
-  });
+  const ScanResult({required this.videos, this.truncated = false});
 
   final List<ScannedVideo> videos;
 

@@ -11,6 +11,7 @@ import '../core/utils/device_profile.dart';
 import '../models/media_source.dart';
 import '../services/credential_store.dart';
 import '../services/danmaku_service.dart';
+import '../services/jellyfin_service.dart';
 import '../services/media_library.dart';
 import '../services/playback_history.dart';
 import '../services/playback_preferences.dart';
@@ -806,7 +807,7 @@ class _PlayerPageState extends State<PlayerPage> {
     final library = MediaLibrary.instance;
     final source = library.sourceById(_current.sourceId);
     final password = library.passwordOf(_current.sourceId);
-    if (source == null || (!source.isLocal && password == null)) {
+    if (source == null || (source.requiresPassword && password == null)) {
       if (mounted) {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
@@ -816,23 +817,34 @@ class _PlayerPageState extends State<PlayerPage> {
       return;
     }
     final authPassword = password ?? '';
-    var url = Uri.file(_current.path);
+    var mediaUrl = Uri.file(_current.path).toString();
     final headers = <String, String>{};
-    if (!source.isLocal) {
+    if (source.isJellyfin) {
+      final target = await JellyfinService.playUrl(
+        source,
+        authPassword,
+        _current.path,
+      );
+      if (!mounted || generation != _openGeneration) return;
+      mediaUrl = target.url.toString();
+    } else if (source.isSmb) {
+      // UNC 路径交给系统和 mpv，不需要 HTTP 头。
+      mediaUrl = _current.path.replaceAll('/', r'\');
+    } else if (!source.isLocal) {
       final playTarget = await WebDavService.resolvePlayUrl(
         source,
         _current.path,
       );
       if (!mounted || generation != _openGeneration) return;
-      url = playTarget.url;
+      mediaUrl = playTarget.url.toString();
       final auth = WebDavService.authHeader(source.username, authPassword);
-      _probe(url, auth);
+      _probe(playTarget.url, auth);
       headers['Authorization'] = auth;
       if (playTarget.hostHeader != null) {
         headers['Host'] = playTarget.hostHeader!;
       }
     }
-    _debugLog('播放地址: $url');
+    _debugLog('播放地址: $mediaUrl');
     _debugLog('源文件路径: ${_current.path}');
 
     // 关键：libmpv 会读取系统环境变量 http_proxy/https_proxy 走代理，
@@ -885,7 +897,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
     try {
       await _player.open(
-        Media(url.toString(), httpHeaders: headers, start: resumeStart),
+        Media(mediaUrl, httpHeaders: headers, start: resumeStart),
       );
       if (!mounted || generation != _openGeneration) return;
       _acceptStreamEvents = true;

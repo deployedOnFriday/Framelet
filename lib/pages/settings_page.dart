@@ -6,9 +6,11 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../core/theme/app_theme.dart';
 import '../models/media_source.dart';
+import '../services/jellyfin_service.dart';
 import '../services/media_library.dart';
 import '../services/playback_preferences.dart';
 import '../services/scraper_service.dart';
+import '../services/smb_service.dart';
 import '../services/theme_controller.dart';
 import '../services/update_service.dart';
 import '../widgets/match_dialog.dart';
@@ -1232,9 +1234,9 @@ class _SettingsPageState extends State<SettingsPage>
                 videoCount: _countVideos(source.id),
                 onEdit: () => _editSource(existing: source),
                 onSync: () => _scanSource(source),
-                onManage: source.isLocal
-                    ? null
-                    : () => _openWebDavBrowser(source),
+                onManage: source.isWebDav
+                    ? () => _openWebDavBrowser(source)
+                    : null,
                 onDelete: () => _deleteSource(source),
                 onToggleEnabled: (enabled) =>
                     MediaLibrary.instance.setSourceEnabled(source.id, enabled),
@@ -1552,7 +1554,7 @@ class _SettingsPageState extends State<SettingsPage>
   }
 
   Future<void> _openWebDavBrowser(MediaSource source) async {
-    if (source.isLocal) return;
+    if (!source.isWebDav) return;
     final password = MediaLibrary.instance.passwordOf(source.id);
     if (password == null) {
       _showMessage('没有读取到密码，请编辑媒体源并重新保存密码');
@@ -1919,6 +1921,20 @@ class _UnmatchedPage extends StatelessWidget {
   }
 }
 
+IconData _sourceKindIcon(MediaSourceKind kind) => switch (kind) {
+  MediaSourceKind.local => Icons.folder_outlined,
+  MediaSourceKind.webdav => Icons.cloud_outlined,
+  MediaSourceKind.smb => Icons.lan_outlined,
+  MediaSourceKind.jellyfin => Icons.video_library_outlined,
+};
+
+String _sourceKindName(MediaSourceKind kind) => switch (kind) {
+  MediaSourceKind.local => '本地目录',
+  MediaSourceKind.webdav => 'WebDAV',
+  MediaSourceKind.smb => 'SMB 共享',
+  MediaSourceKind.jellyfin => 'Jellyfin / Emby',
+};
+
 class _MediaSourceCard extends StatelessWidget {
   const _MediaSourceCard({
     required this.source,
@@ -1966,7 +1982,7 @@ class _MediaSourceCard extends StatelessWidget {
               borderRadius: BorderRadius.circular(12),
             ),
             child: Icon(
-              source.isLocal ? Icons.folder_outlined : Icons.cloud_outlined,
+              _sourceKindIcon(source.kind),
               color: context.colors.primary,
             ),
           ),
@@ -2133,6 +2149,8 @@ class _MediaSourceDialogState extends State<MediaSourceDialog> {
   @override
   Widget build(BuildContext context) {
     final isLocal = _kind == MediaSourceKind.local;
+    final isSmb = _kind == MediaSourceKind.smb;
+    final isJellyfin = _kind == MediaSourceKind.jellyfin;
     return AlertDialog(
       title: Text(widget.existing == null ? '添加媒体源' : '编辑媒体源'),
       content: SizedBox(
@@ -2145,27 +2163,30 @@ class _MediaSourceDialogState extends State<MediaSourceDialog> {
               children: [
                 SizedBox(
                   width: double.infinity,
-                  child: SegmentedButton<MediaSourceKind>(
-                    segments: const [
-                      ButtonSegment(
-                        value: MediaSourceKind.local,
-                        icon: Icon(Icons.folder_outlined),
-                        label: Text('本地目录'),
-                      ),
-                      ButtonSegment(
-                        value: MediaSourceKind.webdav,
-                        icon: Icon(Icons.cloud_outlined),
-                        label: Text('WebDAV'),
-                      ),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final kind in const [
+                        MediaSourceKind.local,
+                        MediaSourceKind.webdav,
+                        MediaSourceKind.smb,
+                        MediaSourceKind.jellyfin,
+                      ])
+                        ChoiceChip(
+                          key: ValueKey('source-kind-${kind.name}'),
+                          avatar: Icon(_sourceKindIcon(kind), size: 18),
+                          label: Text(_sourceKindName(kind)),
+                          selected: _kind == kind,
+                          onSelected: (_) {
+                            setState(() {
+                              _kind = kind;
+                              _testResult = null;
+                              _testOk = false;
+                            });
+                          },
+                        ),
                     ],
-                    selected: {_kind},
-                    onSelectionChanged: (value) {
-                      setState(() {
-                        _kind = value.first;
-                        _testResult = null;
-                        _testOk = false;
-                      });
-                    },
                   ),
                 ),
                 const SizedBox(height: 16),
@@ -2194,7 +2215,43 @@ class _MediaSourceDialogState extends State<MediaSourceDialog> {
                       ),
                     ),
                   )
-                else ...[
+                else if (isSmb) ...[
+                  _field(
+                    _addressController,
+                    '共享地址',
+                    r'例如：\\192.168.1.10\media',
+                    key: const ValueKey('source-address'),
+                    validator: _validateSmbAddress,
+                  ),
+                  const SizedBox(height: 14),
+                  _field(
+                    _directoryController,
+                    '子目录（可选）',
+                    '例如：Movies，留空表示共享根目录',
+                    validator: (_) => null,
+                  ),
+                  const SizedBox(height: 14),
+                  _field(
+                    _usernameController,
+                    '用户名（可选）',
+                    '匿名共享或已映射时可留空',
+                    validator: (_) => null,
+                  ),
+                  const SizedBox(height: 14),
+                  _buildPasswordField(),
+                ] else if (isJellyfin) ...[
+                  _field(
+                    _addressController,
+                    '服务器地址',
+                    'http://192.168.1.10:8096',
+                    key: const ValueKey('source-address'),
+                    validator: _validateServerAddress,
+                  ),
+                  const SizedBox(height: 14),
+                  _field(_usernameController, '用户名', 'Jellyfin / Emby 账号'),
+                  const SizedBox(height: 14),
+                  _buildPasswordField(),
+                ] else ...[
                   _field(
                     _addressController,
                     '服务器地址',
@@ -2211,34 +2268,7 @@ class _MediaSourceDialogState extends State<MediaSourceDialog> {
                   const SizedBox(height: 14),
                   _field(_usernameController, '用户名', 'WebDAV 用户名'),
                   const SizedBox(height: 14),
-                  TextFormField(
-                    controller: _passwordController,
-                    obscureText: _obscurePassword,
-                    spellCheckConfiguration:
-                        const SpellCheckConfiguration.disabled(),
-                    validator: (value) {
-                      if (widget.existing != null) return null;
-                      if (value == null || value.isEmpty) return '请填写密码';
-                      return null;
-                    },
-                    decoration: InputDecoration(
-                      labelText: '密码',
-                      hintText: widget.existing == null
-                          ? '将保存在系统安全存储中'
-                          : '留空表示不修改',
-                      border: const OutlineInputBorder(),
-                      suffixIcon: IconButton(
-                        onPressed: () => setState(
-                          () => _obscurePassword = !_obscurePassword,
-                        ),
-                        icon: Icon(
-                          _obscurePassword
-                              ? Icons.visibility_outlined
-                              : Icons.visibility_off_outlined,
-                        ),
-                      ),
-                    ),
-                  ),
+                  _buildPasswordField(required: true),
                 ],
                 const SizedBox(height: 18),
                 Row(
@@ -2299,21 +2329,52 @@ class _MediaSourceDialogState extends State<MediaSourceDialog> {
     );
   }
 
+  Widget _buildPasswordField({bool required = false}) {
+    return TextFormField(
+      controller: _passwordController,
+      obscureText: _obscurePassword,
+      spellCheckConfiguration: const SpellCheckConfiguration.disabled(),
+      validator: (value) {
+        if (widget.existing != null || !required) return null;
+        if (value == null || value.isEmpty) return '请填写密码';
+        return null;
+      },
+      decoration: InputDecoration(
+        labelText: '密码',
+        hintText: widget.existing == null
+            ? (required ? '将保存在系统安全存储中' : '没有密码可留空')
+            : '留空表示不修改',
+        border: const OutlineInputBorder(),
+        suffixIcon: IconButton(
+          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+          icon: Icon(
+            _obscurePassword
+                ? Icons.visibility_outlined
+                : Icons.visibility_off_outlined,
+          ),
+        ),
+      ),
+    );
+  }
+
   MediaSource _buildSource() {
     final existing = widget.existing;
     final isLocal = _kind == MediaSourceKind.local;
     final rawAddress = _addressController.text.trim();
+    final address = switch (_kind) {
+      MediaSourceKind.local => rawAddress,
+      MediaSourceKind.smb => SmbService.normalizeAddress(rawAddress),
+      MediaSourceKind.jellyfin => JellyfinService.normalizeBaseUrl(rawAddress),
+      MediaSourceKind.webdav => rawAddress.replaceFirst(RegExp(r'/+$'), ''),
+    };
+    final directory = _directoryController.text.trim();
     return MediaSource(
       id: existing?.id ?? MediaSource.newId(),
       name: _nameController.text.trim(),
       kind: _kind,
-      address: isLocal
-          ? rawAddress
-          : rawAddress.replaceFirst(RegExp(r'/+$'), ''),
+      address: address,
       username: isLocal ? '' : _usernameController.text.trim(),
-      directory: isLocal || _directoryController.text.trim().isEmpty
-          ? '/'
-          : _directoryController.text.trim(),
+      directory: isLocal || directory.isEmpty ? '/' : directory,
       connected: existing?.connected ?? false,
       lastSync: existing?.lastSync ?? '尚未同步',
     );
@@ -2322,54 +2383,19 @@ class _MediaSourceDialogState extends State<MediaSourceDialog> {
   Future<void> _testConnection() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
     final source = _buildSource();
-    final password = _passwordController.text;
-    if (_kind == MediaSourceKind.local) {
-      setState(() {
-        _testing = true;
-        _testResult = null;
-        _testOk = false;
-      });
-      final error = await MediaLibrary.instance.testConnection(source, '');
-      if (!mounted) return;
-      setState(() {
-        _testing = false;
-        _testOk = error == null;
-        _testResult = error;
-      });
-      return;
-    }
-    final stored = widget.existing == null || password.isNotEmpty
-        ? password
-        : null;
-    if (stored == null) {
-      setState(() {
-        _testing = true;
-        _testResult = null;
-      });
-      // 编辑时留空密码：用已保存密码测试
-      final library = MediaLibrary.instance;
-      final error = library.hasPassword(source.id) ? null : '未保存过密码，请先输入密码';
-      setState(() {
-        _testing = false;
-        _testOk = false;
-        _testResult = error;
-      });
-      if (error != null) return;
-      setState(() => _testing = true);
-      final result = await library.testConnection(source, '');
-      setState(() {
-        _testing = false;
-        _testOk = result == null;
-        _testResult = result;
-      });
-      return;
-    }
+    final library = MediaLibrary.instance;
+    final typed = _passwordController.text;
+    final effective = _kind == MediaSourceKind.local
+        ? ''
+        : typed.isNotEmpty
+        ? typed
+        : library.passwordOf(source.id) ?? '';
     setState(() {
       _testing = true;
       _testResult = null;
       _testOk = false;
     });
-    final error = await MediaLibrary.instance.testConnection(source, stored);
+    final error = await library.testConnection(source, effective);
     if (!mounted) return;
     setState(() {
       _testing = false;
@@ -2426,6 +2452,24 @@ class _MediaSourceDialogState extends State<MediaSourceDialog> {
         !['http', 'https'].contains(uri.scheme)) {
       return '请输入有效的 http 或 https 地址';
     }
+    return null;
+  }
+
+  String? _validateServerAddress(String? value) {
+    final normalized = JellyfinService.normalizeBaseUrl(value ?? '');
+    if (normalized.isEmpty) return '请填写服务器地址';
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || uri.host.isEmpty) return '请输入有效的服务器地址';
+    return null;
+  }
+
+  String? _validateSmbAddress(String? value) {
+    final normalized = SmbService.normalizeAddress(value ?? '');
+    final parts = normalized
+        .replaceFirst(RegExp(r'^\\+'), '')
+        .split(r'\')
+        .where((part) => part.isNotEmpty);
+    if (parts.length < 2) return r'请填写 \\服务器\共享 形式的地址';
     return null;
   }
 

@@ -8,9 +8,11 @@ import '../models/media_source.dart';
 import 'credential_store.dart';
 import 'danmaku_service.dart';
 import 'framelet_store.dart';
+import 'jellyfin_service.dart';
 import 'local_media_service.dart';
 import 'scraper_service.dart';
 import 'skip_marks_service.dart';
+import 'smb_service.dart';
 import 'update_service.dart';
 import 'webdav_service.dart';
 
@@ -1135,6 +1137,7 @@ class MediaLibrary extends ChangeNotifier {
     } else {
       _sources.add(source);
     }
+    JellyfinService.clearSession(source.id);
     if (password != null && password.isNotEmpty) {
       _passwords[source.id] = password;
       await _store.writePassword(source.id, password);
@@ -1148,6 +1151,7 @@ class MediaLibrary extends ChangeNotifier {
   }
 
   Future<void> deleteSource(String id) async {
+    JellyfinService.clearSession(id);
     _sources.removeWhere((source) => source.id == id);
     _videosBySource.remove(id);
     _sourceErrors.remove(id);
@@ -1172,10 +1176,16 @@ class MediaLibrary extends ChangeNotifier {
     try {
       if (source.isLocal) {
         await LocalMediaService.testConnection(source);
+      } else if (source.isSmb) {
+        await SmbService.testConnection(source, password);
+      } else if (source.isJellyfin) {
+        await JellyfinService.testConnection(source, password);
       } else {
         await WebDavService.testConnection(source, password);
       }
       return null;
+    } on JellyfinException catch (error) {
+      return error.message;
     } on StateError catch (error) {
       // WebDavService 抛出的是已经写好人话的诊断文案，原样透传
       return error.message;
@@ -1270,11 +1280,22 @@ class MediaLibrary extends ChangeNotifier {
     final source = sourceById(sourceId);
     final password = _passwords[sourceId];
     if (source == null) return;
-    if (!source.isLocal && password == null) {
+    if (source.requiresPassword && password == null) {
       _sourceErrors[sourceId] = '未保存密码，请编辑媒体源后重新输入';
       scanStatus = ScanStatus.failed;
       notifyListeners();
       return;
+    }
+    if (source.isSmb) {
+      try {
+        await SmbService.ensureAccessible(source, password ?? '');
+      } catch (error) {
+        _sourceErrors[sourceId] = describeError(error);
+        scanStatus = ScanStatus.failed;
+        scanProgress = '';
+        notifyListeners();
+        return;
+      }
     }
 
     scanStatus = ScanStatus.scanning;
@@ -1284,22 +1305,20 @@ class MediaLibrary extends ChangeNotifier {
 
     try {
       final startedAt = DateTime.now();
-      final result = source.isLocal
-          ? await LocalMediaService.scan(
+      void progress(String message) {
+        scanProgress = message;
+        notifyListeners();
+      }
+
+      final result = source.isFileSystem
+          ? await LocalMediaService.scan(source, onProgress: progress)
+          : source.isJellyfin
+          ? await JellyfinService.scan(
               source,
-              onProgress: (message) {
-                scanProgress = message;
-                notifyListeners();
-              },
+              password ?? '',
+              onProgress: progress,
             )
-          : await WebDavService.scan(
-              source,
-              password!,
-              onProgress: (message) {
-                scanProgress = message;
-                notifyListeners();
-              },
-            );
+          : await WebDavService.scan(source, password!, onProgress: progress);
       final videos = _collapseDiscStructures(source, result.videos);
       // 增量扫描：大小和修改时间都没变的文件直接复用上次的条目，
       // 海报、简介、剧照、集数等刮削结果原封不动；只有新增/变化的文件

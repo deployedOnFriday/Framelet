@@ -2257,6 +2257,25 @@ class ScraperService {
     return null;
   }
 
+  /// 局域网/本机地址，图片直连不走代理。
+  static bool _isLocalImageHost(String host) {
+    final value = host.toLowerCase();
+    if (value == 'localhost' || value == '127.0.0.1' || value == '::1') {
+      return true;
+    }
+    if (value.startsWith('10.') ||
+        value.startsWith('192.168.') ||
+        value.endsWith('.local')) {
+      return true;
+    }
+    final match = RegExp(r'^172\.(\d+)\.').firstMatch(value);
+    if (match != null) {
+      final second = int.tryParse(match.group(1)!);
+      if (second != null && second >= 16 && second <= 31) return true;
+    }
+    return false;
+  }
+
   /// 下载海报到本地缓存，返回文件路径；失败返回 null。
   static Future<String?> downloadPoster(
     String url, {
@@ -2269,7 +2288,8 @@ class ScraperService {
 
     final uri = Uri.parse(url);
     final isTmdbImage = uri.host == _imageHost || uri.host == _imageCdnHost;
-    final proxy = await _activeProxy();
+    // 内网服务器（Jellyfin/Emby 等）直连，避免被刮削代理绕出去。
+    final proxy = _isLocalImageHost(uri.host) ? null : await _activeProxy();
     List<int>? bytes;
     _lastNetworkDetail = null;
     _lastHttpStatus = 0;

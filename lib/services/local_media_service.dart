@@ -13,7 +13,7 @@ class LocalMediaService {
   static const maxVideoCount = 20000;
 
   static Future<void> testConnection(MediaSource source) async {
-    final directory = Directory(source.address);
+    final directory = Directory(source.location);
     if (!await directory.exists()) {
       throw FileSystemException('目录不存在', source.address);
     }
@@ -24,7 +24,7 @@ class LocalMediaService {
     MediaSource source, {
     void Function(String message)? onProgress,
   }) async {
-    final root = Directory(source.address);
+    final root = Directory(source.location);
     if (!await root.exists()) {
       throw FileSystemException('目录不存在', source.address);
     }
@@ -44,9 +44,7 @@ class LocalMediaService {
       onProgress?.call('正在读取 ${current.directory.path}');
       final List<FileSystemEntity> entries;
       try {
-        entries = await current.directory
-            .list(followLinks: false)
-            .toList();
+        entries = await current.directory.list(followLinks: false).toList();
       } on FileSystemException {
         onProgress?.call('跳过无法读取的目录 ${current.directory.path}');
         continue;

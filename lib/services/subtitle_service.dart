@@ -4,15 +4,12 @@ import 'dart:io';
 import 'package:crypto/crypto.dart';
 
 import '../models/media_source.dart';
+import 'jellyfin_service.dart';
 import 'local_media_service.dart';
 import 'webdav_service.dart';
 
 class SubtitleFile {
-  const SubtitleFile({
-    required this.path,
-    required this.title,
-    this.language,
-  });
+  const SubtitleFile({required this.path, required this.title, this.language});
 
   /// 媒体源内的原始路径；本地源为真实文件路径。
   final String path;
@@ -37,7 +34,26 @@ class SubtitleService {
     String videoPath,
     String password,
   ) async {
-    if (source.isLocal) {
+    if (source.isJellyfin) {
+      try {
+        final tracks = await JellyfinService.listSubtitles(
+          source,
+          password,
+          videoPath,
+        );
+        return [
+          for (final track in tracks)
+            SubtitleFile(
+              path: track.path,
+              title: track.title,
+              language: track.language,
+            ),
+        ];
+      } catch (_) {
+        return const [];
+      }
+    }
+    if (source.isFileSystem) {
       return _discoverLocal(videoPath);
     }
     final paths = await WebDavService.discoverSubtitles(
@@ -56,8 +72,11 @@ class SubtitleService {
     required MediaSource source,
     required String password,
   }) async {
-    if (source.isLocal) {
+    if (source.isFileSystem) {
       return File(subtitle.path).existsSync() ? subtitle.path : null;
+    }
+    if (source.isJellyfin) {
+      return _materializeJellyfin(subtitle, source, password);
     }
     final directory = Directory(
       '${Directory.systemTemp.path}${Platform.pathSeparator}framelet_subtitles',
@@ -108,7 +127,7 @@ class SubtitleService {
     final result = <SubtitleFile>[];
     await for (final entity in parent.list(followLinks: false)) {
       if (entity is! File) continue;
-      final name = entity.path.split(Platform.pathSeparator).last;
+      final name = entity.path.replaceAll('\\', '/').split('/').last;
       if (!WebDavService.isSubtitleFile(name)) continue;
       final subtitleStem = _stemOf(entity.path);
       if (!_matches(videoStem, subtitleStem)) continue;
@@ -116,6 +135,64 @@ class SubtitleService {
     }
     result.sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
     return result;
+  }
+
+  /// 从 Jellyfin 下载字幕到临时目录，交给 mpv 加载。
+  static Future<String?> _materializeJellyfin(
+    SubtitleFile subtitle,
+    MediaSource source,
+    String password,
+  ) async {
+    try {
+      final rest = subtitle.path.substring('jfsub://'.length);
+      final parts = rest.split('/');
+      if (parts.length < 3) return null;
+      final itemId = parts[0];
+      final mediaSourceId = parts[1];
+      final name = parts[2];
+      final dot = name.lastIndexOf('.');
+      if (dot <= 0) return null;
+      final index = name.substring(0, dot);
+      final format = name.substring(dot + 1);
+      final session = await JellyfinService.connect(source, password);
+      final uri = Uri.parse(
+        '${session.baseUrl}/Videos/$itemId/$mediaSourceId/Subtitles/$index'
+        '/Stream.$format'
+        '?api_key=${session.token}',
+      );
+
+      final directory = Directory(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}'
+        'framelet_subtitles',
+      );
+      await directory.create(recursive: true);
+      final key = sha1.convert(utf8.encode(subtitle.path)).toString();
+      final file = File(
+        '${directory.path}${Platform.pathSeparator}$key${subtitle.extension}',
+      );
+      if (await file.exists() && await file.length() > 16) return file.path;
+
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 10);
+      try {
+        final request = await client.getUrl(uri);
+        final response = await request.close().timeout(
+          const Duration(seconds: 30),
+        );
+        if (response.statusCode != 200) return null;
+        final sink = file.openWrite();
+        await response.pipe(sink);
+        if (await file.length() < 16) {
+          await file.delete();
+          return null;
+        }
+        return file.path;
+      } finally {
+        client.close(force: true);
+      }
+    } catch (_) {
+      return null;
+    }
   }
 
   static SubtitleFile _fromPath(String path) {
@@ -143,8 +220,7 @@ class SubtitleService {
 
   static String? _languageOf(String value) {
     final lower = value.toLowerCase();
-    if (RegExp(r'(zh|zho|chi|chs|cht|sc|tc|cn|中文|简体|繁体)')
-        .hasMatch(lower)) {
+    if (RegExp(r'(zh|zho|chi|chs|cht|sc|tc|cn|中文|简体|繁体)').hasMatch(lower)) {
       return '中文';
     }
     if (RegExp(r'(eng|en|英文|英语)').hasMatch(lower)) return '英语';
