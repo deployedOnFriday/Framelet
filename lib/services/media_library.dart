@@ -10,6 +10,7 @@ import 'danmaku_service.dart';
 import 'framelet_store.dart';
 import 'local_media_service.dart';
 import 'scraper_service.dart';
+import 'skip_marks_service.dart';
 import 'update_service.dart';
 import 'webdav_service.dart';
 
@@ -976,6 +977,7 @@ class MediaLibrary extends ChangeNotifier {
       DanmakuService.customEnabled = danmakuCustomEnabled;
       DanmakuService.baseUrl = danmakuBaseUrl;
       DanmakuService.proxyAddress = ScraperService.proxyAddress;
+      SkipMarksService.proxyAddress = ScraperService.proxyAddress;
     } catch (error) {
       debugPrint('读取弹幕/刮削开关失败，沿用默认值：$error');
     }
@@ -1015,6 +1017,7 @@ class MediaLibrary extends ChangeNotifier {
     ScraperService.resetNetworkSettings();
     UpdateService.proxyAddress = scrapeProxy;
     DanmakuService.proxyAddress = ScraperService.proxyAddress;
+    SkipMarksService.proxyAddress = ScraperService.proxyAddress;
     notifyListeners();
   }
 
@@ -1065,6 +1068,7 @@ class MediaLibrary extends ChangeNotifier {
     DanmakuService.baseUrl = danmakuBaseUrl;
     DanmakuService.proxyAddress = ScraperService.proxyAddress;
     DanmakuService.clearCache();
+    SkipMarksService.proxyAddress = ScraperService.proxyAddress;
     notifyListeners();
   }
 

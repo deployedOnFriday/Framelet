@@ -4,7 +4,7 @@ import 'package:media_kit/media_kit.dart';
 
 import '../models/media_source.dart';
 import 'credential_store.dart';
-import 'media_library.dart';
+import 'series_key.dart';
 import 'subtitle_service.dart';
 
 /// 用户上次在这部作品里选的字幕。
@@ -98,17 +98,7 @@ class SubtitlePreferences {
 
   /// 作品身份：优先 TMDB ID（同一部剧跨季/跨目录都稳定），
   /// 没有刮削结果时退回「媒体源 + 剧名」。
-  static String keyOf(ScannedVideo video) {
-    final library = MediaLibrary.instance;
-    final aggregated = library.resolveAggregated(video);
-    final tmdbId = aggregated.tmdbId ?? video.tmdbId;
-    if (tmdbId != null) return '${video.sourceId}|tmdb:$tmdbId';
-    final official = MediaLibrary.officialTitleOf(aggregated);
-    final title = MediaLibrary.normalizeSeriesTitle(
-      (official ?? aggregated.title).trim(),
-    );
-    return '${video.sourceId}|title:${title.toLowerCase()}';
-  }
+  static String keyOf(ScannedVideo video) => SeriesKey.of(video);
 
   Future<SubtitleChoice?> choiceFor(ScannedVideo video) async {
     final key = keyOf(video);

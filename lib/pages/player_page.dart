@@ -15,6 +15,8 @@ import '../services/media_library.dart';
 import '../services/playback_history.dart';
 import '../services/playback_preferences.dart';
 import '../services/player_host.dart';
+import '../services/skip_marks.dart';
+import '../services/skip_marks_service.dart';
 import '../services/subtitle_preferences.dart';
 import '../services/subtitle_service.dart';
 import '../services/thumbnail_service.dart';
@@ -127,6 +129,18 @@ class _PlayerPageState extends State<PlayerPage> {
   bool _danmakuEmptyHintVisible = false;
   Timer? _danmakuHintTimer;
 
+  /// 本剧的片头片尾标记（整部剧共用）。
+  SeriesSkipMarks _skipMarks = const SeriesSkipMarks();
+
+  /// 当前标记的来源：手动标注 / 在线识别。
+  SkipMarkSource _skipSource = SkipMarkSource.none;
+
+  /// 本集是否已跳过片头/片尾，避免重复跳转或重复提示。
+  bool _introSkipped = false;
+  bool _outroSkipped = false;
+  bool _skipSeeking = false;
+  final ValueNotifier<SkipPrompt> _skipPrompt = ValueNotifier(SkipPrompt.none);
+
   /// 当前播放的条目（可切集）
   late ScannedVideo _current = widget.video;
 
@@ -229,6 +243,7 @@ class _PlayerPageState extends State<PlayerPage> {
       final second = position.inSeconds;
       if (mounted && second != _lastUiSecond) {
         _lastUiSecond = second;
+        _evaluateSkipPrompt();
         setState(() {
           if (_resumeSeekTarget == null &&
               _durationSec > 0 &&
@@ -319,6 +334,7 @@ class _PlayerPageState extends State<PlayerPage> {
     // 默认倍速来自 设置 → 播放
     _speed.value = PlaybackPreferences.instance.defaultSpeed;
     _title.value = _headerTitle;
+    unawaited(_loadSkipMarks());
     _open(initial: true);
     if (_isTv) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -411,6 +427,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _volumePersistTimer?.cancel();
     _resumeSeekTimer?.cancel();
     _danmakuHintTimer?.cancel();
+    _skipPrompt.dispose();
     _osdTimer?.cancel();
     _osdMessage.dispose();
     _tvHideTimer?.cancel();
@@ -438,6 +455,166 @@ class _PlayerPageState extends State<PlayerPage> {
     final target = (_positionSec + seconds).clamp(0.0, _durationSec - 1);
     await _player.seek(Duration(milliseconds: (target * 1000).round()));
     _showOsd(seconds > 0 ? '快进 $seconds 秒' : '快退 ${-seconds} 秒');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 跳过片头 / 片尾
+  // ---------------------------------------------------------------------------
+
+  /// 读取片头片尾：手动标记按「部」保存，其次是在线识别（按集缓存）。
+  Future<void> _loadSkipMarks() async {
+    final video = _current;
+    final autoKey = SkipMarksService.cacheKeyFor(video);
+    var auto = autoKey.isEmpty
+        ? null
+        : await SkipMarksStore.instance.autoMarksOf(autoKey);
+    if (auto == null &&
+        autoKey.isNotEmpty &&
+        PlaybackPreferences.instance.autoSkipFromDatabase) {
+      final fetched = await SkipMarksService.fetch(video);
+      if (fetched != null) {
+        auto = fetched;
+        unawaited(SkipMarksStore.instance.saveAuto(autoKey, fetched));
+        _debugLog('片头片尾在线识别: ${fetched.toJson()}');
+      } else {
+        _debugLog('片头片尾在线识别失败: ${SkipMarksService.lastError}');
+      }
+    }
+    if (!mounted || video.path != _current.path) return;
+    final result = await SkipMarksStore.instance.resolve(video, auto: auto);
+    if (!mounted || video.path != _current.path) return;
+    setState(() {
+      _skipMarks = result.marks;
+      _skipSource = result.source;
+    });
+    _evaluateSkipPrompt();
+  }
+
+  /// 按当前进度决定是否显示「跳过片头/片尾」。
+  void _evaluateSkipPrompt() {
+    if (_skipSeeking || _skipMarks.isEmpty) {
+      if (_skipPrompt.value != SkipPrompt.none) {
+        _skipPrompt.value = SkipPrompt.none;
+      }
+      return;
+    }
+    final prompt = SkipPromptResolver.resolve(
+      marks: _skipMarks,
+      positionSec: _positionSec,
+      durationSec: _durationSec,
+      introSkipped: _introSkipped,
+      outroSkipped: _outroSkipped,
+    );
+    if (_skipPrompt.value == prompt) return;
+    _skipPrompt.value = prompt;
+    final prefs = PlaybackPreferences.instance;
+    // 自动跳过只做一次：跳完把本集标记置位，手动回拖不再反复触发。
+    if (prompt == SkipPrompt.intro && prefs.autoSkipIntro) {
+      unawaited(_skipIntro(auto: true));
+    } else if (prompt == SkipPrompt.outro && prefs.autoSkipOutro) {
+      unawaited(_skipOutro(auto: true));
+    }
+  }
+
+  Future<void> _skipIntro({bool auto = false}) async {
+    final target = _skipMarks.introEndSec;
+    if (target == null || _skipSeeking) return;
+    _introSkipped = true;
+    _skipPrompt.value = SkipPrompt.none;
+    _skipSeeking = true;
+    try {
+      final seconds = target.clamp(
+        0.0,
+        _durationSec > 0 ? _durationSec - 1 : target,
+      );
+      await _seekToSeconds(seconds);
+      if (auto) {
+        _debugLog('自动跳过片头 → ${_clockText(seconds)}');
+      } else {
+        _showOsd('已跳过片头');
+      }
+    } finally {
+      _skipSeeking = false;
+    }
+  }
+
+  Future<void> _skipOutro({bool auto = false}) async {
+    if (_outroSkipped || _skipSeeking) return;
+    _outroSkipped = true;
+    _skipPrompt.value = SkipPrompt.none;
+    // 手动点跳过片尾时直接进下一集；自动跳过则沿用「自动连播」设置，
+    // 关闭连播时只是把进度推到结尾。
+    if (_hasNext && (!auto || PlaybackPreferences.instance.autoPlayNext)) {
+      await _nextEpisode();
+      return;
+    }
+    if (_durationSec <= 0) return;
+    _skipSeeking = true;
+    try {
+      await _seekToSeconds((_durationSec - 1).clamp(0.0, _durationSec - 1));
+      if (auto) {
+        _debugLog('自动跳过片尾 → 结尾');
+      } else {
+        _showOsd('已跳到结尾');
+      }
+    } finally {
+      _skipSeeking = false;
+    }
+  }
+
+  Future<void> _seekToSeconds(double seconds) async {
+    if (_durationSec <= 0) return;
+    final target = seconds.clamp(0.0, _durationSec - 1);
+    await _player.seek(Duration(milliseconds: (target * 1000).round()));
+  }
+
+  /// 用当前进度「标记片头结束」，并立即应用。
+  Future<void> _markIntroEnd() async {
+    if (_positionSec <= 1) {
+      _showOsd('请先播放到片头结束的位置再标记');
+      return;
+    }
+    final marks = _skipMarks.copyWith(introEndSec: _positionSec);
+    setState(() {
+      _skipMarks = marks;
+      _skipSource = SkipMarkSource.manual;
+      _introSkipped = false;
+    });
+    await SkipMarksStore.instance.save(_current, marks);
+    _showOsd('已记住片头（本剧通用）：${_clockText(_positionSec)}');
+    _evaluateSkipPrompt();
+  }
+
+  /// 用当前进度「标记片尾开始」，并立即应用。
+  Future<void> _markOutroStart() async {
+    if (_positionSec <= 1 || _durationSec <= 0) {
+      _showOsd('请先播放到片尾开始的位置再标记');
+      return;
+    }
+    final marks = _skipMarks.copyWith(outroStartSec: _positionSec);
+    setState(() {
+      _skipMarks = marks;
+      _skipSource = SkipMarkSource.manual;
+      _outroSkipped = false;
+    });
+    await SkipMarksStore.instance.save(_current, marks);
+    _showOsd('已记住片尾（本剧通用）：${_clockText(_positionSec)}');
+    _evaluateSkipPrompt();
+  }
+
+  Future<void> _clearSkipMarks() async {
+    final autoKey = SkipMarksService.cacheKeyFor(_current);
+    setState(() {
+      _skipMarks = const SeriesSkipMarks();
+      _skipSource = SkipMarkSource.none;
+      _introSkipped = false;
+      _outroSkipped = false;
+      _skipPrompt.value = SkipPrompt.none;
+    });
+    await SkipMarksStore.instance.save(_current, const SeriesSkipMarks());
+    // 自动识别结果也一起清掉，否则下一集会立刻被「识别」回来。
+    await SkipMarksStore.instance.clearAuto(autoKey);
+    _showOsd('已清除片头片尾标记');
   }
 
   Future<void> _changeVolume(double delta) async {
@@ -593,11 +770,16 @@ class _PlayerPageState extends State<PlayerPage> {
       _danmakuEpisodeKey = null;
       _danmakuEnabled = false;
       _danmakuEmptyHintVisible = false;
+      _introSkipped = false;
+      _outroSkipped = false;
+      _skipSeeking = false;
+      _skipPrompt.value = SkipPrompt.none;
       // 字幕记忆按「作品」保留，但新的这一集要重新套用一次。
       _subtitleRestored = false;
       _subtitleDiscoveryDone = false;
     });
     _title.value = _headerTitle;
+    unawaited(_loadSkipMarks());
     if (osd != null) _showOsd(osd);
     _debugLog('切换剧集: ${video.title}');
     await _open();
@@ -1439,6 +1621,110 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
+  /// 片头片尾按钮：一集里只需标记一次，整部剧共用。
+  Widget _buildSkipButton() {
+    return Tooltip(
+      message: '片头片尾',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          key: const ValueKey('skip-marks-button'),
+          onTap: () {
+            _refocus();
+            unawaited(_showSkipMarkDialog());
+          },
+          borderRadius: BorderRadius.circular(6),
+          child: _ControlButtonLabel(
+            icon: _skipMarks.isEmpty
+                ? Icons.content_cut_rounded
+                : Icons.check_circle_outline_rounded,
+            label: switch (_skipSource) {
+              SkipMarkSource.manual => '片头片尾·手动',
+              SkipMarkSource.auto => '片头片尾·识别',
+              SkipMarkSource.none => '片头片尾',
+            },
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showSkipMarkDialog() async {
+    final action = await showDialog<String>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (context) => SimpleDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: Text(switch (_skipSource) {
+          SkipMarkSource.manual => '片头片尾（手动标记）',
+          SkipMarkSource.auto => '片头片尾（在线识别）',
+          SkipMarkSource.none => '片头片尾',
+        }, style: const TextStyle(color: Colors.white)),
+        children: [
+          _skipMarkOption(
+            value: 'intro',
+            label: _skipMarks.hasIntro
+                ? '把片头结束改为 ${_clockText(_positionSec)}'
+                : '把当前位置标记为片头结束',
+            icon: Icons.skip_next_rounded,
+          ),
+          _skipMarkOption(
+            value: 'outro',
+            label: _skipMarks.hasOutro
+                ? '把片尾开始改为 ${_clockText(_positionSec)}'
+                : '把当前位置标记为片尾开始',
+            icon: Icons.fast_forward_rounded,
+          ),
+          if (!_skipMarks.isEmpty)
+            _skipMarkOption(
+              value: 'clear',
+              label: '清除本剧的片头片尾',
+              icon: Icons.delete_outline_rounded,
+            ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 4, 24, 12),
+            child: Text(
+              '时间来自在线片头片尾库（按 TMDB 集号匹配），'
+              '手动标记会覆盖自动结果并整部剧沿用。',
+              style: TextStyle(color: Colors.white38, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+    switch (action) {
+      case 'intro':
+        await _markIntroEnd();
+      case 'outro':
+        await _markOutroStart();
+      case 'clear':
+        await _clearSkipMarks();
+    }
+    _refocus();
+  }
+
+  Widget _skipMarkOption({
+    required String value,
+    required String label,
+    required IconData icon,
+  }) {
+    return SimpleDialogOption(
+      onPressed: () => Navigator.of(context).pop(value),
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.white70, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 13.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 字幕按钮：常驻底部控制条（没内嵌字幕轨也保留入口），
   /// 点开一个独立的字幕选择弹窗，支持关闭/自动/指定轨/外挂字幕。
   ///
@@ -2150,6 +2436,69 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
+  /// 「跳过片头/片尾」浮层。放在 controls 子树里，全屏同样可见。
+  Widget _buildSkipPrompt() {
+    return ValueListenableBuilder<SkipPrompt>(
+      valueListenable: _skipPrompt,
+      builder: (context, prompt, _) {
+        if (prompt == SkipPrompt.none) return const SizedBox.shrink();
+        final isIntro = prompt == SkipPrompt.intro;
+        final target = isIntro
+            ? _skipMarks.introEndSec
+            : _skipMarks.outroStartSec;
+        return Align(
+          alignment: const Alignment(0.78, 0.72),
+          child: Material(
+            color: Colors.black.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(10),
+            child: InkWell(
+              key: ValueKey(isIntro ? 'skip-intro' : 'skip-outro'),
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => unawaited(isIntro ? _skipIntro() : _skipOutro()),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      isIntro
+                          ? Icons.skip_next_rounded
+                          : Icons.fast_forward_rounded,
+                      color: Colors.white,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      isIntro ? '跳过片头' : (_hasNext ? '跳过片尾 · 下一集' : '跳到结尾'),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (target != null) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        _clockText(target),
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 11.5,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildScreen(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
@@ -2184,23 +2533,32 @@ class _PlayerPageState extends State<PlayerPage> {
                 // 普通模式和全屏模式都能看到同一层弹幕。
                 controls: (state) => _durationSec <= 0
                     ? const SizedBox.shrink()
-                    : Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          Positioned.fill(
-                            child: AnimatedBuilder(
-                              animation: PlaybackPreferences.instance,
-                              builder: (_, _) => _buildDanmakuOverlay(),
+                    : GestureDetector(
+                        // 全屏是 media_kit 另起的一个路由，只带 Video 和这份
+                        // controls；页面层的右键监听不在那棵子树里。把右键
+                        // 监听挂进 controls，普通/全屏就都能用了。
+                        behavior: HitTestBehavior.translucent,
+                        onSecondaryTapDown: (_) => _showMediaInfo(),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Positioned.fill(
+                              child: AnimatedBuilder(
+                                animation: PlaybackPreferences.instance,
+                                builder: (_, _) => _buildDanmakuOverlay(),
+                              ),
                             ),
-                          ),
-                          Positioned.fill(
-                            child: _isTv
-                                ? const SizedBox.shrink()
-                                : MaterialDesktopVideoControls(state),
-                          ),
-                          if (_isTv) Positioned.fill(child: _buildTvControls()),
-                          _buildOsdOverlay(),
-                        ],
+                            Positioned.fill(
+                              child: _isTv
+                                  ? const SizedBox.shrink()
+                                  : MaterialDesktopVideoControls(state),
+                            ),
+                            if (_isTv)
+                              Positioned.fill(child: _buildTvControls()),
+                            _buildOsdOverlay(),
+                            _buildSkipPrompt(),
+                          ],
+                        ),
                       ),
               ),
             ),
@@ -2750,6 +3108,7 @@ class _PlayerPageState extends State<PlayerPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (multi) _buildEpisodeButton(),
+                _buildSkipButton(),
                 // 紧贴音轨左侧，中间不留弹性空隙。
                 _buildDanmakuSwitch(),
                 _buildDanmakuSettingsButton(),

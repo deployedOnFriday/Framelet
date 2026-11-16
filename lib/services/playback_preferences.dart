@@ -28,6 +28,15 @@ class PlaybackPreferences extends ChangeNotifier {
   /// 剧集播完自动播放下一集。
   bool autoPlayNext = true;
 
+  /// 进入片头区间自动跳到片头结束点。
+  bool autoSkipIntro = false;
+
+  /// 进入片尾区间自动跳过（有下一集则直接连播）。
+  bool autoSkipOutro = false;
+
+  /// 使用在线片头片尾数据自动识别（TheIntroDB）。
+  bool autoSkipFromDatabase = true;
+
   /// 下次播放沿用上次的音量与静音状态。
   bool rememberVolume = true;
 
@@ -70,6 +79,10 @@ class PlaybackPreferences extends ChangeNotifier {
   Future<void> load() async {
     try {
       autoPlayNext = await _store.read('framelet.player.autoNext') != '0';
+      autoSkipIntro = await _store.read('framelet.player.autoSkipIntro') == '1';
+      autoSkipOutro = await _store.read('framelet.player.autoSkipOutro') == '1';
+      autoSkipFromDatabase =
+          await _store.read('framelet.player.skipFromDb') != '0';
       rememberVolume =
           await _store.read('framelet.player.rememberVolume') != '0';
       hardwareDecode = await _store.read('framelet.player.hwdec') != '0';
@@ -164,6 +177,24 @@ class PlaybackPreferences extends ChangeNotifier {
 
   Future<void> setAutoPlayNext(bool value) =>
       _saveBool('framelet.player.autoNext', value, (v) => autoPlayNext = v);
+
+  Future<void> setAutoSkipIntro(bool value) => _saveBool(
+    'framelet.player.autoSkipIntro',
+    value,
+    (v) => autoSkipIntro = v,
+  );
+
+  Future<void> setAutoSkipOutro(bool value) => _saveBool(
+    'framelet.player.autoSkipOutro',
+    value,
+    (v) => autoSkipOutro = v,
+  );
+
+  Future<void> setAutoSkipFromDatabase(bool value) => _saveBool(
+    'framelet.player.skipFromDb',
+    value,
+    (v) => autoSkipFromDatabase = v,
+  );
 
   Future<void> setRememberVolume(bool value) => _saveBool(
     'framelet.player.rememberVolume',

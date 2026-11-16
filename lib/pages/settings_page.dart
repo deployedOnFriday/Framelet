@@ -132,6 +132,30 @@ class _SettingsPageState extends State<SettingsPage>
               ),
               _divider(),
               _playbackSwitch(
+                key: 'playback-auto-skip-intro',
+                title: '自动跳过片头',
+                subtitle: '片头一出现就跳到片头结束点（时间来自在线片头库，可手动覆写）',
+                value: prefs.autoSkipIntro,
+                onChanged: prefs.setAutoSkipIntro,
+              ),
+              _divider(),
+              _playbackSwitch(
+                key: 'playback-auto-skip-outro',
+                title: '自动跳过片尾',
+                subtitle: '到片尾起点自动结束本集，有下一集则直接连播',
+                value: prefs.autoSkipOutro,
+                onChanged: prefs.setAutoSkipOutro,
+              ),
+              _divider(),
+              _playbackSwitch(
+                key: 'playback-skip-from-db',
+                title: '在线识别片头片尾',
+                subtitle: '按 TMDB 集号从 TheIntroDB 查询片头片尾时间，结果会缓存在本地',
+                value: prefs.autoSkipFromDatabase,
+                onChanged: prefs.setAutoSkipFromDatabase,
+              ),
+              _divider(),
+              _playbackSwitch(
                 key: 'playback-remember-volume',
                 title: '记住音量',
                 subtitle: '下次播放沿用上次的音量与静音状态',
@@ -567,10 +591,7 @@ class _SettingsPageState extends State<SettingsPage>
                 children: [
                   Row(
                     children: [
-                      _scrapeStat(
-                        '${library.matchedCount + missing}',
-                        '媒体库条目',
-                      ),
+                      _scrapeStat('${library.matchedCount + missing}', '媒体库条目'),
                       const SizedBox(width: 26),
                       _scrapeStat('${library.matchedCount}', '已匹配海报'),
                       const SizedBox(width: 26),
@@ -1539,8 +1560,7 @@ class _SettingsPageState extends State<SettingsPage>
     }
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) =>
-            WebDavBrowserPage(source: source, password: password),
+        builder: (_) => WebDavBrowserPage(source: source, password: password),
       ),
     );
   }
@@ -2713,9 +2733,7 @@ class _UpdateCardState extends State<_UpdateCard> {
       ..hideCurrentSnackBar()
       ..showSnackBar(
         SnackBar(
-          content: Text(
-            started ? '安装程序已启动，按向导完成升级即可' : '请在系统设置中允许安装后重试',
-          ),
+          content: Text(started ? '安装程序已启动，按向导完成升级即可' : '请在系统设置中允许安装后重试'),
         ),
       );
   }
