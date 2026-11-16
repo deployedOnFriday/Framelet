@@ -108,6 +108,7 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 本集的同名字幕是否已发现完。外挂字幕要等它，否则会在文件列表
   /// 还是空的时候误判成「本集没有对应字幕」。
   bool _subtitleDiscoveryDone = false;
+
   List<DanmakuComment> _danmakuComments = const [];
   bool _danmakuEnabled = false;
   bool _loadingDanmaku = false;
@@ -120,6 +121,11 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 弹幕时钟：position 流实时更新，弹幕层用它驱动逐帧重绘，
   /// 不经 setState（整页 setState 每帧重建是卡顿根源之一）。
   final ValueNotifier<double> _danmakuClock = ValueNotifier(0);
+
+  /// 「当前进度暂无弹幕」浮层：只在用户主动开启/换源后显示，
+  /// 静默自动加载与换集不显示，避免每集结尾都挂一条提示。
+  bool _danmakuEmptyHintVisible = false;
+  Timer? _danmakuHintTimer;
 
   /// 当前播放的条目（可切集）
   late ScannedVideo _current = widget.video;
@@ -404,6 +410,7 @@ class _PlayerPageState extends State<PlayerPage> {
     _trackSub?.cancel();
     _volumePersistTimer?.cancel();
     _resumeSeekTimer?.cancel();
+    _danmakuHintTimer?.cancel();
     _osdTimer?.cancel();
     _osdMessage.dispose();
     _tvHideTimer?.cancel();
@@ -585,6 +592,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _danmakuCandidates = const [];
       _danmakuEpisodeKey = null;
       _danmakuEnabled = false;
+      _danmakuEmptyHintVisible = false;
       // 字幕记忆按「作品」保留，但新的这一集要重新套用一次。
       _subtitleRestored = false;
       _subtitleDiscoveryDone = false;
@@ -707,7 +715,7 @@ class _PlayerPageState extends State<PlayerPage> {
       // 自动加载弹幕（设置 → 播放），需先配置弹幕服务
       if ((PlaybackPreferences.instance.autoLoadDanmaku || _danmakuWanted) &&
           DanmakuService.configured) {
-        unawaited(_loadDanmaku());
+        unawaited(_loadDanmaku(silent: !initial));
       }
     } catch (error) {
       if (generation == _openGeneration) _acceptStreamEvents = false;
@@ -774,7 +782,6 @@ class _PlayerPageState extends State<PlayerPage> {
       _subtitleRestored = true;
       setState(() => _activeSubtitlePath = null);
       _debugLog('字幕记忆: 关闭');
-      _showOsd('字幕已关闭（沿用上次选择）');
       return;
     }
 
@@ -794,7 +801,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _subtitleRestored = true;
       setState(() => _activeSubtitlePath = null);
       _debugLog('字幕记忆: ${track.id} ${track.title}');
-      _showOsd('字幕：${_subtitleLabel(track, index + 1)}');
+      // 换集自动沿用不提示：每集弹一次「字幕：xxx」只是噪音。
       return;
     }
 
@@ -822,7 +829,8 @@ class _PlayerPageState extends State<PlayerPage> {
   }) async {
     final source = MediaLibrary.instance.sourceById(_current.sourceId);
     if (source == null) return;
-    _showOsd('正在加载字幕…');
+    // remember=false 表示「换集自动沿用」：不弹提示，避免每集打扰。
+    if (remember) _showOsd('正在加载字幕…');
     final path = await SubtitleService.materialize(
       subtitle: subtitle,
       source: source,
@@ -853,8 +861,8 @@ class _PlayerPageState extends State<PlayerPage> {
           ),
         ),
       );
+      _showOsd('字幕：${subtitle.title}');
     }
-    _showOsd('字幕：${subtitle.title}');
   }
 
   Future<void> _pickExternalSubtitle() async {
@@ -883,7 +891,9 @@ class _PlayerPageState extends State<PlayerPage> {
       setState(() {
         _danmakuEnabled = false;
         _danmakuWanted = false;
+        _danmakuEmptyHintVisible = false;
       });
+      _danmakuHintTimer?.cancel();
       _showOsd('弹幕已关闭');
       return;
     }
@@ -907,13 +917,27 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _loadDanmaku({
     String? candidateKey,
     bool searchAgain = false,
+    bool silent = false,
   }) async {
     if (_loadingDanmaku) {
       _debugLog('弹幕加载中，忽略重复请求');
       return;
     }
     setState(() => _loadingDanmaku = true);
-    _showOsd('正在匹配弹幕…');
+    // 切集后自动加载不弹提示；用户点按钮/换源仍要有反馈。
+    final quiet = silent;
+    void notify(String message, {Duration? duration}) {
+      if (quiet) {
+        _debugLog('静默提示: $message');
+        return;
+      }
+      _showOsd(
+        message,
+        duration: duration ?? const Duration(milliseconds: 1800),
+      );
+    }
+
+    notify('正在匹配弹幕…');
     try {
       var candidates = _danmakuCandidates;
       var query = '';
@@ -935,7 +959,7 @@ class _PlayerPageState extends State<PlayerPage> {
         _debugLog('弹幕搜索完成: ${candidates.length} 个源');
         if (!mounted) return;
         if (candidates.isEmpty) {
-          _showOsd(
+          notify(
             '没有找到「$query」第 $episodeNumber 集的弹幕',
             duration: const Duration(seconds: 4),
           );
@@ -964,14 +988,20 @@ class _PlayerPageState extends State<PlayerPage> {
           '${_clockText(_positionSec)}',
         );
       }
+      final lastCommentSec = comments.isEmpty ? 0.0 : comments.last.timeSec;
       setState(() {
         _danmakuComments = comments;
         _danmakuEpisodeKey = selected.key;
         _danmakuEnabled = comments.isNotEmpty;
         _danmakuWanted = comments.isNotEmpty;
+        // 只有用户主动开启/换源、且当前进度已越过最后一颗弹幕时，
+        // 才解释一次「当前进度暂无弹幕」；切集自动加载保持安静。
+        _danmakuEmptyHintVisible =
+            !quiet && comments.isNotEmpty && _positionSec > lastCommentSec + 1;
       });
+      _scheduleDanmakuHintFade();
       final coverageHint = _danmakuCoverageHint();
-      _showOsd(
+      notify(
         comments.isEmpty
             ? '该节目暂无弹幕'
             : coverageHint ??
@@ -984,16 +1014,26 @@ class _PlayerPageState extends State<PlayerPage> {
     } on DanmakuException catch (error) {
       _debugLog('弹幕加载失败: ${error.message}');
       if (mounted) {
-        _showOsd(error.message, duration: const Duration(seconds: 4));
+        notify(error.message, duration: const Duration(seconds: 4));
       }
     } catch (error) {
       _debugLog('弹幕加载异常: $error');
       if (mounted) {
-        _showOsd('弹幕加载失败：$error', duration: const Duration(seconds: 4));
+        notify('弹幕加载失败：$error', duration: const Duration(seconds: 4));
       }
     } finally {
       if (mounted) setState(() => _loadingDanmaku = false);
     }
+  }
+
+  /// 「暂无弹幕」解释只短暂停留，不按进度常驻到片尾。
+  void _scheduleDanmakuHintFade() {
+    _danmakuHintTimer?.cancel();
+    if (!_danmakuEmptyHintVisible) return;
+    _danmakuHintTimer = Timer(const Duration(seconds: 6), () {
+      if (!mounted || !_danmakuEmptyHintVisible) return;
+      setState(() => _danmakuEmptyHintVisible = false);
+    });
   }
 
   /// 播放前探测文件地址：把 HTTP 状态码显示在错误卡片上，便于排查。
@@ -2038,11 +2078,12 @@ class _PlayerPageState extends State<PlayerPage> {
           lifetimeSeconds: prefs.danmakuLifetime,
           laneCount: prefs.danmakuLanes,
         ),
-        // 进度越过最后一颗弹幕时的解释：用共享时钟驱动，全屏路由里
-        // 也能随播放进度出现，而不是停在进入全屏那一刻的状态。
+        // 弹幕放完后的「暂无弹幕」解释只在用户刚开启/换源后短暂给一次，
+        // 不再按进度常驻——每集结尾都挂一条浮层属于噪音。
         ValueListenableBuilder<double>(
           valueListenable: _danmakuClock,
           builder: (context, position, _) {
+            if (!_danmakuEmptyHintVisible) return const SizedBox.shrink();
             final last = _danmakuComments.last.timeSec;
             if (position <= last + 1) return const SizedBox.shrink();
             return IgnorePointer(
