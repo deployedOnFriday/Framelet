@@ -2455,56 +2455,40 @@ class _PlayerPageState extends State<PlayerPage> {
       builder: (context, prompt, _) {
         if (prompt == SkipPrompt.none) return const SizedBox.shrink();
         final isIntro = prompt == SkipPrompt.intro;
-        final target = isIntro
-            ? _skipMarks.introEndSec
-            : _skipMarks.outroStartSec;
-        return Align(
-          alignment: const Alignment(0.78, 0.72),
-          child: Material(
-            color: Colors.black.withValues(alpha: 0.72),
-            borderRadius: BorderRadius.circular(10),
-            child: InkWell(
-              key: ValueKey(isIntro ? 'skip-intro' : 'skip-outro'),
-              borderRadius: BorderRadius.circular(10),
-              onTap: () => unawaited(isIntro ? _skipIntro() : _skipOutro()),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 10,
+        final label = isIntro ? '跳过片头' : (_hasNext ? '跳过片尾' : '跳到结尾');
+        // Netflix 式白底黑字按钮：贴在进度条正上方，右侧对齐。
+        return Positioned(
+          right: 28,
+          bottom: _isTv ? 154 : 100,
+          child: FilledButton(
+            key: ValueKey(isIntro ? 'skip-intro' : 'skip-outro'),
+            onPressed: () => unawaited(isIntro ? _skipIntro() : _skipOutro()),
+            style:
+                FilledButton.styleFrom(
+                  backgroundColor: Colors.white,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 22,
+                    vertical: 13,
+                  ),
+                  minimumSize: const Size(0, 44),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  elevation: 8,
+                  shadowColor: Colors.black.withValues(alpha: 0.55),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  textStyle: const TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.2,
+                  ),
+                ).copyWith(
+                  overlayColor: WidgetStatePropertyAll(
+                    Colors.black.withValues(alpha: 0.06),
+                  ),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      isIntro
-                          ? Icons.skip_next_rounded
-                          : Icons.fast_forward_rounded,
-                      color: Colors.white,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      isIntro ? '跳过片头' : (_hasNext ? '跳过片尾 · 下一集' : '跳到结尾'),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (target != null) ...[
-                      const SizedBox(width: 6),
-                      Text(
-                        _clockText(target),
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 11.5,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ),
+            child: Text(label),
           ),
         );
       },
