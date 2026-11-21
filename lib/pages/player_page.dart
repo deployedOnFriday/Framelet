@@ -157,6 +157,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 顶栏标题同样用共享通知：全屏控制层里的标题要能随切集更新。
   final ValueNotifier<String> _title = ValueNotifier<String>('');
+  SubtitleViewConfiguration? _subtitleViewConfig;
 
   // 音量状态（mpv 音量 0-100）
   double _volume = 100;
@@ -173,6 +174,11 @@ class _PlayerPageState extends State<PlayerPage> {
   // ---------------------------- Android TV ----------------------------
   /// 电视遥控：控制条常驻焦点态，任意按键可唤出，播放中自动收起。
   bool get _isTv => DeviceProfile.instance.isTelevision;
+
+  /// 手机/平板直接调整系统媒体音量；此时 mpv 自身保持 100%，避免
+  /// 之前记住的 0 音量或静音状态让系统音量手势完全听不到声音。
+  bool get _usesSystemVolume =>
+      !_isTv && (Platform.isAndroid || Platform.isIOS);
   bool _tvControlsVisible = false;
   Timer? _tvHideTimer;
   final FocusNode _tvPlayFocus = FocusNode(debugLabel: 'tv-play');
@@ -210,6 +216,11 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void initState() {
     super.initState();
+    if (_usesSystemVolume) {
+      _volume = _volumeBeforeMute = 100;
+      _muted = false;
+      unawaited(_player.setVolume(100));
+    }
     final provided = widget.episodes;
     if (provided != null && provided.length > 1) {
       _playlist = provided;
@@ -391,6 +402,14 @@ class _PlayerPageState extends State<PlayerPage> {
 
   /// 启动时恢复上次的音量与静音状态（「记住音量」开启时）。
   Future<void> _restoreVolume() async {
+    // 手机端由系统媒体音量控制响度，mpv 固定满音量；否则播放器内部
+    // 被记忆为 0 时，右侧上滑只会调系统音量，仍然没有声音。
+    if (_usesSystemVolume) {
+      _volume = _volumeBeforeMute = 100;
+      _muted = false;
+      await _player.setVolume(100);
+      return;
+    }
     if (!PlaybackPreferences.instance.rememberVolume) return;
     try {
       final stored = await _store.read('framelet.player.volume');
@@ -948,6 +967,7 @@ class _PlayerPageState extends State<PlayerPage> {
       _acceptStreamEvents = true;
       final duration = _player.state.duration;
       if (duration > Duration.zero) _handleDuration(duration);
+      if (_usesSystemVolume) await _player.setVolume(100);
       await _applySpeed(_speed.value, showOsd: false);
       _debugLog('open() 调用完成');
       unawaited(_loadSubtitleFiles(source, authPassword));
@@ -2570,6 +2590,19 @@ class _PlayerPageState extends State<PlayerPage> {
 
   Widget _buildScreen(BuildContext context) {
     final touch = _useTouchControls(context);
+    final subtitleConfig = _subtitleViewConfig ??= SubtitleViewConfiguration(
+      visible: !touch,
+      style: TextStyle(
+        height: 1.35,
+        fontSize: touch ? 18 : 22,
+        fontWeight: FontWeight.w500,
+        color: Colors.white,
+        backgroundColor: const Color(0x99000000),
+      ),
+      textAlign: TextAlign.center,
+      textScaler: TextScaler.noScaling,
+      padding: EdgeInsets.fromLTRB(16, 0, 16, _isTv ? 154 : 56),
+    );
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -2583,18 +2616,9 @@ class _PlayerPageState extends State<PlayerPage> {
                 key: _videoKey,
                 controller: _controller,
                 // 非 libass 平台（Android/iOS）由 Flutter 画字幕：
-                // 默认 32px 在播放器里偏大、且贴着窗口底边容易被裁掉。
-                subtitleViewConfiguration: const SubtitleViewConfiguration(
-                  style: TextStyle(
-                    height: 1.35,
-                    fontSize: 22,
-                    fontWeight: FontWeight.w500,
-                    color: Colors.white,
-                    backgroundColor: Color(0x99000000),
-                  ),
-                  textAlign: TextAlign.center,
-                  padding: EdgeInsets.fromLTRB(16, 0, 16, 56),
-                ),
+                // media_kit 会按屏幕面积缩放字幕，手机上会把 22px 缩到
+                // 不足 10px；这里固定字号，并给 TV 底栏留出空间。
+                subtitleViewConfiguration: subtitleConfig,
                 // 视频尚未就绪时不渲染控制条，避免其布局在零尺寸下溢出报错。
                 //
                 // 弹幕层必须放在 controls 里：media_kit 进入全屏时会新建
@@ -2622,19 +2646,25 @@ class _PlayerPageState extends State<PlayerPage> {
                               child: _isTv
                                   ? const SizedBox.shrink()
                                   : touch
-                                  ? _MobilePlayerControls(page: this)
+                                  ? const SizedBox.shrink()
                                   : MaterialDesktopVideoControls(state),
                             ),
                             if (_isTv)
                               Positioned.fill(child: _buildTvControls()),
                             _buildOsdOverlay(),
-                            _buildSkipPrompt(context),
+                            if (!touch) _buildSkipPrompt(context),
                           ],
                         ),
                       ),
               ),
             ),
           ),
+          // 手机控制层放在 Video 外层，确保永远盖在视频、字幕和 media_kit
+          // 自带的触摸层之上；只改 controls 子树时部分 Android 设备会
+          // 被播放器内部的手势层压住，导致按钮和进度条点不到。
+          if (touch && _durationSec > 0 && _errorMessage == null)
+            Positioned.fill(child: _MobilePlayerControls(page: this)),
+          if (touch) _buildSkipPrompt(context),
           if (!_mediaReady && _errorMessage == null)
             const Positioned.fill(
               child: ColoredBox(
@@ -3221,11 +3251,13 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<Duration>? _durationSub;
   StreamSubscription<bool>? _playingSub;
+  StreamSubscription<List<String>>? _subtitleSub;
 
   bool _visible = true;
   bool _playing = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
+  List<String> _subtitleLines = const [];
   int _lastPositionSecond = -1;
   double? _scrubSeconds;
   Timer? _hideTimer;
@@ -3258,6 +3290,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
     _playing = _player.state.playing;
     _position = _player.state.position;
     _duration = _player.state.duration;
+    _subtitleLines = _player.state.subtitle;
     _positionSub = _player.stream.position.listen((position) {
       _position = position;
       final second = position.inSeconds;
@@ -3286,6 +3319,9 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
         setState(() {});
       }
     });
+    _subtitleSub = _player.stream.subtitle.listen((lines) {
+      if (mounted) setState(() => _subtitleLines = lines);
+    });
     unawaited(_readHardwareLevels());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _scheduleHide();
@@ -3297,6 +3333,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
     _positionSub?.cancel();
     _durationSub?.cancel();
     _playingSub?.cancel();
+    _subtitleSub?.cancel();
     _hideTimer?.cancel();
     _hudTimer?.cancel();
     _brightnessPushTimer?.cancel();
@@ -3307,6 +3344,11 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
   Future<void> _readHardwareLevels() async {
     final brightness = await ScreenControlService.instance.readBrightness();
     final volume = await ScreenControlService.instance.readVolume();
+    // 系统媒体音量可用时，mpv 固定满音量。此前若从桌面端记忆了
+    // 0% 或静音，手机端右侧上滑只会改系统音量，播放器仍是静音。
+    if (volume != null) {
+      unawaited(_player.setVolume(100));
+    }
     if (!mounted) return;
     setState(() {
       _nativeBrightness = brightness != null;
@@ -3377,6 +3419,9 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
     if (_nativeVolume == false) {
       unawaited(_player.setVolume((value * 100).clamp(0.0, 100.0)));
       return;
+    }
+    if (_player.state.volume <= 0.01 && value > 0) {
+      unawaited(_player.setVolume(100));
     }
     _pendingVolume = value;
     _volumePushTimer ??= Timer(const Duration(milliseconds: 50), () {
@@ -3449,10 +3494,53 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
   }
 
   void _handleDoubleTap() {
-    final width = MediaQuery.sizeOf(context).width;
-    final step = _dragStartX < width / 2 ? -10 : 10;
     _keepVisible();
-    unawaited(widget.page._seekBy(step));
+    unawaited(_togglePlayback());
+  }
+
+  Future<void> _togglePlayback() async {
+    final pausing = _player.state.playing;
+    await widget.page._togglePlay();
+    if (mounted) widget.page._showOsd(pausing ? '已暂停' : '继续播放');
+  }
+
+  Widget _buildSubtitles(BuildContext context) {
+    final text = [
+      for (final line in _subtitleLines)
+        if (line.trim().isNotEmpty) line.trim(),
+    ].join('\n');
+    if (text.isEmpty) return const SizedBox.shrink();
+    final safeBottom = MediaQuery.paddingOf(context).bottom;
+    return AnimatedPositioned(
+      left: 18,
+      right: 18,
+      bottom: safeBottom + (_visible ? 158 : 18),
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOut,
+      child: IgnorePointer(
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.58),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              text,
+              textAlign: TextAlign.center,
+              textScaler: TextScaler.noScaling,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                height: 1.35,
+                fontWeight: FontWeight.w500,
+                shadows: [Shadow(blurRadius: 3, color: Colors.black87)],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildHud() {
@@ -3552,14 +3640,14 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
 
   Widget _actionChip(Widget child) {
     return Container(
-      height: 42,
+      height: 38,
       margin: const EdgeInsets.only(right: 8),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(21),
+        borderRadius: BorderRadius.circular(19),
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(21),
+        borderRadius: BorderRadius.circular(19),
         child: Center(child: child),
       ),
     );
@@ -3614,34 +3702,37 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
               ),
             ),
             Expanded(
-              child: SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  trackHeight: 3,
-                  activeTrackColor: Colors.white,
-                  inactiveTrackColor: Colors.white24,
-                  thumbColor: Colors.white,
-                  overlayColor: Colors.white24,
-                  thumbShape: const RoundSliderThumbShape(
-                    enabledThumbRadius: 6,
+              child: SizedBox(
+                height: 32,
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: 3,
+                    activeTrackColor: Colors.white,
+                    inactiveTrackColor: Colors.white24,
+                    thumbColor: Colors.white,
+                    overlayColor: Colors.white24,
+                    thumbShape: const RoundSliderThumbShape(
+                      enabledThumbRadius: 6,
+                    ),
+                    overlayShape: const RoundSliderOverlayShape(
+                      overlayRadius: 16,
+                    ),
                   ),
-                  overlayShape: const RoundSliderOverlayShape(
-                    overlayRadius: 16,
+                  child: Slider(
+                    value: position,
+                    max: max,
+                    onChangeStart: (_) => _hideTimer?.cancel(),
+                    onChanged: (value) => setState(() => _scrubSeconds = value),
+                    onChangeEnd: (value) {
+                      setState(() => _scrubSeconds = null);
+                      unawaited(
+                        _player.seek(
+                          Duration(milliseconds: (value * 1000).round()),
+                        ),
+                      );
+                      _scheduleHide();
+                    },
                   ),
-                ),
-                child: Slider(
-                  value: position,
-                  max: max,
-                  onChangeStart: (_) => _hideTimer?.cancel(),
-                  onChanged: (value) => setState(() => _scrubSeconds = value),
-                  onChangeEnd: (value) {
-                    setState(() => _scrubSeconds = null);
-                    unawaited(
-                      _player.seek(
-                        Duration(milliseconds: (value * 1000).round()),
-                      ),
-                    );
-                    _scheduleHide();
-                  },
                 ),
               ),
             ),
@@ -3685,7 +3776,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
         ),
         const SizedBox(height: 2),
         SizedBox(
-          height: 44,
+          height: 40,
           child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -3729,9 +3820,6 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: _toggleVisible,
-            onDoubleTapDown: (details) {
-              _dragStartX = details.localPosition.dx;
-            },
             onDoubleTap: _handleDoubleTap,
             onVerticalDragStart: _onVerticalDragStart,
             onVerticalDragUpdate: _onVerticalDragUpdate,
@@ -3741,6 +3829,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
             onHorizontalDragEnd: _onHorizontalDragEnd,
           ),
         ),
+        _buildSubtitles(context),
         IgnorePointer(
           ignoring: !_visible,
           child: AnimatedOpacity(
@@ -3790,7 +3879,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
                     child: SafeArea(
                       top: false,
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 40, 12, 6),
+                        padding: const EdgeInsets.fromLTRB(12, 14, 12, 4),
                         child: _buildBottomBar(),
                       ),
                     ),
