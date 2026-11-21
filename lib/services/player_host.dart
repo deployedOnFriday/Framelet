@@ -13,14 +13,25 @@ import 'package:media_kit_video/media_kit_video.dart';
 class PlayerHost {
   PlayerHost._();
 
-  /// 桌面端交给 mpv/libass 渲染字幕：ASS/SSA 的字体、描边、
-  /// 中上英下等定位信息才能保留；Flutter 纯文本渲染会丢掉这些版式。
-  /// Android/iOS 需要额外的 libass 字体资源，继续用 Flutter 渲染。
-  static final bool _useLibass =
-      Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+  /// 交给 mpv/libass 渲染字幕：ASS/SSA 的字体、描边、中上英下等
+  /// 定位信息才能保留；Flutter 纯文本渲染会丢掉这些版式。
+  ///
+  /// Android 的 fontconfig 看不到系统字体，必须随包提供一个中文字体
+  /// （Noto Sans SC，OFL 许可），才能正常渲染中文 libass 字幕。
+  static final bool useLibass =
+      Platform.isWindows ||
+      Platform.isMacOS ||
+      Platform.isLinux ||
+      Platform.isAndroid;
+
+  static const _androidSubtitleFont = 'assets/fonts/NotoSansSC-Regular.otf';
 
   static final Player player = Player(
-    configuration: PlayerConfiguration(libass: _useLibass),
+    configuration: PlayerConfiguration(
+      libass: useLibass,
+      libassAndroidFont: Platform.isAndroid ? _androidSubtitleFont : null,
+      libassAndroidFontName: Platform.isAndroid ? 'Noto Sans SC' : null,
+    ),
   );
   static final VideoController controller = VideoController(player);
 }

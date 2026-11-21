@@ -3283,6 +3283,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
   double _dragBasePosition = 0;
   double _dragSeekTarget = 0;
   bool _verticalBrightness = false;
+  double _lastSubPos = 100;
 
   @override
   void initState() {
@@ -3315,6 +3316,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
       _hideTimer?.cancel();
       if (!_visible) {
         setState(() => _visible = true);
+        _syncLibassSubtitlePosition();
       } else {
         setState(() {});
       }
@@ -3324,7 +3326,18 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
     });
     unawaited(_readHardwareLevels());
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _scheduleHide();
+      if (!mounted) return;
+      _syncLibassSubtitlePosition();
+      _scheduleHide();
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // 旋转屏幕后屏幕高度变化，字幕上移比例需要重新计算。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _syncLibassSubtitlePosition();
     });
   }
 
@@ -3338,7 +3351,35 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
     _hudTimer?.cancel();
     _brightnessPushTimer?.cancel();
     _volumePushTimer?.cancel();
+    _resetLibassSubtitlePosition();
     super.dispose();
+  }
+
+  /// libass 字幕由 mpv 画进视频，Flutter 无法再给它让位。控制栏展开时
+  /// 按屏幕高度把字幕整体上移，收起后恢复到底部，避免进度条压住字幕。
+  void _syncLibassSubtitlePosition() {
+    if (!PlayerHost.useLibass || !mounted) return;
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    final media = MediaQuery.of(context);
+    final height = media.size.height;
+    if (height <= 0) return;
+    // 底栏：时间/进度条 28 + 控制行 54 + 间距，再让出系统手势区。
+    final bottomInset = _visible ? 92 + media.padding.bottom : 0.0;
+    final position = (100 - bottomInset / height * 100)
+        .clamp(70.0, 100.0)
+        .toDouble();
+    if ((position - _lastSubPos).abs() < 0.5) return;
+    _lastSubPos = position;
+    unawaited(platform.setProperty('sub-pos', position.toStringAsFixed(1)));
+  }
+
+  void _resetLibassSubtitlePosition() {
+    if (!PlayerHost.useLibass || _lastSubPos == 100) return;
+    final platform = _player.platform;
+    if (platform is! NativePlayer) return;
+    _lastSubPos = 100;
+    unawaited(platform.setProperty('sub-pos', '100'));
   }
 
   Future<void> _readHardwareLevels() async {
@@ -3367,12 +3408,14 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
         _visible = false;
         _hud = _MobileHud.none;
       });
+      _syncLibassSubtitlePosition();
     });
   }
 
   void _keepVisible() {
     if (!_visible) {
       setState(() => _visible = true);
+      _syncLibassSubtitlePosition();
     }
     _scheduleHide();
   }
@@ -3383,6 +3426,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
       _visible = !_visible;
       if (!_visible) _hud = _MobileHud.none;
     });
+    _syncLibassSubtitlePosition();
     if (_visible) _scheduleHide();
   }
 
@@ -3505,6 +3549,9 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
   }
 
   Widget _buildSubtitles(BuildContext context) {
+    // Android 已启用 libass，由 mpv 直接渲染到视频画面，避免再叠一层
+    // 字体/位置不同的 Flutter 文本。
+    if (PlayerHost.useLibass) return const SizedBox.shrink();
     final text = [
       for (final line in _subtitleLines)
         if (line.trim().isNotEmpty) line.trim(),
@@ -3514,7 +3561,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
     return AnimatedPositioned(
       left: 18,
       right: 18,
-      bottom: safeBottom + (_visible ? 158 : 18),
+      bottom: safeBottom + (_visible ? 98 : 14),
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeOut,
       child: IgnorePointer(
@@ -3638,21 +3685,6 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
     );
   }
 
-  Widget _actionChip(Widget child) {
-    return Container(
-      height: 38,
-      margin: const EdgeInsets.only(right: 8),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(19),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(19),
-        child: Center(child: child),
-      ),
-    );
-  }
-
   Widget _buildTopBar() {
     return Row(
       children: [
@@ -3688,6 +3720,11 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
       max,
     );
     final multi = widget.page._playlist.length > 1;
+    final width = MediaQuery.sizeOf(context).width;
+    // 横屏手机宽度通常在 700–900，保留完整导航；更窄时把选集/切集
+    // 收进「更多」，避免底栏挤压或溢出。
+    final showEpisodeNav = multi && width >= 760;
+    final showQuickOptions = width >= 560;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3697,13 +3734,13 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
               _PlayerPageState._clockText(position),
               style: const TextStyle(
                 color: Colors.white,
-                fontSize: 12,
+                fontSize: 11.5,
                 fontFeatures: [FontFeature.tabularFigures()],
               ),
             ),
             Expanded(
               child: SizedBox(
-                height: 32,
+                height: 28,
                 child: SliderTheme(
                   data: SliderTheme.of(context).copyWith(
                     trackHeight: 3,
@@ -3740,66 +3777,218 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
               _PlayerPageState._clockText(duration),
               style: const TextStyle(
                 color: Colors.white70,
-                fontSize: 12,
+                fontSize: 11.5,
                 fontFeatures: [FontFeature.tabularFigures()],
               ),
             ),
           ],
         ),
-        Row(
-          children: [
-            if (multi)
-              _iconButton(
-                Icons.skip_previous_rounded,
-                () => unawaited(widget.page._prevEpisode()),
-                tooltip: '上一集',
-              ),
-            _iconButton(
-              Icons.replay_10_rounded,
-              () => unawaited(widget.page._seekBy(-10)),
-              tooltip: '快退 10 秒',
-            ),
-            _playButton(),
-            _iconButton(
-              Icons.forward_10_rounded,
-              () => unawaited(widget.page._seekBy(10)),
-              tooltip: '快进 10 秒',
-            ),
-            if (multi)
-              _iconButton(
-                Icons.skip_next_rounded,
-                () => unawaited(widget.page._nextEpisode()),
-                tooltip: '下一集',
-              ),
-            const Spacer(),
-          ],
-        ),
-        const SizedBox(height: 2),
         SizedBox(
-          height: 40,
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: [
-                if (multi) _actionChip(widget.page._buildEpisodeButton()),
-                _actionChip(widget.page._buildSpeedButton()),
-                _actionChip(
-                  widget.page._buildAudioButton(widget.page._realAudioTracks),
-                ),
-                _actionChip(
-                  widget.page._buildSubtitleButton(
-                    widget.page._realSubtitleTracks,
+          height: 54,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (showEpisodeNav)
+                    _iconButton(
+                      Icons.skip_previous_rounded,
+                      () => unawaited(widget.page._prevEpisode()),
+                      tooltip: '上一集',
+                    ),
+                  _iconButton(
+                    Icons.replay_10_rounded,
+                    () => unawaited(widget.page._seekBy(-10)),
+                    tooltip: '快退 10 秒',
                   ),
+                  _playButton(),
+                  _iconButton(
+                    Icons.forward_10_rounded,
+                    () => unawaited(widget.page._seekBy(10)),
+                    tooltip: '快进 10 秒',
+                  ),
+                  if (showEpisodeNav)
+                    _iconButton(
+                      Icons.skip_next_rounded,
+                      () => unawaited(widget.page._nextEpisode()),
+                      tooltip: '下一集',
+                    ),
+                ],
+              ),
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (showQuickOptions) ...[
+                      Builder(
+                        builder: (buttonContext) => _iconButton(
+                          widget.page._danmakuEnabled
+                              ? Icons.chat_bubble_rounded
+                              : Icons.chat_bubble_outline_rounded,
+                          () => unawaited(
+                            widget.page._openDanmakuMenu(buttonContext),
+                          ),
+                          tooltip: '弹幕',
+                        ),
+                      ),
+                      _iconButton(
+                        Icons.subtitles_rounded,
+                        () => unawaited(
+                          widget.page._showSubtitlePicker(
+                            widget.page._realSubtitleTracks,
+                          ),
+                        ),
+                        tooltip: '字幕',
+                      ),
+                      _iconButton(
+                        Icons.audiotrack_rounded,
+                        () => unawaited(widget.page._showTvAudioPicker()),
+                        tooltip: '音轨',
+                      ),
+                    ],
+                    _iconButton(
+                      Icons.more_horiz_rounded,
+                      () => unawaited(_showMoreSheet()),
+                      tooltip: '更多',
+                    ),
+                  ],
                 ),
-                _actionChip(widget.page._buildDanmakuSwitch()),
-                _actionChip(widget.page._buildDanmakuSettingsButton()),
-                _actionChip(widget.page._buildSkipButton()),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ],
     );
+  }
+
+  Widget _sheetTile({
+    required IconData icon,
+    required String title,
+    String? trailing,
+    required VoidCallback onTap,
+  }) {
+    return ListTile(
+      dense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+      leading: Icon(icon, size: 22, color: Colors.white70),
+      title: Text(
+        title,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 14.5,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+      trailing: trailing == null
+          ? const Icon(Icons.chevron_right_rounded, color: Colors.white38)
+          : Text(
+              trailing,
+              style: const TextStyle(color: Colors.white54, fontSize: 13),
+            ),
+      onTap: onTap,
+    );
+  }
+
+  Future<void> _showMoreSheet() async {
+    _hideTimer?.cancel();
+    final multi = widget.page._playlist.length > 1;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      isScrollControlled: true,
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetContext) {
+        void openAfterClose(Future<void> Function() action) {
+          Navigator.of(sheetContext).pop();
+          Future<void>.delayed(const Duration(milliseconds: 120), () {
+            if (mounted) unawaited(action());
+          });
+        }
+
+        return StatefulBuilder(
+          builder: (sheetContext, sheetSetState) => SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 12),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 竖屏底栏放不下快捷按钮，这里补一个直接开关。
+                  if (MediaQuery.sizeOf(sheetContext).width < 560)
+                    _sheetTile(
+                      icon: widget.page._danmakuEnabled
+                          ? Icons.chat_bubble_rounded
+                          : Icons.chat_bubble_outline_rounded,
+                      title: '弹幕',
+                      trailing: widget.page._danmakuEnabled ? '开' : '关',
+                      onTap: () async {
+                        await widget.page._toggleDanmaku();
+                        if (sheetContext.mounted) sheetSetState(() {});
+                      },
+                    ),
+                  if (multi)
+                    _sheetTile(
+                      icon: Icons.video_library_rounded,
+                      title: '选集',
+                      trailing:
+                          '${widget.page._currentIndex + 1}/${widget.page._playlist.length}',
+                      onTap: () => openAfterClose(
+                        () => widget.page._showEpisodePicker(),
+                      ),
+                    ),
+                  ValueListenableBuilder<double>(
+                    valueListenable: widget.page._speed,
+                    builder: (context, speed, _) => _sheetTile(
+                      icon: Icons.speed_rounded,
+                      title: '倍速',
+                      trailing: widget.page._speedLabel(speed),
+                      onTap: () => openAfterClose(
+                        () => widget.page._showTvSpeedPicker(),
+                      ),
+                    ),
+                  ),
+                  _sheetTile(
+                    icon: Icons.audiotrack_rounded,
+                    title: '音轨',
+                    onTap: () =>
+                        openAfterClose(() => widget.page._showTvAudioPicker()),
+                  ),
+                  _sheetTile(
+                    icon: Icons.subtitles_rounded,
+                    title: '字幕',
+                    onTap: () => openAfterClose(
+                      () => widget.page._showSubtitlePicker(
+                        widget.page._realSubtitleTracks,
+                      ),
+                    ),
+                  ),
+                  _sheetTile(
+                    icon: Icons.tune_rounded,
+                    title: '弹幕设置',
+                    onTap: () => openAfterClose(
+                      () => widget.page._showDanmakuSettings(),
+                    ),
+                  ),
+                  _sheetTile(
+                    icon: Icons.content_cut_rounded,
+                    title: '片头片尾',
+                    onTap: () =>
+                        openAfterClose(() => widget.page._showSkipMarkDialog()),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+    if (mounted) _scheduleHide();
   }
 
   @override
@@ -3879,7 +4068,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
                     child: SafeArea(
                       top: false,
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(12, 14, 12, 4),
+                        padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
                         child: _buildBottomBar(),
                       ),
                     ),
