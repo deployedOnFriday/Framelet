@@ -187,6 +187,9 @@ class _PlayerPageState extends State<PlayerPage> {
   /// 自动连播进行中，防止 completed 重复触发。
   bool _advancing = false;
 
+  /// 手机端全屏（横屏 + 隐藏系统栏），退出播放页时要恢复。
+  bool _mobileFullscreen = false;
+
   /// 播放列表。调用方没传或只传了单集时，从媒体库按当前文件反查整组，
   /// 避免从「最近播放」打开第 N 集时上一集/下一集/选集全部消失。
   late final List<ScannedVideo> _playlist;
@@ -439,6 +442,7 @@ class _PlayerPageState extends State<PlayerPage> {
 
   @override
   void dispose() {
+    _restoreMobileFullscreen();
     _recordProgress();
     _danmakuClock.dispose();
     _positionSub?.cancel();
@@ -706,7 +710,40 @@ class _PlayerPageState extends State<PlayerPage> {
     await _videoKey.currentState?.toggleFullscreen();
   }
 
+  /// 手机端全屏：锁定横屏并进入沉浸模式，控制层仍由 Flutter 绘制，
+  /// 不走 media_kit 的全屏路由，避免手机控制条在全屏后消失。
+  Future<void> _toggleMobileFullscreen() async {
+    if (!mounted) return;
+    final landscape =
+        MediaQuery.sizeOf(context).width > MediaQuery.sizeOf(context).height;
+    if (landscape) {
+      _mobileFullscreen = false;
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      // 等系统完成旋转后再恢复传感器旋转，避免立刻又转回横屏。
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+      return;
+    }
+    _mobileFullscreen = true;
+    await SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  void _restoreMobileFullscreen() {
+    if (!_mobileFullscreen) return;
+    _mobileFullscreen = false;
+    unawaited(SystemChrome.setPreferredOrientations(DeviceOrientation.values));
+    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+  }
+
   Future<void> _exitPlayer() async {
+    _restoreMobileFullscreen();
     await _captureThumbnail();
     if (!mounted) return;
     _refocus();
@@ -3668,10 +3705,10 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
         _keepVisible();
         unawaited(widget.page._togglePlay());
       },
-      radius: 32,
+      radius: 26,
       child: Container(
-        width: 54,
-        height: 54,
+        width: 44,
+        height: 44,
         decoration: BoxDecoration(
           color: Colors.white.withValues(alpha: 0.18),
           shape: BoxShape.circle,
@@ -3679,10 +3716,110 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
         child: Icon(
           _playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
           color: Colors.white,
-          size: 34,
+          size: 30,
         ),
       ),
     );
+  }
+
+  Widget _speedButton() {
+    return ValueListenableBuilder<double>(
+      valueListenable: widget.page._speed,
+      builder: (context, speed, _) => Tooltip(
+        message: '倍速',
+        child: InkResponse(
+          onTap: () {
+            _keepVisible();
+            unawaited(_showSpeedSheet());
+          },
+          radius: 24,
+          child: Container(
+            constraints: const BoxConstraints(minWidth: 42, minHeight: 42),
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 5),
+            child: Text(
+              widget.page._speedLabel(speed),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12.5,
+                fontWeight: FontWeight.w600,
+                fontFeatures: [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 手机端倍速面板：TV 的居中大对话框在手机上过大，这里用底部面板。
+  Future<void> _showSpeedSheet() async {
+    _hideTimer?.cancel();
+    final current = widget.page._speed.value;
+    final picked = await showModalBottomSheet<double>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A1A),
+      showDragHandle: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '播放速度',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 14),
+              Wrap(
+                spacing: 9,
+                runSpacing: 9,
+                children: [
+                  for (final rate in _PlayerPageState._speedOptions)
+                    InkWell(
+                      onTap: () => Navigator.of(sheetContext).pop(rate),
+                      borderRadius: BorderRadius.circular(20),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 9,
+                        ),
+                        decoration: BoxDecoration(
+                          color: rate == current
+                              ? Colors.white
+                              : Colors.white.withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          rate == 1.0 ? '正常' : widget.page._speedLabel(rate),
+                          style: TextStyle(
+                            color: rate == current
+                                ? Colors.black
+                                : Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (picked != null) await widget.page._setSpeed(picked);
+    _scheduleHide();
   }
 
   Widget _buildTopBar() {
@@ -3720,11 +3857,14 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
       max,
     );
     final multi = widget.page._playlist.length > 1;
-    final width = MediaQuery.sizeOf(context).width;
-    // 横屏手机宽度通常在 700–900，保留完整导航；更窄时把选集/切集
-    // 收进「更多」，避免底栏挤压或溢出。
-    final showEpisodeNav = multi && width >= 760;
-    final showQuickOptions = width >= 560;
+    final size = MediaQuery.sizeOf(context);
+    final landscape = size.width > size.height;
+    // 主流手机播放器：左侧播放/切集，右侧功能键，中间留白。
+    // 竖屏只保留最常用的倍速、字幕、更多、全屏，横屏再展开弹幕/音轨。
+    final showPrev = multi && landscape;
+    final showNext = multi;
+    final showDanmaku = landscape;
+    final showAudio = landscape && size.width >= 680;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -3784,79 +3924,61 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
           ],
         ),
         SizedBox(
-          height: 54,
-          child: Stack(
-            alignment: Alignment.center,
+          height: 46,
+          child: Row(
             children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (showEpisodeNav)
-                    _iconButton(
-                      Icons.skip_previous_rounded,
-                      () => unawaited(widget.page._prevEpisode()),
-                      tooltip: '上一集',
-                    ),
-                  _iconButton(
-                    Icons.replay_10_rounded,
-                    () => unawaited(widget.page._seekBy(-10)),
-                    tooltip: '快退 10 秒',
-                  ),
-                  _playButton(),
-                  _iconButton(
-                    Icons.forward_10_rounded,
-                    () => unawaited(widget.page._seekBy(10)),
-                    tooltip: '快进 10 秒',
-                  ),
-                  if (showEpisodeNav)
-                    _iconButton(
-                      Icons.skip_next_rounded,
-                      () => unawaited(widget.page._nextEpisode()),
-                      tooltip: '下一集',
-                    ),
-                ],
-              ),
-              Positioned(
-                right: 0,
-                top: 0,
-                bottom: 0,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (showQuickOptions) ...[
-                      Builder(
-                        builder: (buttonContext) => _iconButton(
-                          widget.page._danmakuEnabled
-                              ? Icons.chat_bubble_rounded
-                              : Icons.chat_bubble_outline_rounded,
-                          () => unawaited(
-                            widget.page._openDanmakuMenu(buttonContext),
-                          ),
-                          tooltip: '弹幕',
-                        ),
-                      ),
-                      _iconButton(
-                        Icons.subtitles_rounded,
-                        () => unawaited(
-                          widget.page._showSubtitlePicker(
-                            widget.page._realSubtitleTracks,
-                          ),
-                        ),
-                        tooltip: '字幕',
-                      ),
-                      _iconButton(
-                        Icons.audiotrack_rounded,
-                        () => unawaited(widget.page._showTvAudioPicker()),
-                        tooltip: '音轨',
-                      ),
-                    ],
-                    _iconButton(
-                      Icons.more_horiz_rounded,
-                      () => unawaited(_showMoreSheet()),
-                      tooltip: '更多',
-                    ),
-                  ],
+              _playButton(),
+              if (showPrev)
+                _iconButton(
+                  Icons.skip_previous_rounded,
+                  () => unawaited(widget.page._prevEpisode()),
+                  tooltip: '上一集',
                 ),
+              if (showNext)
+                _iconButton(
+                  Icons.skip_next_rounded,
+                  () => unawaited(widget.page._nextEpisode()),
+                  tooltip: '下一集',
+                ),
+              const Spacer(),
+              if (showDanmaku)
+                Builder(
+                  builder: (buttonContext) => _iconButton(
+                    widget.page._danmakuEnabled
+                        ? Icons.chat_bubble_rounded
+                        : Icons.chat_bubble_outline_rounded,
+                    () =>
+                        unawaited(widget.page._openDanmakuMenu(buttonContext)),
+                    tooltip: '弹幕',
+                  ),
+                ),
+              if (showAudio)
+                _iconButton(
+                  Icons.audiotrack_rounded,
+                  () => unawaited(widget.page._showTvAudioPicker()),
+                  tooltip: '音轨',
+                ),
+              _iconButton(
+                Icons.subtitles_rounded,
+                () => unawaited(
+                  widget.page._showSubtitlePicker(
+                    widget.page._realSubtitleTracks,
+                  ),
+                ),
+                tooltip: '字幕',
+              ),
+              _speedButton(),
+              _iconButton(
+                Icons.more_vert_rounded,
+                () => unawaited(_showMoreSheet()),
+                tooltip: '更多',
+              ),
+              _iconButton(
+                landscape
+                    ? Icons.fullscreen_exit_rounded
+                    : Icons.fullscreen_rounded,
+                () => unawaited(widget.page._toggleMobileFullscreen()),
+                tooltip: landscape ? '退出全屏' : '全屏',
               ),
             ],
           ),
@@ -3919,8 +4041,9 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  // 竖屏底栏放不下快捷按钮，这里补一个直接开关。
-                  if (MediaQuery.sizeOf(sheetContext).width < 560)
+                  // 竖屏底栏不展示弹幕快捷键，这里补一个直接开关。
+                  if (MediaQuery.orientationOf(sheetContext) ==
+                      Orientation.portrait)
                     _sheetTile(
                       icon: widget.page._danmakuEnabled
                           ? Icons.chat_bubble_rounded
@@ -3948,9 +4071,7 @@ class _MobilePlayerControlsState extends State<_MobilePlayerControls> {
                       icon: Icons.speed_rounded,
                       title: '倍速',
                       trailing: widget.page._speedLabel(speed),
-                      onTap: () => openAfterClose(
-                        () => widget.page._showTvSpeedPicker(),
-                      ),
+                      onTap: () => openAfterClose(_showSpeedSheet),
                     ),
                   ),
                   _sheetTile(
