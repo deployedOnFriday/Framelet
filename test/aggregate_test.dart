@@ -552,4 +552,66 @@ void main() {
       );
     });
   });
+
+  group('刮削任务按聚合条目拆分', () {
+    test('同目录多版本电影是一个任务（不再按集数拆）', () {
+      const folder = '/电影/哆啦A梦：大雄的绘画奇遇记';
+      final files = [
+        video(
+          '$folder/Doraemon.Nobitas.Art.World.Tales.2025.1080p.BluRay.mkv',
+          'Doraemon.Nobitas.Art.World.Tales.2025.1080p.BluRay',
+        ),
+        video(
+          '$folder/Doraemon.Nobitas.Art.World.Tales.2025.2160p.WEB-DL.mkv',
+          'Doraemon.Nobitas.Art.World.Tales.2025.2160p.WEB-DL',
+        ),
+        video(
+          '$folder/Doraemon.Nobitas.Art.World.Tales.2025.4K.HDR.mkv',
+          'Doraemon.Nobitas.Art.World.Tales.2025.4K.HDR',
+        ),
+      ];
+      final groups = MediaLibrary.scrapeGroupsOfFolderForTest(folder, files);
+      expect(groups, hasLength(1));
+      expect(groups.single, hasLength(3));
+    });
+
+    test('同一目录里的多部不同电影拆成多个任务', () {
+      const folder = '/dav/MyMovies';
+      final files = [
+        video(
+          '$folder/Wandering.Earth.2019.1080p.mkv',
+          'Wandering.Earth.2019.1080p',
+        ),
+        video('$folder/Interstellar.2014.2160p.mkv', 'Interstellar.2014.2160p'),
+      ];
+      final groups = MediaLibrary.scrapeGroupsOfFolderForTest(folder, files);
+      expect(groups, hasLength(2));
+      expect(groups.every((group) => group.length == 1), isTrue);
+    });
+
+    test('剧集目录仍然整组一个任务', () {
+      const folder = '/电视剧/三体/Season 1';
+      final files = [
+        for (var i = 1; i <= 5; i++)
+          video(
+            '$folder/Three.Body.S01E0$i.mkv',
+            'Three.Body.S01E0$i',
+            kind: MediaKind.series,
+          ),
+      ];
+      final groups = MediaLibrary.scrapeGroupsOfFolderForTest(folder, files);
+      expect(groups, hasLength(1));
+      expect(groups.single, hasLength(5));
+    });
+
+    test('通用容器目录下每个文件各自成为任务', () {
+      const folder = '/夸克网盘/电影';
+      final files = [
+        video('$folder/Wandering.Earth.2019.mkv', 'Wandering.Earth.2019'),
+        video('$folder/Interstellar.2014.mkv', 'Interstellar.2014'),
+      ];
+      final groups = MediaLibrary.scrapeGroupsOfFolderForTest(folder, files);
+      expect(groups, hasLength(2));
+    });
+  });
 }

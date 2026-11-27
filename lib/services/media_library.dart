@@ -1506,6 +1506,8 @@ class MediaLibrary extends ChangeNotifier {
     if (scraping) return;
     // 注入刮削日志回调：图片下载等失败必须显性化，否则无从排查
     ScraperService.onLog = _scrapeLog;
+    // 后台预热直连 IP 与取图线路，避免第一张图卡在测速上
+    unawaited(ScraperService.warmUp());
     scraping = true;
     scrapeDone = 0;
     scrapeMatched = 0;
@@ -1540,7 +1542,10 @@ class MediaLibrary extends ChangeNotifier {
       _scrapeLog('共 $scrapeTotal 个任务开始');
       final networkFailedJobs =
           <({ScannedVideo representative, List<ScannedVideo> group})>[];
-      for (final job in jobs) {
+      // 任务并发：每个任务的大部分时间在等网络（搜索/详情/图片），
+      // 串行时 API 间隔和图片往返会互相空等；3 路并发既能把空等叠起来，
+      // 又不会把 TMDB 打到限流（API 仍有全局间隔）。
+      await _forEachLimited(jobs, _scrapeJobConcurrency, (job) async {
         final complete = _scrapeJobComplete(job);
         if (!force && complete) {
           final episodes = job.group.length;
@@ -1552,7 +1557,7 @@ class MediaLibrary extends ChangeNotifier {
           // 只在缺名时触发，补齐后不再产生请求。
           await _backfillTmdbTitle(job);
           // 不逐条 notify：几百个已刮条目会在一帧内触发几百次全界面重建
-          continue;
+          return;
         }
 
         final matched = await _processScrapeJob(job);
@@ -1561,7 +1566,7 @@ class MediaLibrary extends ChangeNotifier {
           // 真正「搜不到结果」的留给手动匹配。
           networkFailedJobs.add(job);
         }
-      }
+      });
 
       // 网络原因失败的任务：等离线冷却结束自动重试一轮（仅一轮，
       // 避免死循环）。
@@ -1578,11 +1583,13 @@ class MediaLibrary extends ChangeNotifier {
         if (!ScraperService.tmdbCoolingDown) {
           scrapeProgress = '线路恢复，自动重试 ${networkFailedJobs.length} 个任务…';
           notifyListeners();
-          for (final job in networkFailedJobs) {
+          await _forEachLimited(networkFailedJobs, _scrapeJobConcurrency, (
+            job,
+          ) async {
             // 首轮已计入进度，重试前先扣回，避免重复计数
             scrapeDone -= job.group.length;
             await _processScrapeJob(job);
-          }
+          });
         }
       }
 
@@ -1663,6 +1670,7 @@ class MediaLibrary extends ChangeNotifier {
   Future<void> backfillMissingMedia() async {
     if (scraping) return;
     ScraperService.onLog = _scrapeLog;
+    unawaited(ScraperService.warmUp());
     scraping = true;
     scrapeDone = 0;
     scrapeMatched = 0;
@@ -1679,7 +1687,8 @@ class MediaLibrary extends ChangeNotifier {
             );
             return target.posterPath != null && target.tmdbId != null;
           })
-          .where((job) => job.group.length > 1)
+          // 只给剧集补剧照：多版本电影的任务组也可能有多个文件
+          .where((job) => job.representative.kind != MediaKind.movie)
           .toList();
       scrapeTotal = jobs.fold(0, (sum, job) => sum + job.group.length);
       if (scrapeTotal == 0) {
@@ -1697,19 +1706,20 @@ class MediaLibrary extends ChangeNotifier {
           seasonNumber: seasonNumber,
         );
         var downloaded = 0;
-        for (final entry in episodes.entries) {
-          final stillUrl = entry.value.stillUrl;
-          if (stillUrl == null) continue;
+        final stillEntries = episodes.entries
+            .where((entry) => entry.value.stillUrl != null)
+            .toList();
+        await _forEachLimited(stillEntries, 4, (entry) async {
           final target = job.group
               .where((video) => episodeNumberOfVideo(video) == entry.key)
               .where((video) => video.stillPath == null)
               .toList();
-          if (target.isEmpty) continue;
+          if (target.isEmpty) return;
           final path = await ScraperService.downloadPoster(
-            stillUrl,
+            entry.value.stillUrl!,
             cacheKey: 'still_${tvId}_s${seasonNumber}e${entry.key}',
           );
-          if (path == null) continue;
+          if (path == null) return;
           for (final member in target) {
             _updateVideo(
               member.sourceId,
@@ -1721,7 +1731,7 @@ class MediaLibrary extends ChangeNotifier {
             );
           }
           downloaded++;
-        }
+        });
         if (downloaded > 0) await _persistVideos(job.representative.sourceId);
         scrapeDone += job.group.length;
         scrapeProgress =
@@ -1811,15 +1821,18 @@ class MediaLibrary extends ChangeNotifier {
     ({ScannedVideo representative, List<ScannedVideo> group}) job,
   ) async {
     scrapeProgress = '正在匹配「${job.representative.title}」…';
+    final unit = job.representative.kind == MediaKind.movie ? ' 个文件' : ' 集';
     _scrapeLog(
-      '任务 $scrapeDone+: ${job.representative.title}（${job.group.length} 集）',
+      '任务 $scrapeDone+: ${job.representative.title}（${job.group.length}$unit）',
     );
     notifyListeners();
 
     final parsed = ScraperService.parseTitle(job.representative.title);
-    final preferTv =
-        job.group.length > 1 || job.representative.kind != MediaKind.movie;
-    final isSeriesJob = job.group.length > 1;
+    // 按聚合条目的类型判断，而不是「任务组里有几个文件」：多版本电影
+    // （同目录 1080p/4K 各一份）会被聚成一个 movie 条目、组内却有多个
+    // 文件，旧判据会把它当剧集去搜，必然匹配不上。
+    final isSeriesJob = job.representative.kind != MediaKind.movie;
+    final preferTv = isSeriesJob;
     final seasonNumber = seasonOf(job.representative);
     // 目录名/文件名才是可信的原始线索；representative.title 可能已经是
     // 上一次错误匹配落库的 tmdbTitle，不能拿它做「是否匹配」的唯一依据。
@@ -1981,25 +1994,39 @@ class MediaLibrary extends ChangeNotifier {
       }
     }
 
-    final episodeStillPaths = <int, String>{};
     if (result != null) {
       final scraped = result;
-      // 先落海报与详情，让条目立即可见（isScraped 依赖 posterPath
-      // 或 tmdbId）。老流程把全部集剧照下载完才写库，中途关应用/
-      // 断网会让整条进度全丢（龙门镖局事故）。
-      String? posterPath;
-      if (scraped.posterUrl != null) {
-        final identity = scraped.tmdbId != null
-            ? 'tmdb_${scraped.tmdbId}'
-            : 'name_${scraped.name}_${scraped.year ?? ''}';
-        posterPath = await ScraperService.downloadPoster(
-          scraped.posterUrl!,
-          cacheKey:
-              '${job.representative.kind.name}_'
-              '${scraped.mediaType ?? 'item'}_$identity',
+      final identity = scraped.tmdbId != null
+          ? 'tmdb_${scraped.tmdbId}'
+          : 'name_${scraped.name}_${scraped.year ?? ''}';
+      // 海报 / 背景 / 剧照并发下载：全是图片 CDN 请求，串行时每张都要
+      // 等一个完整往返，一季 20 集能差出十几秒。并发上限 4，避免瞬间
+      // 打出几十个连接。
+      final posterTask = scraped.posterUrl == null
+          ? Future<String?>.value()
+          : ScraperService.downloadPoster(
+              scraped.posterUrl!,
+              cacheKey:
+                  '${job.representative.kind.name}_'
+                  '${scraped.mediaType ?? 'item'}_$identity',
+            );
+      final backdropTask = _downloadBackdrop(scraped);
+      final stillEntries = episodeInfos.entries
+          .where((entry) => entry.value.stillUrl != null)
+          .toList();
+      final stillPaths = <int, String>{};
+      final stillTask = _forEachLimited(stillEntries, 4, (entry) async {
+        final path = await ScraperService.downloadPoster(
+          entry.value.stillUrl!,
+          cacheKey: 'still_${scraped.tmdbId}_s${seasonNumber}e${entry.key}',
         );
-      }
-      final scrapedBackdrop = await _downloadBackdrop(scraped);
+        if (path != null) stillPaths[entry.key] = path;
+      });
+
+      // 先落海报与详情，让条目立即可见（isScraped 依赖 posterPath
+      // 或 tmdbId）。剧照下载在后台继续，最后统一落库。
+      final posterPath = await posterTask;
+      final scrapedBackdrop = await backdropTask;
       if (posterPath != null ||
           scraped.summary != null ||
           scraped.rating != null ||
@@ -2034,28 +2061,25 @@ class MediaLibrary extends ChangeNotifier {
         }
         await _persistVideos(job.representative.sourceId);
       }
-    }
 
-    // 剧照逐张下载、逐张落库（断点续传）：中断后重刮时
-    // downloadPoster 的本地缓存会命中已下载的，只补缺失的。
-    for (final entry in episodeInfos.entries) {
-      final stillUrl = entry.value.stillUrl;
-      if (stillUrl == null) continue;
-      final path = await ScraperService.downloadPoster(
-        stillUrl,
-        cacheKey: 'still_${result?.tmdbId}_s${seasonNumber}e${entry.key}',
-      );
-      if (path == null) continue;
-      episodeStillPaths[entry.key] = path;
-      for (final member in job.group) {
-        if (episodeNumberOfVideo(member) != entry.key) continue;
-        _updateVideo(
-          member.sourceId,
-          member.path,
-          (video) => video.copyWith(stillPath: path),
-        );
+      // 剧照落库。图片已缓存到本地：中断后重刮时 downloadPoster 会命中
+      // 已下载的文件，只补缺失的，所以这里统一落一次库即可。
+      await stillTask;
+      var stillsChanged = false;
+      for (final entry in stillPaths.entries) {
+        for (final member in job.group) {
+          if (episodeNumberOfVideo(member) != entry.key) continue;
+          _updateVideo(
+            member.sourceId,
+            member.path,
+            (video) => video.copyWith(stillPath: entry.value),
+          );
+          stillsChanged = true;
+        }
       }
-      await _persistVideos(job.representative.sourceId);
+      if (stillsChanged) {
+        await _persistVideos(job.representative.sourceId);
+      }
     }
 
     if (result == null) {
@@ -2072,6 +2096,30 @@ class MediaLibrary extends ChangeNotifier {
     return matched;
   }
 
+  /// 同时进行的刮削任务数。
+  static const _scrapeJobConcurrency = 3;
+
+  /// 有界并发执行：同一时刻最多 [limit] 个任务在跑，其余排队。
+  /// 用于图片下载与刮削任务——网络请求彼此独立，串行只会白等往返。
+  static Future<void> _forEachLimited<T>(
+    List<T> items,
+    int limit,
+    Future<void> Function(T item) action,
+  ) async {
+    if (items.isEmpty) return;
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        final index = next++;
+        if (index >= items.length) return;
+        await action(items[index]);
+      }
+    }
+
+    final count = limit < items.length ? limit : items.length;
+    await Future.wait([for (var i = 0; i < count; i++) worker()]);
+  }
+
   /// 刮削任务列表：与展示聚合同规则分组，组内文件一起刮削。
   ///
   /// representative 必须用聚合条目——它的 title 是从目录名推导出的剧名
@@ -2086,9 +2134,6 @@ class MediaLibrary extends ChangeNotifier {
       if (!sourceEnabled(entry.key)) continue;
       final videos = entry.value;
       final aggregated = aggregate(videos);
-      final byPath = <String, ScannedVideo>{
-        for (final item in aggregated) item.path: item,
-      };
       final grouped = <String, List<ScannedVideo>>{};
       for (final video in videos) {
         // 统一按父目录分组，与展示聚合同规则；
@@ -2100,15 +2145,63 @@ class MediaLibrary extends ChangeNotifier {
         final group = entry.value;
         // 花絮目录 / 纯花絮组不刮削，也不占海报墙条目。
         if (_isExtraGroup(entry.key, group)) continue;
-        // 聚合条目的 path 等于组内第一个文件的 path，据此找回聚合标题。
-        final representative = byPath[group.first.path] ?? group.first;
-        // 已隐藏的影片不参与刮削
-        if (_isHidden(representative)) continue;
-        jobs.add((representative: representative, group: group));
+        // 同一目录可能装多部不同的电影（分类容器）：聚合层按「片名+年份」
+        // 把它们拆成多个条目，刮削任务也必须一一对应，否则一部片的结果
+        // 会套到同目录其他片上，多版本电影还会被当成剧集去搜。
+        final folderItems = aggregated
+            .where((item) => parentPathOf(item.path) == entry.key)
+            .toList();
+        for (final jobGroup in _scrapeGroupsOfFolder(entry.key, group)) {
+          final paths = {for (final video in jobGroup) video.path};
+          // 聚合条目的 path 必落在其所属任务组内，据此找回聚合标题。
+          final representative = folderItems.firstWhere(
+            (item) => paths.contains(item.path),
+            orElse: () => jobGroup.first,
+          );
+          // 已隐藏的影片不参与刮削
+          if (_isHidden(representative)) continue;
+          jobs.add((representative: representative, group: jobGroup));
+        }
       }
     }
     return jobs;
   }
+
+  /// 把一个目录内的文件按聚合条目拆分成刮削任务：
+  /// - 剧集目录：整组一个任务（跨季按目录天然分开）；
+  /// - 电影容器（里面是多部不同的片）：按「片名+年份」聚类，每部一个任务；
+  /// - 无有效目录名（文件直接放在电影/网盘根目录）：每个文件一个任务。
+  ///
+  /// 与 [aggregate] 的拆分规则保持一致，任务与海报墙条目才能一一对应。
+  static List<List<ScannedVideo>> _scrapeGroupsOfFolder(
+    String parentPath,
+    List<ScannedVideo> group,
+  ) {
+    if (_isSeriesGroup(group)) return [group];
+    final rawTitle = _seriesTitle(parentPath, group);
+    final folderTitle = rawTitle == null ? null : _cleanFolderTitle(rawTitle);
+    if (folderTitle == null || folderTitle.isEmpty) {
+      return [
+        for (final video in group) [video],
+      ];
+    }
+    // 与 aggregate 相同：先按路径自然序排列，聚类首文件才会与聚合条目
+    // 的 path 一致（代表条目靠 path 找回）。
+    final sorted = List<ScannedVideo>.of(group)
+      ..sort((a, b) => _naturalCompare(a.path, b.path));
+    final clusters = _clusterMovieFiles(sorted);
+    final mains = clusters
+        .where((cluster) => !WebDavService.isExtraFile(cluster.first.title))
+        .toList();
+    return mains.isNotEmpty ? mains : clusters;
+  }
+
+  /// 测试入口：目录内的文件如何拆成刮削任务组。
+  @visibleForTesting
+  static List<List<ScannedVideo>> scrapeGroupsOfFolderForTest(
+    String parentPath,
+    List<ScannedVideo> group,
+  ) => _scrapeGroupsOfFolder(parentPath, group);
 
   /// 把任意条目解析为它所属的聚合条目（剧名/集数/海报都在聚合层）。
   ///
@@ -2192,6 +2285,14 @@ class MediaLibrary extends ChangeNotifier {
     double? runtimeSec;
     Map<int, String> episodeStillPaths = const {};
     Map<int, String> episodeTitles = const {};
+    // 海报不依赖详情接口，先放后台下载，与详情/剧照并发
+    final posterTask = candidate.posterUrl == null
+        ? Future<String?>.value()
+        : ScraperService.downloadPoster(
+            candidate.posterUrl!,
+            cacheKey: 'manual_${candidate.mediaType}_$identity',
+          );
+    Future<String?>? backdropTask;
     if (candidate.tmdbId != null) {
       final details = await ScraperService.fetchTmdbDetails(
         mediaType: candidate.mediaType,
@@ -2199,7 +2300,7 @@ class MediaLibrary extends ChangeNotifier {
       );
       if (details != null) {
         if (details.backdropUrl != null) {
-          backdrop = await ScraperService.downloadPoster(
+          backdropTask = ScraperService.downloadPoster(
             details.backdropUrl!,
             cacheKey: 'manual_backdrop_${candidate.mediaType}_$identity',
           );
@@ -2219,18 +2320,21 @@ class MediaLibrary extends ChangeNotifier {
         );
         episodeStillPaths = <int, String>{};
         episodeTitles = <int, String>{};
+        final stillEntries = stillUrls.entries
+            .where((entry) => entry.value.stillUrl != null)
+            .toList();
         for (final entry in stillUrls.entries) {
           if (entry.value.title != null) {
             episodeTitles[entry.key] = entry.value.title!;
           }
-          final stillUrl = entry.value.stillUrl;
-          if (stillUrl == null) continue;
+        }
+        await _forEachLimited(stillEntries, 4, (entry) async {
           final path = await ScraperService.downloadPoster(
-            stillUrl,
+            entry.value.stillUrl!,
             cacheKey: 'still_${candidate.tmdbId}_s${seasonNumber}e${entry.key}',
           );
           if (path != null) episodeStillPaths[entry.key] = path;
-        }
+        });
         final seasonDetails = await ScraperService.fetchSeasonDetails(
           tvId: candidate.tmdbId!,
           seasonNumber: seasonNumber,
@@ -2252,12 +2356,8 @@ class MediaLibrary extends ChangeNotifier {
         runtimeSec = details.runtimeSec;
       }
     }
-    if (candidate.posterUrl != null) {
-      poster = await ScraperService.downloadPoster(
-        candidate.posterUrl!,
-        cacheKey: 'manual_${candidate.mediaType}_$identity',
-      );
-    }
+    poster = await posterTask;
+    if (backdropTask != null) backdrop = await backdropTask;
 
     // 同一目录里已被匹配到同一个（旧）TMDB 条目的文件是同一部片的
     // 多版本/重复扫描产物：修正匹配时要一起改，否则海报墙按 tmdbId

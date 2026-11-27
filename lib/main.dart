@@ -60,13 +60,25 @@ void main() async {
       _dumpLibrary();
     });
   }
-  // 诊断：FRAMELET_SCRAPE=1 时启动后自动刮削并导出结果（脚本化补刮）
-  if (Platform.environment['FRAMELET_SCRAPE'] == '1') {
+  // 诊断：FRAMELET_SCRAPE=1 时启动后自动刮削并导出结果（脚本化补刮）；
+  // FRAMELET_SCRAPE=force 强制重刮整库（验证性能用）
+  final scrapeMode = Platform.environment['FRAMELET_SCRAPE'];
+  if (scrapeMode == '1' || scrapeMode == 'force') {
     Future(() async {
       await Future<void>.delayed(const Duration(seconds: 4));
       debugPrint('[Scrape] 自动刮削开始');
-      await MediaLibrary.instance.scrapeAll();
+      await MediaLibrary.instance.scrapeAll(force: scrapeMode == 'force');
       debugPrint('[Scrape] 自动刮削结束: ${MediaLibrary.instance.scrapeProgress}');
+      _dumpLibrary();
+    });
+  }
+  // 诊断：FRAMELET_BACKFILL=1 时启动后补齐缺失剧照
+  if (Platform.environment['FRAMELET_BACKFILL'] == '1') {
+    Future(() async {
+      await Future<void>.delayed(const Duration(seconds: 4));
+      debugPrint('[Backfill] 补齐剧照开始');
+      await MediaLibrary.instance.backfillMissingMedia();
+      debugPrint('[Backfill] 补齐剧照结束: ${MediaLibrary.instance.scrapeProgress}');
       _dumpLibrary();
     });
   }

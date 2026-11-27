@@ -93,12 +93,164 @@ class ScrapeDiagnostics {
 }
 
 class _SniAttempt {
-  const _SniAttempt({required this.ip, this.status, this.bytes, this.error});
+  const _SniAttempt({
+    required this.ip,
+    this.status,
+    this.bytes,
+    this.error,
+    this.conn,
+  });
 
   final String ip;
   final int? status;
   final List<int>? bytes;
   final String? error;
+
+  /// 响应读完后仍可复用的长连接；失败或不可复用时为 null。
+  final _KeepAliveConn? conn;
+}
+
+/// 一条可复用的 HTTP/1.1 长连接（SNI 直连通道）。
+///
+/// 原实现每个请求都新建 TCP + TLS 连接（国内直连实测握手 300~400ms），
+/// 是 API 延迟的大头。这里把连接按 host 缓存起来，连续请求复用同一条
+/// 连接；任何异常都直接判废并回落到新建连接，不做修复尝试。
+class _KeepAliveConn {
+  _KeepAliveConn({
+    required this.host,
+    required this.ip,
+    required this.socket,
+    required this.iterator,
+    required this.userAgent,
+  });
+
+  final String host;
+  final String ip;
+  final String userAgent;
+  final Socket socket;
+  final StreamIterator<List<int>> iterator;
+  final List<int> _buffer = [];
+  DateTime lastUsed = DateTime.now();
+  bool broken = false;
+
+  Future<void> close() async {
+    broken = true;
+    try {
+      await iterator.cancel();
+    } catch (_) {}
+    try {
+      await socket.close();
+    } catch (_) {}
+  }
+
+  void send(String pathAndQuery, {required bool image}) {
+    socket.write(
+      'GET $pathAndQuery HTTP/1.1\r\n'
+      'Host: $host\r\n'
+      'User-Agent: $userAgent\r\n'
+      'Accept: ${image ? 'image/avif,image/webp,image/*,*/*;q=0.8' : 'application/json,*/*'}\r\n'
+      'Accept-Encoding: identity\r\n'
+      'Connection: keep-alive\r\n\r\n',
+    );
+  }
+
+  /// 读取一个完整响应；连接不可用时返回 null。
+  Future<({int status, List<int> body})?> readResponse({
+    required int maxBytes,
+    required Duration timeout,
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (true) {
+      final headerEnd = ScraperService._findHeaderEnd(_buffer);
+      if (headerEnd >= 0) {
+        final headers = latin1
+            .decode(_buffer.sublist(0, headerEnd))
+            .toLowerCase();
+        final match = RegExp(r'http/1\.[01]\s+(\d{3})').firstMatch(headers);
+        if (match == null) {
+          broken = true;
+          return null;
+        }
+        final status = int.tryParse(match.group(1)!) ?? 0;
+        final closeAfter = headers.contains('connection: close');
+        final chunked = headers.contains('transfer-encoding: chunked');
+        final lengthMatch = RegExp(r'content-length:\s*(\d+)')
+            .firstMatch(headers);
+        final bodyStart = headerEnd + 4;
+
+        if (lengthMatch != null) {
+          final length = int.tryParse(lengthMatch.group(1)!);
+          if (length == null || length > maxBytes) {
+            broken = true;
+            return null;
+          }
+          final need = bodyStart + length;
+          while (_buffer.length < need) {
+            if (!await _readMore(deadline)) {
+              broken = true;
+              return null;
+            }
+          }
+          final body = _buffer.sublist(bodyStart, need);
+          _buffer.removeRange(0, need);
+          if (closeAfter) broken = true;
+          lastUsed = DateTime.now();
+          return (status: status, body: body);
+        }
+
+        if (chunked) {
+          while (true) {
+            final decoded = ScraperService._tryDecodeChunked(
+              _buffer,
+              bodyStart,
+            );
+            if (decoded != null) {
+              if (decoded.body.length > maxBytes) {
+                broken = true;
+                return null;
+              }
+              _buffer.removeRange(0, decoded.consumed);
+              if (closeAfter) broken = true;
+              lastUsed = DateTime.now();
+              return (status: status, body: decoded.body);
+            }
+            if (!await _readMore(deadline) ||
+                _buffer.length > maxBytes + (1 << 16)) {
+              broken = true;
+              return null;
+            }
+          }
+        }
+
+        // 无长度信息：只能读到连接关闭，此连接不可再用
+        while (await _readMore(deadline)) {
+          if (_buffer.length > maxBytes + (1 << 16)) break;
+        }
+        broken = true;
+        final body = _buffer.sublist(bodyStart);
+        lastUsed = DateTime.now();
+        return (status: status, body: body);
+      }
+
+      if (!await _readMore(deadline) || _buffer.length > maxBytes + (1 << 16)) {
+        broken = true;
+        return null;
+      }
+    }
+  }
+
+  Future<bool> _readMore(DateTime deadline) async {
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) return false;
+    try {
+      final hasNext = await iterator.moveNext().timeout(remaining);
+      if (!hasNext) return false;
+      _buffer.addAll(iterator.current);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 }
 
 /// 海报与元数据刮削：
@@ -110,9 +262,10 @@ class ScraperService {
 
   static const _userAgent = 'Framelet/0.1 (media library scraper)';
 
-  /// 全局请求间隔（所有刮削请求共用）。默认约 3.8 请求/秒，
-  /// 触发 429 时自动指数退避，恢复后逐步回到基准值。
-  static const _minRequestGap = Duration(milliseconds: 260);
+  /// API 请求间隔（TMDB/TVmaze 共用）。约 7.7 请求/秒，仍远低于
+  /// TMDB 的 50 次/秒上限；刮削任务已允许少量并发，这个值决定 API
+  /// 吞吐上限。触发 429 时自动指数退避，恢复后逐步回到基准值。
+  static const _minRequestGap = Duration(milliseconds: 130);
   static const _maxRequestGap = Duration(seconds: 3);
   static const _maxRateLimitWait = Duration(seconds: 60);
   static Duration _requestGap = _minRequestGap;
@@ -222,6 +375,50 @@ class ScraperService {
   static final Map<String, String> _preferredIp = {};
   static final Map<String, DateTime> _ipCooldown = {};
   static final Map<String, ({List<String> ips, DateTime at})> _dnsCache = {};
+
+  /// SNI 长连接池（按 host）。空闲超过 45 秒或出现异常即废弃；
+  /// 每个 host 最多保留 4 条，够 3 路并发刮削轮转。
+  static const _sniPoolIdleTtl = Duration(seconds: 45);
+  static const _sniPoolMaxPerHost = 4;
+  static final Map<String, List<_KeepAliveConn>> _sniPool = {};
+
+  static _KeepAliveConn? _takePooledSni(String host) {
+    final list = _sniPool[host];
+    if (list == null) return null;
+    while (list.isNotEmpty) {
+      final conn = list.removeLast();
+      if (conn.broken ||
+          DateTime.now().difference(conn.lastUsed) > _sniPoolIdleTtl) {
+        conn.close();
+        continue;
+      }
+      return conn;
+    }
+    _sniPool.remove(host);
+    return null;
+  }
+
+  static void _releasePooledSni(_KeepAliveConn conn) {
+    if (conn.broken) {
+      conn.close();
+      return;
+    }
+    final list = _sniPool.putIfAbsent(conn.host, () => []);
+    if (list.length >= _sniPoolMaxPerHost) {
+      list.removeAt(0).close();
+    }
+    list.add(conn);
+  }
+
+  static void _closeSniPool() {
+    for (final list in _sniPool.values) {
+      for (final conn in list) {
+        conn.close();
+      }
+    }
+    _sniPool.clear();
+  }
+
   static DateTime _ipListRefreshedAt = DateTime.fromMillisecondsSinceEpoch(0);
   static DateTime _ipRefreshAttemptedAt = DateTime.fromMillisecondsSinceEpoch(
     0,
@@ -234,6 +431,18 @@ class ScraperService {
   static String _lastChannel = '';
   static DateTime? _tmdbOfflineUntil;
   static DateTime? _tvmazeOfflineUntil;
+
+  /// TMDB GET 结果短时缓存。同一 URL（搜索/详情/季数据）在短时间内只发
+  /// 一次请求：剧集任务原本对季接口连发两次（剧照 + 季详情），线路慢时
+  /// 白白多等一个往返；网络失败重试与多季条目也复用同一份结果。
+  static const _getCacheTtl = Duration(minutes: 10);
+  static const _getCacheMax = 300;
+  static final Map<String, ({String body, DateTime at})> _getCache = {};
+
+  /// 已确认不存在的图片 URL（404/410）。TMDB 很多剧集没有单集剧照，
+  /// 一张缺失的图逐条走完 8 条取图线路要 17~23 秒，整季会卡上几分钟。
+  static final Set<String> _missingImages = {};
+  static const _missingImagesMax = 4000;
 
   /// 最近一次刮削网络失败原因；UI 用它区分「真没搜到」与「网络不通」。
   static String? lastSearchError;
@@ -252,18 +461,42 @@ class ScraperService {
     _tvmazeOfflineUntil = null;
     _preferredIp.clear();
     _ipCooldown.clear();
+    _getCache.clear();
+    _missingImages.clear();
+    _closeSniPool();
+    _closeSharedClient();
     lastSearchError = null;
   }
 
+  /// 复用一个 HttpClient：Dart 的 HttpClient 自带连接池与 keep-alive，
+  /// 每个请求新建再强制关闭会让每次请求都重新握手。代理配置变化时重建。
+  static HttpClient? _sharedClient;
+  static String _sharedClientProxyKey = '';
+
   static HttpClient _httpClient({String? proxy}) {
+    final effective = ProxyResolver.normalize(proxy ?? proxyAddress ?? '');
+    final existing = _sharedClient;
+    if (existing != null && _sharedClientProxyKey == effective) {
+      return existing;
+    }
+    existing?.close(force: true);
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 8)
-      ..userAgent = _userAgent;
-    final effective = ProxyResolver.normalize(proxy ?? proxyAddress ?? '');
+      ..userAgent = _userAgent
+      ..idleTimeout = const Duration(seconds: 20)
+      ..maxConnectionsPerHost = 6;
     if (effective.isNotEmpty) {
       client.findProxy = (_) => 'PROXY $effective';
     }
+    _sharedClient = client;
+    _sharedClientProxyKey = effective;
     return client;
+  }
+
+  static void _closeSharedClient() {
+    _sharedClient?.close(force: true);
+    _sharedClient = null;
+    _sharedClientProxyKey = '';
   }
 
   /// 用户显式配置的代理优先；未配置时尝试系统/环境代理（Clash、v2ray
@@ -342,7 +575,7 @@ class ScraperService {
     } catch (_) {
       return null;
     } finally {
-      client.close(force: true);
+      // 共享 HttpClient 自带连接池，不逐请求关闭
     }
   }
 
@@ -426,12 +659,57 @@ class ScraperService {
       isRateLimited ||
       (_tmdbOfflineUntil != null && _tmdbOfflineUntil!.isAfter(DateTime.now()));
 
+  /// 同一 URL 的并发请求只发一次（in-flight 合并）：多个刮削任务同时
+  /// 搜同一部剧/拉同一季数据时不重复走网络。
+  static final Map<String, Future<String?>> _inflightGets = {};
+
+  /// 带短时缓存的 TMDB GET：命中缓存直接返回，成功响应才写入缓存
+  /// （失败不缓存，避免一次瞬时故障卡住后续重试）。
+  static Future<String?> _tmdbGet(String pathAndQuery) {
+    final cached = _getCache[pathAndQuery];
+    if (cached != null) {
+      if (DateTime.now().difference(cached.at) <= _getCacheTtl) {
+        return Future<String?>.value(cached.body);
+      }
+      _getCache.remove(pathAndQuery);
+    }
+    final existing = _inflightGets[pathAndQuery];
+    if (existing != null) return existing;
+
+    final task = _tmdbGetAndCache(pathAndQuery);
+    _inflightGets[pathAndQuery] = task;
+    Future<void>(() async {
+      try {
+        await task;
+      } catch (_) {}
+      if (identical(_inflightGets[pathAndQuery], task)) {
+        _inflightGets.remove(pathAndQuery);
+      }
+    });
+    return task;
+  }
+
+  static Future<String?> _tmdbGetAndCache(String pathAndQuery) async {
+    final body = await _tmdbGetNetwork(pathAndQuery);
+    if (body != null) {
+      if (_getCache.length >= _getCacheMax) {
+        final oldest = _getCache.entries.toList()
+          ..sort((a, b) => a.value.at.compareTo(b.value.at));
+        for (final entry in oldest.take(_getCacheMax ~/ 3)) {
+          _getCache.remove(entry.key);
+        }
+      }
+      _getCache[pathAndQuery] = (body: body, at: DateTime.now());
+    }
+    return body;
+  }
+
   /// 通过「国内可用 IP + 域名 SNI」直连 TMDB API。
   ///
   /// TMDB 在国内被 DNS 污染，直接解析域名常会超时；这里用 SecureSocket
   /// 手工完成 TLS（host 参数保证 SNI 与证书校验仍按域名），再由 IP
   /// 建立 TCP 连接，从而绕过污染。
-  static Future<String?> _tmdbGet(String pathAndQuery) async {
+  static Future<String?> _tmdbGetNetwork(String pathAndQuery) async {
     if (isRateLimited) {
       lastSearchError = 'TMDB 限流冷却中，本轮稍后自动重试';
       return null;
@@ -446,47 +724,57 @@ class ScraperService {
         (proxyAddress ?? '').trim().isEmpty && proxy != null;
     final uri = Uri.parse('https://$_apiHost$pathAndQuery');
     _lastNetworkDetail = null;
-    _lastHttpStatus = 0;
     // 各线路是否收到过 HTTP 状态码。收到了（哪怕 404/5xx）说明线路可达，
     // 属内容/节点层问题；只有全程无响应才算真不可达、才值得全局冷却。
     var sawHttpStatus = false;
-    void noteHttpStatus() {
-      if (_lastHttpStatus != 0) sawHttpStatus = true;
+    // 状态码按本次请求就地记录：并发刮削时多个请求会同时走线路链，
+    // 共享一个静态变量会互相覆盖，导致误判「API Key 无效」。
+    var status = 0;
+
+    void noteStatus(int value, {Duration? retryAfter}) {
+      status = value;
+      _lastHttpStatus = value; // 仅供错误提示展示
+      if (value == 0) return;
+      sawHttpStatus = true;
+      if (value == 429 || value == 503) {
+        _noteRateLimited(retryAfter: retryAfter);
+      } else if (value == 200 || value == 206) {
+        _noteRequestOk();
+      }
     }
 
     if (proxy != null) {
-      final text = await _httpGetText(uri, proxy: proxy);
-      if (text != null) {
+      final result = await _httpGetText(uri, proxy: proxy);
+      noteStatus(result.status, retryAfter: result.retryAfter);
+      if (result.text != null) {
         _markTmdbOnline('代理');
-        return text;
+        return result.text;
       }
-      if (_lastHttpStatus == 401 || _lastHttpStatus == 403) {
+      if (status == 401 || status == 403) {
         _markTmdbOnline('代理');
         lastSearchError = 'TMDB API Key 无效或已失效，请到 设置 → 刮削 重新填写';
         return null;
       }
       // 系统代理存在但实际上不通（代理软件已退出等）：本次运行不再尝试，
       // 直接走直连线路，避免每个条目都先等一次代理超时。
-      if (usingSystemProxy && _lastHttpStatus == 0) {
+      if (usingSystemProxy && status == 0) {
         ProxyResolver.disableSystemProxy();
         proxy = null;
       }
-      noteHttpStatus();
     }
 
-    bool keyRejected() => _lastHttpStatus == 401 || _lastHttpStatus == 403;
+    bool keyRejected() => status == 401 || status == 403;
 
     void rejectKey(String channel) {
       _markTmdbOnline(channel);
       lastSearchError = 'TMDB API Key 无效或已失效，请到 设置 → 刮削 重新填写';
     }
 
-    noteHttpStatus();
-    _lastHttpStatus = 0;
-    final body = await _sniGetBytes(_apiHost, pathAndQuery);
-    if (body != null) {
+    final sni = await _sniGetResult(_apiHost, pathAndQuery);
+    noteStatus(sni.status);
+    if (sni.bytes != null) {
       _markTmdbOnline('SNI 直连');
-      return utf8.decode(body, allowMalformed: true);
+      return utf8.decode(sni.bytes!, allowMalformed: true);
     }
     if (keyRejected()) {
       // 能收到 401 说明线路是通的，问题在密钥而不是网络。
@@ -496,26 +784,24 @@ class ScraperService {
 
     // api.tmdb.org 是 TMDB 的另一条 CloudFront 线路，域名未被污染时
     // 可直接 HTTPS 访问；这是实测最有效的免代理备用通道。
-    noteHttpStatus();
-    _lastHttpStatus = 0;
-    var text = await _httpGetText(
+    final altText = await _httpGetText(
       Uri.parse('https://$_apiAltHost$pathAndQuery'),
     );
-    if (text != null) {
+    noteStatus(altText.status, retryAfter: altText.retryAfter);
+    if (altText.text != null) {
       _markTmdbOnline('api.tmdb.org 直连');
-      return text;
+      return altText.text;
     }
     if (keyRejected()) {
       rejectKey('api.tmdb.org 直连');
       return null;
     }
 
-    noteHttpStatus();
-    _lastHttpStatus = 0;
-    final altBody = await _sniGetBytes(_apiAltHost, pathAndQuery);
-    if (altBody != null) {
+    final altSni = await _sniGetResult(_apiAltHost, pathAndQuery);
+    noteStatus(altSni.status);
+    if (altSni.bytes != null) {
       _markTmdbOnline('api.tmdb.org SNI');
-      return utf8.decode(altBody, allowMalformed: true);
+      return utf8.decode(altSni.bytes!, allowMalformed: true);
     }
     if (keyRejected()) {
       rejectKey('api.tmdb.org SNI');
@@ -523,13 +809,12 @@ class ScraperService {
     }
 
     // 端口 80 + 内置 IP + Host 头：绕过 SNI 阻断与污染 DNS。
-    noteHttpStatus();
-    _lastHttpStatus = 0;
     final plain = await _plainHttpGetViaIp(
       _apiHost,
       pathAndQuery,
       acceptAnyStatus: true,
     );
+    noteStatus(plain?.status ?? 0);
     if (plain?.bytes != null) {
       _markTmdbOnline('HTTP 直连');
       return utf8.decode(plain!.bytes!, allowMalformed: true);
@@ -539,13 +824,12 @@ class ScraperService {
       return null;
     }
 
-    noteHttpStatus();
-    _lastHttpStatus = 0;
     final altPlain = await _plainHttpGetViaIp(
       _apiAltHost,
       pathAndQuery,
       acceptAnyStatus: true,
     );
+    noteStatus(altPlain?.status ?? 0);
     if (altPlain?.bytes != null) {
       _markTmdbOnline('api.tmdb.org HTTP');
       return utf8.decode(altPlain!.bytes!, allowMalformed: true);
@@ -557,12 +841,11 @@ class ScraperService {
 
     // 部分地区没有 DNS 污染（或用户改了 hosts / 开了系统级 VPN），
     // 普通直连反而最稳，作为最后一条通道。
-    noteHttpStatus();
-    _lastHttpStatus = 0;
-    text = await _httpGetText(uri);
-    if (text != null) {
+    final direct = await _httpGetText(uri);
+    noteStatus(direct.status, retryAfter: direct.retryAfter);
+    if (direct.text != null) {
       _markTmdbOnline('普通直连');
-      return text;
+      return direct.text;
     }
     if (keyRejected()) {
       rejectKey('普通直连');
@@ -586,22 +869,24 @@ class ScraperService {
       }
     }
     final bust = DateTime.now().millisecondsSinceEpoch;
-    Future<String?> tryProxy({required bool withKey}) {
+    Future<String?> tryProxy({required bool withKey}) async {
       final all = <String>[
         if (withKey && (tmdbApiKey?.trim().isNotEmpty ?? false))
           'api_key=${tmdbApiKey!.trim()}',
         ...params,
         '_cb=$bust${withKey ? 'k' : 'n'}',
       ];
-      return _httpGetText(
+      final result = await _httpGetText(
         Uri.parse('https://$_apiProxyHost$basePath?${all.join('&')}'),
         timeout: const Duration(seconds: 20),
       );
+      noteStatus(result.status, retryAfter: result.retryAfter);
+      return result.text;
     }
 
     // 先不带 key（反代注入自己的）；反代要求 key（401）再带上重试
     var proxyText = await tryProxy(withKey: false);
-    if (proxyText == null && _lastHttpStatus == 401) {
+    if (proxyText == null && status == 401) {
       proxyText = await tryProxy(withKey: true);
     }
     if (proxyText != null) {
@@ -609,15 +894,13 @@ class ScraperService {
       return proxyText;
     }
 
-    noteHttpStatus();
-
     // 线路收到过 HTTP 响应（如 404/5xx）：网络是通的，属内容/节点层问题
     // （实测失效的 CloudFront 边缘节点会对有效路径回 404）。此时绝不进入
     // 离线冷却——否则一次瞬时异常会把整批任务连坐成"未匹配"；让调用方
     // 回退到搜索线路自行恢复。
     if (sawHttpStatus) {
       lastSearchError =
-          'TMDB 线路可达但返回 HTTP $_lastHttpStatus'
+          'TMDB 线路可达但返回 HTTP $status'
           '（可能为失效节点或反代异常），本条目未匹配，可重试';
       onLog?.call('  TMDB 请求失败：$lastSearchError');
       return null;
@@ -637,7 +920,10 @@ class ScraperService {
     lastSearchError = null;
   }
 
-  static Future<String?> _httpGetText(
+  /// 返回正文与本次状态码（429 时一并带回 Retry-After）。状态码不写
+  /// 全局变量：刮削任务并发时，多个请求会互相覆盖。
+  static Future<({String? text, int status, Duration? retryAfter})>
+  _httpGetText(
     Uri uri, {
     String? proxy,
     Duration timeout = const Duration(seconds: 10),
@@ -646,66 +932,63 @@ class ScraperService {
     try {
       final request = await client.getUrl(uri).timeout(timeout);
       final response = await request.close().timeout(timeout);
-      _lastHttpStatus = response.statusCode;
-      if (response.statusCode == 429 || response.statusCode == 503) {
-        _noteRateLimited(retryAfter: _retryAfterOf(response));
-      } else if (response.statusCode == 200) {
-        _noteRequestOk();
-      }
-      if (response.statusCode != 200) {
+      final status = response.statusCode;
+      if (status != 200) {
+        final retryAfter = _retryAfterOf(response);
         try {
           await response.drain<void>();
         } catch (_) {}
-        return null;
+        return (text: null, status: status, retryAfter: retryAfter);
       }
       final bytes = await _readLimited(response, 8 * 1024 * 1024, timeout);
-      return utf8.decode(bytes, allowMalformed: true);
+      return (
+        text: utf8.decode(bytes, allowMalformed: true),
+        status: status,
+        retryAfter: null,
+      );
     } catch (error) {
       _lastNetworkDetail = error.toString();
-      return null;
+      return (text: null, status: 0, retryAfter: null);
     } finally {
-      client.close(force: true);
+      // 共享 HttpClient 自带连接池，不逐请求关闭
     }
   }
 
-  static Future<List<int>?> _httpGetBytes(
+  /// 二进制请求（图片/头像等）。返回 bytes 与本次 HTTP 状态码，状态码
+  /// 交给调用方判定终态（404 等），不写全局 [_lastHttpStatus]——图片
+  /// 下载是并发的，共享状态会互相污染。
+  static Future<({List<int>? bytes, int status})> _httpGetBytes(
     Uri uri, {
     String? proxy,
     Duration timeout = const Duration(seconds: 15),
     int retries = 2,
   }) async {
+    var status = 0;
     for (var attempt = 0; attempt < retries; attempt++) {
-      if (attempt > 0) await _throttle();
+      if (attempt > 0) await _throttleImage();
       final client = _httpClient(proxy: proxy);
       try {
         final request = await client.getUrl(uri).timeout(timeout);
         final response = await request.close().timeout(timeout);
-        _lastHttpStatus = response.statusCode;
-        if (response.statusCode == 429 || response.statusCode == 503) {
-          _noteRateLimited(retryAfter: _retryAfterOf(response));
-        } else if (response.statusCode == 200) {
-          _noteRequestOk();
-        }
-        if (response.statusCode != 200) {
+        status = response.statusCode;
+        if (status != 200) {
           try {
             await response.drain<void>();
           } catch (_) {}
-          if (response.statusCode == 401 ||
-              response.statusCode == 403 ||
-              response.statusCode == 404) {
-            return null;
+          if (status == 401 || status == 403 || status == 404) {
+            return (bytes: null, status: status);
           }
           continue;
         }
         final bytes = await _readLimited(response, 20 * 1024 * 1024, timeout);
-        if (bytes.length >= 1024) return bytes;
+        if (bytes.length >= 1024) return (bytes: bytes, status: status);
       } catch (error) {
         _lastNetworkDetail = error.toString();
       } finally {
-        client.close(force: true);
+        // 共享 HttpClient 自带连接池，不逐请求关闭
       }
     }
-    return null;
+    return (bytes: null, status: status);
   }
 
   static Future<List<int>> _readLimited(
@@ -724,14 +1007,38 @@ class ScraperService {
   /// 通过「可用 IP + 域名 SNI」直连 CDN 并取回响应体（二进制）。
   /// 同一批候选 IP 并发探测，先返回可用者；失败节点短暂冷却，
   /// 避免每次请求都在死节点上串行等 6 秒。
-  static Future<List<int>?> _sniGetBytes(
+  ///
+  /// 状态码随响应一并带回、不写全局变量：并发取图/刮削时会互相覆盖。
+  static Future<({List<int>? bytes, int status})> _sniGetResult(
     String host,
     String pathAndQuery, {
     int maxBytes = 16 * 1024 * 1024,
     bool image = false,
   }) async {
-    await _ensureIpPool();
-    _lastHttpStatus = 0;
+    // 内置 IP 立即可用，IP 列表刷新放后台：镜像（jsDelivr 等）在国内
+    // 经常要等满 4 秒超时，不该让首个请求替它买单。
+    unawaited(_ensureIpPool());
+
+    // 优先复用长连接：省掉 TCP + TLS 握手（国内直连实测 300~400ms）
+    final pooled = _takePooledSni(host);
+    if (pooled != null) {
+      final attempt = await _attemptSni(
+        pooled.ip,
+        host,
+        pathAndQuery,
+        maxBytes: maxBytes,
+        image: image,
+        pooled: pooled,
+        timeout: image
+            ? const Duration(seconds: 12)
+            : const Duration(seconds: 5),
+      );
+      if (attempt.bytes != null || attempt.status != null) {
+        return _acceptSniResult(host, attempt);
+      }
+      // 连接被服务端回收等情况：落到下面重新建连
+    }
+
     final candidates = _candidateIps(host);
     final result = candidates.isEmpty
         ? null
@@ -751,7 +1058,7 @@ class ScraperService {
         .where((ip) => !candidates.contains(ip))
         .take(8)
         .toList();
-    if (dnsIps.isEmpty) return null;
+    if (dnsIps.isEmpty) return (bytes: null, status: 0);
     final dnsResult = await _sniTryIps(
       host,
       dnsIps,
@@ -759,7 +1066,9 @@ class ScraperService {
       maxBytes: maxBytes,
       image: image,
     );
-    return dnsResult == null ? null : _acceptSniResult(host, dnsResult);
+    return dnsResult == null
+        ? (bytes: null, status: 0)
+        : _acceptSniResult(host, dnsResult);
   }
 
   /// 分批竞速尝试一组 IP，命中即返回。
@@ -788,25 +1097,28 @@ class ScraperService {
   /// 记录命中节点并返回响应；收到任何 HTTP 状态码都说明该节点可用，
   /// 401/403/404 等是内容层问题，换 IP 也不会变，交上层处理。
   ///
-  /// 例外：非 200/206 的状态不把该 IP 记为「首选」并短暂冷却——
-  /// 实测失效的 CloudFront 边缘节点会对有效路径回 404，若记为首选
-  /// 会导致后续请求全部优先命中这个坏节点，恶性循环。
-  static List<int>? _acceptSniResult(String host, _SniAttempt result) {
+  /// 4xx 不冷却该 IP：缺失的图片/无效的 key 会让健康节点回 404，拉黑它
+  /// 只会让后续请求重新竞速、逐渐把可用节点全部冷却掉。失效边缘节点
+  /// 对有效路径回 404 的情况由 [_raceSni] 的弱结果窗口兜住。
+  static ({List<int>? bytes, int status}) _acceptSniResult(
+    String host,
+    _SniAttempt result,
+  ) {
     final status = result.status;
-    if (status != null && status != 200 && status != 206) {
+    final contentLevel = status != null && status >= 300 && status < 500;
+    if (contentLevel) {
+      _preferredIp[host] = result.ip;
+      _ipCooldown.remove(result.ip);
+    } else if (status != null && status != 200 && status != 206) {
       _preferredIp.remove(host);
       _ipCooldown[result.ip] = DateTime.now().add(const Duration(minutes: 3));
     } else {
       _preferredIp[host] = result.ip;
       _ipCooldown.remove(result.ip);
     }
-    _lastHttpStatus = status ?? 200;
-    if (status == 429 || status == 503) {
-      _noteRateLimited();
-    } else if (status == 200 || status == 206) {
-      _noteRequestOk();
-    }
-    return result.bytes;
+    final conn = result.conn;
+    if (conn != null) _releasePooledSni(conn);
+    return (bytes: result.bytes, status: status ?? 200);
   }
 
   static Future<_SniAttempt?> _raceSni(
@@ -818,16 +1130,46 @@ class ScraperService {
   }) {
     final completer = Completer<_SniAttempt?>();
     var pending = ips.length;
+    _SniAttempt? weak;
+    Timer? grace;
+
+    void settle() {
+      if (completer.isCompleted) return;
+      if (pending == 0) {
+        grace?.cancel();
+        completer.complete(weak);
+      }
+    }
 
     void finish(_SniAttempt? attempt) {
-      if (completer.isCompleted) return;
-      if (attempt != null &&
-          (attempt.bytes != null || attempt.status != null)) {
+      if (completer.isCompleted) {
+        // 落败的并发尝试：连接不再需要，立即关掉，避免泄漏
+        attempt?.conn?.close();
+        return;
+      }
+      if (attempt != null && attempt.bytes != null) {
+        grace?.cancel();
+        // 之前暂存的弱结果让位给健康节点
+        weak?.conn?.close();
+        weak = null;
         completer.complete(attempt);
         return;
       }
+      if (attempt != null && attempt.status != null) {
+        // 只拿到状态码（4xx/5xx）：先记为弱结果，给并发节点一个很短的
+        // 窗口。实测失效的 CloudFront 边缘节点会对有效路径回 404，
+        // 直接采信会把健康节点返回的 200 挡在门外，也误伤缺失图片。
+        if (weak == null) {
+          weak = attempt;
+          grace ??= Timer(const Duration(milliseconds: 600), () {
+            if (!completer.isCompleted) completer.complete(weak);
+          });
+        } else {
+          attempt.conn?.close();
+        }
+      }
       pending--;
-      if (pending == 0) completer.complete(null);
+      settle();
     }
 
     for (final ip in ips) {
@@ -850,65 +1192,55 @@ class ScraperService {
     String pathAndQuery, {
     required int maxBytes,
     required bool image,
+    _KeepAliveConn? pooled,
+    Duration timeout = const Duration(seconds: 20),
   }) async {
-    Socket? raw;
-    Socket? secure;
+    final reuse = pooled != null;
+    var conn = pooled;
     try {
-      raw = await Socket.connect(ip, 443).timeout(const Duration(seconds: 5));
-      secure = await SecureSocket.secure(
-        raw,
-        host: host,
-      ).timeout(const Duration(seconds: 6));
-      final response = await _sniRequest(
-        secure,
-        host,
-        pathAndQuery,
+      if (conn == null) {
+        final raw = await Socket.connect(
+          ip,
+          443,
+        ).timeout(const Duration(seconds: 5));
+        final secure = await SecureSocket.secure(
+          raw,
+          host: host,
+        ).timeout(const Duration(seconds: 6));
+        conn = _KeepAliveConn(
+          host: host,
+          ip: ip,
+          socket: secure,
+          iterator: StreamIterator<List<int>>(secure),
+          userAgent: _userAgent,
+        );
+      }
+      conn.send(pathAndQuery, image: image);
+      final response = await conn.readResponse(
         maxBytes: maxBytes,
-        image: image,
+        timeout: timeout,
       );
       if (response == null) {
-        _ipCooldown[ip] = DateTime.now().add(const Duration(minutes: 3));
+        await conn.close();
+        // 复用连接被服务端回收不算 IP 故障，不冷却
+        if (!reuse) {
+          _ipCooldown[ip] = DateTime.now().add(const Duration(minutes: 3));
+        }
         return _SniAttempt(ip: ip, error: 'empty response');
       }
       return _SniAttempt(
         ip: ip,
         status: response.status,
         bytes: response.status == 200 ? response.body : null,
+        conn: conn,
       );
     } catch (error) {
-      _ipCooldown[ip] = DateTime.now().add(const Duration(minutes: 2));
+      await conn?.close();
+      if (!reuse) {
+        _ipCooldown[ip] = DateTime.now().add(const Duration(minutes: 2));
+      }
       return _SniAttempt(ip: ip, error: error.toString());
-    } finally {
-      try {
-        await secure?.close();
-      } catch (_) {}
-      try {
-        await raw?.close();
-      } catch (_) {}
     }
-  }
-
-  static Future<({int status, List<int> body})?> _sniRequest(
-    Socket secure,
-    String host,
-    String pathAndQuery, {
-    required int maxBytes,
-    required bool image,
-  }) async {
-    secure.write(
-      'GET $pathAndQuery HTTP/1.1\r\n'
-      'Host: $host\r\n'
-      'User-Agent: $_userAgent\r\n'
-      'Accept: ${image ? 'image/avif,image/webp,image/*,*/*;q=0.8' : 'application/json,*/*'}\r\n'
-      'Accept-Encoding: identity\r\n'
-      'Connection: close\r\n\r\n',
-    );
-    final bytes = <int>[];
-    await for (final chunk in secure.timeout(const Duration(seconds: 20))) {
-      bytes.addAll(chunk);
-      if (bytes.length > maxBytes) break;
-    }
-    return _parseHttpBytes(bytes);
   }
 
   /// 解析手写的 HTTP 响应：返回状态码与（chunked 解码后的）原始正文。
@@ -938,6 +1270,45 @@ class ScraperService {
       }
     }
     return -1;
+  }
+
+  /// 严格解析 chunked 正文：数据不完整返回 null（等待更多字节）。
+  /// [start] 指向 chunked 正文的第一个字节；consumed 含结尾 0\r\n\r\n。
+  static ({List<int> body, int consumed})? _tryDecodeChunked(
+    List<int> bytes,
+    int start,
+  ) {
+    final body = <int>[];
+    var offset = start;
+    while (true) {
+      var lineEnd = -1;
+      for (var i = offset; i + 1 < bytes.length; i++) {
+        if (bytes[i] == 13 && bytes[i + 1] == 10) {
+          lineEnd = i;
+          break;
+        }
+      }
+      if (lineEnd < 0) return null;
+      final sizeText = latin1.decode(bytes.sublist(offset, lineEnd)).trim();
+      final size = int.tryParse(sizeText.split(';').first, radix: 16);
+      if (size == null) return null;
+      final dataStart = lineEnd + 2;
+      if (size == 0) {
+        // 结尾块：0\r\n\r\n（无 trailer）或 0\r\n<trailer>\r\n\r\n
+        if (dataStart + 1 >= bytes.length) return null;
+        if (bytes[dataStart] == 13 && bytes[dataStart + 1] == 10) {
+          return (body: body, consumed: dataStart + 2);
+        }
+        final trailerEnd = _findHeaderEnd(bytes.sublist(dataStart));
+        if (trailerEnd < 0) return null;
+        return (body: body, consumed: dataStart + trailerEnd + 4);
+      }
+      final end = dataStart + size;
+      if (end + 1 >= bytes.length) return null;
+      if (bytes[end] != 13 || bytes[end + 1] != 10) return null;
+      body.addAll(bytes.sublist(dataStart, end));
+      offset = end + 2;
+    }
   }
 
   static List<int> _decodeChunkedBytes(List<int> bytes) {
@@ -1374,7 +1745,7 @@ class ScraperService {
     );
     final client = _httpClient();
     try {
-      await _throttle();
+      await _throttleTvmaze();
       final request = await client.getUrl(url);
       final response = await request.close().timeout(
         const Duration(seconds: 12),
@@ -1425,7 +1796,7 @@ class ScraperService {
       _lastNetworkDetail = error.toString();
       return const [];
     } finally {
-      client.close(force: true);
+      // 共享 HttpClient 自带连接池，不逐请求关闭
     }
   }
 
@@ -1614,7 +1985,7 @@ class ScraperService {
     final url = Uri.parse('https://api.tvmaze.com/shows/$id?embed=cast');
     final client = _httpClient();
     try {
-      await _throttle();
+      await _throttleTvmaze();
       final request = await client.getUrl(url);
       final response = await request.close().timeout(
         const Duration(seconds: 12),
@@ -1682,7 +2053,7 @@ class ScraperService {
       _lastNetworkDetail = error.toString();
       return null;
     } finally {
-      client.close(force: true);
+      // 共享 HttpClient 自带连接池，不逐请求关闭
     }
   }
 
@@ -1777,7 +2148,7 @@ class ScraperService {
     );
     final client = _httpClient();
     try {
-      await _throttle();
+      await _throttleTvmaze();
       final request = await client.getUrl(url);
       final response = await request.close().timeout(
         const Duration(seconds: 12),
@@ -1829,7 +2200,7 @@ class ScraperService {
       _lastNetworkDetail = error.toString();
       return null;
     } finally {
-      client.close(force: true);
+      // 共享 HttpClient 自带连接池，不逐请求关闭
     }
   }
 
@@ -1863,6 +2234,15 @@ class ScraperService {
 
   static String _lastImageChannel = '';
 
+  /// 404/410 是内容层结论（这张图本来就不存在），换线路也没用。
+  static bool _isMissingImageStatus(int status) =>
+      status == 404 || status == 410;
+
+  static void _rememberMissingImage(String url) {
+    if (_missingImages.length >= _missingImagesMax) _missingImages.clear();
+    _missingImages.add(url);
+  }
+
   static String _imageProxyUrl(Uri uri, {String host = 'images.weserv.nl'}) {
     final width = RegExp(r'/t/p/(w\d+)/').firstMatch(uri.path)?.group(1);
     final query = <String>[
@@ -1884,7 +2264,7 @@ class ScraperService {
     bool image = false,
     bool acceptAnyStatus = false,
   }) async {
-    await _ensureIpPool();
+    unawaited(_ensureIpPool());
     var candidates = _candidateIps(host).take(8).toList();
     if (candidates.isEmpty) {
       candidates = (await _resolveDnsIps(host)).take(8).toList();
@@ -1905,12 +2285,10 @@ class ScraperService {
       );
       if (attempt?.bytes != null) {
         _preferredIp[host] = attempt!.ip;
-        _lastHttpStatus = attempt.status ?? 200;
         return attempt;
       }
       if (acceptAnyStatus && attempt?.status != null) {
         _preferredIp[host] = attempt!.ip;
-        _lastHttpStatus = attempt.status!;
         return attempt;
       }
     }
@@ -1949,16 +2327,34 @@ class ScraperService {
   }) {
     final completer = Completer<_SniAttempt?>();
     var pending = ips.length;
+    _SniAttempt? weak;
+    Timer? grace;
+
+    void settle() {
+      if (completer.isCompleted) return;
+      if (pending == 0) {
+        grace?.cancel();
+        completer.complete(acceptAnyStatus ? weak : null);
+      }
+    }
 
     void finish(_SniAttempt? attempt) {
       if (completer.isCompleted) return;
-      if (attempt?.bytes != null ||
-          (acceptAnyStatus && attempt?.status != null)) {
+      if (attempt?.bytes != null) {
+        grace?.cancel();
         completer.complete(attempt);
         return;
       }
+      if (acceptAnyStatus && attempt?.status != null) {
+        // 与 SNI 竞速同规则：状态码先记为弱结果，给并发 IP 一个短窗口，
+        // 让能返回 200 的节点优先（缺失图片 404 也能尽快定论）。
+        weak ??= attempt;
+        grace ??= Timer(const Duration(milliseconds: 600), () {
+          if (!completer.isCompleted) completer.complete(weak);
+        });
+      }
       pending--;
-      if (pending == 0) completer.complete(null);
+      settle();
     }
 
     for (final ip in ips) {
@@ -2016,14 +2412,18 @@ class ScraperService {
     }
   }
 
-  static Future<List<int>?> _plainHttpImageViaIp(Uri uri) async {
+  static Future<({List<int>? bytes, int status})> _plainHttpImageViaIp(
+    Uri uri,
+  ) async {
     final attempt = await _plainHttpGetViaIp(
       uri.host,
       _pathAndQuery(uri),
       maxBytes: 20 * 1024 * 1024,
       image: true,
+      // 把 404 也带出来：缺失的图片可以立刻定论，不必再逐条试线路
+      acceptAnyStatus: true,
     );
-    return attempt?.bytes;
+    return (bytes: attempt?.bytes, status: attempt?.status ?? 0);
   }
 
   /// 免代理直连线路名（与探测排序、诊断展示共用）。
@@ -2052,8 +2452,30 @@ class ScraperService {
   static List<String>? _imageChannelOrder;
   static bool _imageChannelProbeDone = false;
 
+  /// 线路连续失败计数：某条线路连续 3 次失败后调到队尾，
+  /// 避免一条中途失效的线路让后续每张图都先等一次超时。
+  static final Map<String, int> _imageChannelFailStreak = {};
+  static const _imageFailDemoteAt = 3;
+
+  static void _noteImageChannelResult(String channel, {required bool ok}) {
+    if (ok) {
+      _imageChannelFailStreak[channel] = 0;
+      return;
+    }
+    final streak = (_imageChannelFailStreak[channel] ?? 0) + 1;
+    _imageChannelFailStreak[channel] = streak;
+    final order = _imageChannelOrder;
+    if (streak >= _imageFailDemoteAt && order != null) {
+      _imageChannelOrder = List<String>.of(order)
+        ..remove(channel)
+        ..add(channel);
+      _imageChannelFailStreak[channel] = 0;
+    }
+  }
+
   /// 执行指定取图线路（不校验内容，校验由调用方 accept 负责）。
-  static Future<List<int>?> _runImageChannel(
+  /// 返回响应体与状态码，状态码用于判定 404 等终态。
+  static Future<({List<int>? bytes, int status})> _runImageChannel(
     String channel, {
     required Uri uri,
     required String path,
@@ -2068,7 +2490,7 @@ class ScraperService {
           retries: 1,
         );
       case _chBunnySni:
-        return _sniGetBytes(
+        return _sniGetResult(
           _imageCdnHost,
           path,
           maxBytes: maxBytes,
@@ -2077,7 +2499,7 @@ class ScraperService {
       case _chPlainHttp:
         return _plainHttpImageViaIp(uri);
       case _chSni:
-        return _sniGetBytes(_imageHost, path, maxBytes: maxBytes, image: true);
+        return _sniGetResult(_imageHost, path, maxBytes: maxBytes, image: true);
       case _chHttps:
         return _httpGetBytes(
           uri,
@@ -2098,7 +2520,9 @@ class ScraperService {
           timeout: const Duration(seconds: 15),
           retries: 1,
         );
-        if (first != null) return first;
+        if (first.bytes != null || _isMissingImageStatus(first.status)) {
+          return first;
+        }
         return _httpGetBytes(
           Uri.parse(_imageProxyUrl(uri, host: 'wsrv.nl')),
           timeout: const Duration(seconds: 15),
@@ -2113,14 +2537,21 @@ class ScraperService {
           retries: 1,
         );
     }
-    return null;
+    return (bytes: null, status: 0);
   }
 
   /// 首次取图前并行探测各线路（同一张 w92 小图，~3KB），按实测耗时
   /// 排序缓存；失败的线路排到最后。并行跑总耗时≈最慢线路，
   /// 每次运行只测一次。全部失败时保持默认顺序。
-  static Future<void> _probeImageChannels() async {
-    if (_imageChannelProbeDone) return;
+  static Future<void>? _imageProbeTask;
+
+  static Future<void> _probeImageChannels() {
+    if (_imageChannelProbeDone) return Future<void>.value();
+    // 预热与首张图共用同一次测速，避免重复探测或各测各的
+    return _imageProbeTask ??= _runImageChannelProbe();
+  }
+
+  static Future<void> _runImageChannelProbe() async {
     _imageChannelProbeDone = true;
     const sample = '/t/p/w92/zxfBtHz5UmSTfIEC4O4GngyjHwa.jpg';
     final sampleUri = Uri.parse('https://$_imageHost$sample');
@@ -2129,12 +2560,13 @@ class ScraperService {
       _defaultImageChannels.map((channel) async {
         final watch = Stopwatch()..start();
         try {
-          final bytes = await _runImageChannel(
+          final result = await _runImageChannel(
             channel,
             uri: sampleUri,
             path: sample,
             maxBytes: 1 << 20,
           ).timeout(const Duration(seconds: 6));
+          final bytes = result.bytes;
           if (bytes != null && bytes.length >= 1024) {
             timings[channel] = watch.elapsedMilliseconds;
           }
@@ -2152,9 +2584,21 @@ class ScraperService {
     _imageChannelOrder = [...sorted, ...failed];
   }
 
+  /// 预热：后台刷新直连 IP 池与取图线路测速。刮削开始时调用，
+  /// 让第一批图片命中已经测好的线路，而不是在第一张图上现测。
+  static Future<void> warmUp() async {
+    unawaited(_ensureIpPool());
+    try {
+      await _probeImageChannels();
+    } catch (_) {
+      // 预热失败不影响正常流程，取图时会重新测速
+    }
+  }
+
   /// 免代理取图：首次先并行测速各线路选最快的，随后按实测顺序
   /// 逐条尝试；代理可用时先走代理，但代理不通也不会挡住直连线路。
-  static Future<List<int>?> _fetchTmdbImage(
+  /// 返回响应体与最后一条线路的状态码（供失败日志说明原因）。
+  static Future<({List<int>? bytes, int status})> _fetchTmdbImage(
     Uri uri, {
     String? proxy,
     int maxBytes = 20 * 1024 * 1024,
@@ -2169,23 +2613,28 @@ class ScraperService {
         return null;
       }
       _lastImageChannel = channel;
-      _lastHttpStatus = 200;
       return bytes;
     }
 
     if (proxy != null) {
-      await _throttle();
-      final bytes = await _httpGetBytes(
+      await _throttleImage();
+      final result = await _httpGetBytes(
         uri,
         proxy: proxy,
         timeout: const Duration(seconds: 12),
         retries: 1,
       );
-      if (bytes != null && _looksLikeImage(bytes)) {
+      final proxied = result.bytes;
+      if (proxied != null && _looksLikeImage(proxied)) {
         _lastImageChannel = '代理';
-        return bytes;
+        return (bytes: proxied, status: result.status);
       }
-      if (usingSystemProxy && _lastHttpStatus == 0) {
+      // 代理明确回了 404：图不存在，不要再逐条试直连线路。
+      if (_isMissingImageStatus(result.status)) {
+        _rememberMissingImage(uri.toString());
+        return result;
+      }
+      if (usingSystemProxy && result.status == 0) {
         ProxyResolver.disableSystemProxy();
       }
     }
@@ -2194,27 +2643,47 @@ class ScraperService {
     await _probeImageChannels();
     final order = _imageChannelOrder ?? _defaultImageChannels;
 
-    List<int>? bytes;
+    // 单张图的整体预算：卡死的线路（端口被吞、DNS 污染超时）不该让
+    // 一张图等十几秒。真实图片通常在前两条线路就拿到，超时即放弃，
+    // 下次重刮会重新尝试。
+    final deadline = DateTime.now().add(const Duration(seconds: 10));
+    var lastStatus = 0;
     for (final channel in order) {
-      await _throttle();
-      bytes = accept(
-        await _runImageChannel(
-          channel,
-          uri: uri,
-          path: path,
-          maxBytes: maxBytes,
-        ),
+      if (DateTime.now().isAfter(deadline)) {
+        onLog?.call('  取图超时，跳过本张：${uri.path.split('/').last}');
+        return (bytes: null, status: lastStatus);
+      }
+      await _throttleImage();
+      final result = await _runImageChannel(
         channel,
+        uri: uri,
+        path: path,
+        maxBytes: maxBytes,
       );
-      if (bytes != null) return bytes;
+      if (result.status != 0) lastStatus = result.status;
+      final bytes = accept(result.bytes, channel);
+      if (bytes != null) {
+        _noteImageChannelResult(channel, ok: true);
+        return result;
+      }
+      // 任一条线路拿到 404/410 即可下结论：图片在 CDN 上不存在。
+      // 继续换线路只是把同一个「没有」重复等十几秒（实测 17~23 秒/张）。
+      if (_isMissingImageStatus(result.status)) {
+        _rememberMissingImage(uri.toString());
+        return result;
+      }
+      _noteImageChannelResult(channel, ok: false);
     }
-    return null;
+    return (bytes: null, status: lastStatus);
   }
 
   /// 非 TMDB 图片（如 TVmaze）的免代理通道：HTTP/IP 直连、
   /// 普通 HTTPS、HTTP 以及图片加速节点逐级兜底。
-  static Future<List<int>?> _fetchOtherImage(Uri uri, {String? proxy}) async {
-    await _throttle();
+  static Future<({List<int>? bytes, int status})> _fetchOtherImage(
+    Uri uri, {
+    String? proxy,
+  }) async {
+    await _throttleImage();
     List<int>? accept(List<int>? bytes) {
       if (bytes == null || bytes.length < 1024 || !_looksLikeImage(bytes)) {
         return null;
@@ -2222,39 +2691,45 @@ class ScraperService {
       return bytes;
     }
 
-    List<int>? bytes;
-    if (uri.host.endsWith('tvmaze.com')) {
-      bytes = accept(await _plainHttpImageViaIp(uri));
-      if (bytes != null) return bytes;
+    bool missing(({List<int>? bytes, int status}) result) {
+      if (!_isMissingImageStatus(result.status)) return false;
+      _rememberMissingImage(uri.toString());
+      return true;
     }
-    bytes = accept(
-      await _httpGetBytes(
-        uri,
-        proxy: proxy,
-        timeout: const Duration(seconds: 10),
-        retries: 1,
-      ),
+
+    ({List<int>? bytes, int status}) result = (bytes: null, status: 0);
+    if (uri.host.endsWith('tvmaze.com')) {
+      result = await _plainHttpImageViaIp(uri);
+      final bytes = accept(result.bytes);
+      if (bytes != null) return result;
+      if (missing(result)) return result;
+    }
+    result = await _httpGetBytes(
+      uri,
+      proxy: proxy,
+      timeout: const Duration(seconds: 10),
+      retries: 1,
     );
-    if (bytes != null) return bytes;
-    bytes = accept(await _plainHttpImageViaIp(uri));
-    if (bytes != null) return bytes;
-    bytes = accept(
-      await _httpGetBytes(
-        uri.replace(scheme: 'http'),
-        timeout: const Duration(seconds: 12),
-        retries: 1,
-      ),
+    final direct = accept(result.bytes);
+    if (direct != null) return result;
+    if (missing(result)) return result;
+    result = await _plainHttpImageViaIp(uri);
+    final viaIp = accept(result.bytes);
+    if (viaIp != null) return result;
+    if (missing(result)) return result;
+    result = await _httpGetBytes(
+      uri.replace(scheme: 'http'),
+      timeout: const Duration(seconds: 12),
+      retries: 1,
     );
-    if (bytes != null) return bytes;
-    bytes = accept(
-      await _httpGetBytes(
-        Uri.parse(_imageProxyUrl(uri)),
-        timeout: const Duration(seconds: 15),
-        retries: 1,
-      ),
+    final plain = accept(result.bytes);
+    if (plain != null) return result;
+    if (missing(result)) return result;
+    return _httpGetBytes(
+      Uri.parse(_imageProxyUrl(uri)),
+      timeout: const Duration(seconds: 15),
+      retries: 1,
     );
-    if (bytes != null) return bytes;
-    return null;
   }
 
   /// 局域网/本机地址，图片直连不走代理。
@@ -2286,27 +2761,30 @@ class ScraperService {
     final file = File('${dir.path}/$safeKey.jpg');
     if (file.existsSync() && file.lengthSync() > 1024) return file.path;
 
+    // 本轮已确认不存在的图（404）：后续重试直接跳过，不再空等线路超时。
+    if (_missingImages.contains(url)) return null;
+
     final uri = Uri.parse(url);
     final isTmdbImage = uri.host == _imageHost || uri.host == _imageCdnHost;
     // 内网服务器（Jellyfin/Emby 等）直连，避免被刮削代理绕出去。
     final proxy = _isLocalImageHost(uri.host) ? null : await _activeProxy();
-    List<int>? bytes;
+    ({List<int>? bytes, int status}) result = (bytes: null, status: 0);
     _lastNetworkDetail = null;
-    _lastHttpStatus = 0;
 
     try {
-      if (isTmdbImage) {
-        bytes = await _fetchTmdbImage(uri, proxy: proxy);
-      } else {
-        bytes = await _fetchOtherImage(uri, proxy: proxy);
-      }
+      result = isTmdbImage
+          ? await _fetchTmdbImage(uri, proxy: proxy)
+          : await _fetchOtherImage(uri, proxy: proxy);
     } catch (error) {
       _lastNetworkDetail = error.toString();
-      bytes = null;
     }
+    final bytes = result.bytes;
 
     if (bytes == null || bytes.length < 1024 || !_looksLikeImage(bytes)) {
-      onLog?.call('  下载图片失败 $cacheKey：${_networkHint()}');
+      final hint = result.status != 0
+          ? 'HTTP ${result.status}'
+          : _networkHint();
+      onLog?.call('  下载图片失败 $cacheKey：$hint');
       return null;
     }
 
@@ -2330,6 +2808,9 @@ class ScraperService {
     lastSearchError = null;
     _lastNetworkDetail = null;
     _lastHttpStatus = 0;
+    // 「检测线路」必须真的走网络：清掉缓存，避免命中上次的成功结果
+    // 造成线路可用的假象。
+    _getCache.clear();
 
     final proxy = await _activeProxy();
     final explicitProxy = (proxyAddress ?? '').trim();
@@ -2360,17 +2841,18 @@ class ScraperService {
     final probeUri = Uri.parse(
       probeUrl ?? 'https://$_imageHost/t/p/w92/zxfBtHz5UmSTfIEC4O4GngyjHwa.jpg',
     );
-    final imageBytes = await _fetchTmdbImage(
+    final imageResult = await _fetchTmdbImage(
       probeUri,
       proxy: proxy,
       maxBytes: 2 * 1024 * 1024,
     );
+    final imageBytes = imageResult.bytes;
     final imageOk = imageBytes != null;
     final imageDetail = imageOk
         ? '成功：${imageBytes.length ~/ 1024} KB'
               '（${watch.elapsedMilliseconds} ms，'
               '${_lastImageChannel.isEmpty ? '未知' : _lastImageChannel}）'
-        : '失败：${_networkHint()}'
+        : '失败：${imageResult.status != 0 ? 'HTTP ${imageResult.status}' : _networkHint()}'
               '（${watch.elapsedMilliseconds} ms）';
 
     return ScrapeDiagnostics(
@@ -2415,6 +2897,14 @@ class ScraperService {
     _dynamicIps.clear();
     _preferredIp.clear();
     _ipCooldown.clear();
+    _getCache.clear();
+    _missingImages.clear();
+    _closeSniPool();
+    _closeSharedClient();
+    _imageChannelFailStreak.clear();
+    _imageChannelProbeDone = false;
+    _imageChannelOrder = null;
+    _imageProbeTask = null;
     _ipListRefreshedAt = DateTime.fromMillisecondsSinceEpoch(0);
     _ipRefreshAttemptedAt = DateTime.fromMillisecondsSinceEpoch(0);
     _ipRefreshTask = null;
@@ -2423,28 +2913,61 @@ class ScraperService {
     return (files: files, bytes: bytes);
   }
 
+  /// 图片请求的节流：图片走图片 CDN（Bunny/反代），不吃 TMDB API 的
+  /// 配额，不需要跟 API 共用一个间隔；留一个很小的间隔只为避免瞬间
+  /// 打出几十个连接。取图已改为并发下载，这里不能按 API 的 260ms 卡。
+  static const _minImageGap = Duration(milliseconds: 60);
+  static DateTime _lastImageRequest = DateTime.fromMillisecondsSinceEpoch(0);
+
+  static Future<void> _throttleImage() async {
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastImageRequest);
+    if (elapsed < _minImageGap) {
+      await Future<void>.delayed(_minImageGap - elapsed);
+    }
+    _lastImageRequest = DateTime.now();
+  }
+
   static Future<void> _throttle() async {
     // 被限流时全局暂停：等 Retry-After / 退避结束再发下一条请求，
     // 避免撞上服务端封控（Jellyfin / Emby 也是统一节流而非并发猛拉）。
-    final gate = _rateLimitedUntil;
-    if (gate != null) {
-      final wait = gate.difference(DateTime.now());
-      if (wait > Duration.zero) {
-        final capped = wait > _maxRateLimitWait ? _maxRateLimitWait : wait;
-        onLog?.call('  限流冷却中，暂停 ${capped.inSeconds} 秒');
-        await Future<void>.delayed(capped);
-      }
-      if (_rateLimitedUntil != null &&
-          !_rateLimitedUntil!.isAfter(DateTime.now())) {
-        _rateLimitedUntil = null;
-      }
-    }
+    await _waitRateLimitGate();
     final now = DateTime.now();
     final elapsed = now.difference(_lastRequest);
     if (elapsed < _requestGap) {
       await Future<void>.delayed(_requestGap - elapsed);
     }
     _lastRequest = DateTime.now();
+  }
+
+  /// TVmaze 的公开接口建议不超过 2 次/秒；它只在 TMDB 缺失/不可用时
+  /// 兜底，不该被 TMDB 的快节奏带着走。
+  static const _tvmazeGap = Duration(milliseconds: 1000);
+  static DateTime _lastTvmazeRequest = DateTime.fromMillisecondsSinceEpoch(0);
+
+  static Future<void> _throttleTvmaze() async {
+    await _waitRateLimitGate();
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastTvmazeRequest);
+    if (elapsed < _tvmazeGap) {
+      await Future<void>.delayed(_tvmazeGap - elapsed);
+    }
+    _lastTvmazeRequest = DateTime.now();
+  }
+
+  static Future<void> _waitRateLimitGate() async {
+    final gate = _rateLimitedUntil;
+    if (gate == null) return;
+    final wait = gate.difference(DateTime.now());
+    if (wait > Duration.zero) {
+      final capped = wait > _maxRateLimitWait ? _maxRateLimitWait : wait;
+      onLog?.call('  限流冷却中，暂停 ${capped.inSeconds} 秒');
+      await Future<void>.delayed(capped);
+    }
+    if (_rateLimitedUntil != null &&
+        !_rateLimitedUntil!.isAfter(DateTime.now())) {
+      _rateLimitedUntil = null;
+    }
   }
 
   /// 收到 429/503 时记录全局冷却，并按指数退避放慢后续请求。
